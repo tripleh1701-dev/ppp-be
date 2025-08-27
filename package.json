@@ -1,0 +1,26 @@
+{
+  "name": "devops-automate-be",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend APIs for DevOps Automate (NestJS + TypeScript)",
+  "scripts": {
+    "dev": "ts-node-dev --respawn --transpile-only src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^10.3.2",
+    "@nestjs/core": "^10.3.2",
+    "@nestjs/platform-express": "^10.3.2",
+    "dotenv": "^16.4.5",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "@types/uuid": "^10.0.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}

@@ -1,0 +1,7 @@
+# Backend repo ignores
+.env.local
+.DS_Store
+node_modules/
+dist/
+.next/
+coverage/
