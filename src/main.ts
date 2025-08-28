@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import {NestFactory} from '@nestjs/core';
 import {Module} from '@nestjs/common';
-import {Controller, Get, Post, Put, Delete, Param, Body} from '@nestjs/common';
+import {Controller, Get, Post, Put, Delete, Param, Body, Query} from '@nestjs/common';
 import dotenv from 'dotenv';
 import path from 'path';
 import {AccountsService} from './services/accounts';
@@ -13,6 +13,7 @@ import {TemplatesService} from './services/templates';
 import {PipelineYamlService} from './services/pipelineYaml';
 import {GlobalSettingsService} from './services/globalSettings';
 import {PipelineConfigService} from './services/pipelineConfig';
+
 
 dotenv.config();
 
