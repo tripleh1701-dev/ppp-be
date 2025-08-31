@@ -11,8 +11,11 @@ import {UsersService} from './services/users';
 import {UserGroupsService} from './services/userGroups';
 import {TemplatesService} from './services/templates';
 import {PipelineYamlService} from './services/pipelineYaml';
-import {GlobalSettingsService} from './services/globalSettings';
 import {PipelineConfigService} from './services/pipelineConfig';
+import {ServicesService} from './services/services';
+import {ProductsService} from './services/products';
+import {EnterpriseProductsServicesService} from './services/enterpriseProductsServices';
+import {testConnection} from './db';
 
 
 dotenv.config();
@@ -20,6 +23,20 @@ dotenv.config();
 const STORAGE_DIR = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
     : path.join(process.cwd(), 'data');
+
+// Sample geo data
+const GEO_DATA: Record<string, Record<string, string[]>> = {
+    'US': {
+        'CA': ['Los Angeles', 'San Francisco', 'San Diego'],
+        'NY': ['New York City', 'Buffalo', 'Albany'],
+        'TX': ['Houston', 'Dallas', 'Austin']
+    },
+    'UK': {
+        'England': ['London', 'Manchester', 'Birmingham'],
+        'Scotland': ['Edinburgh', 'Glasgow', 'Aberdeen'],
+        'Wales': ['Cardiff', 'Swansea', 'Newport']
+    }
+};
 
 // Providers (plain classes)
 const accounts = new AccountsService(STORAGE_DIR);
@@ -29,8 +46,10 @@ const users = new UsersService(STORAGE_DIR);
 const userGroups = new UserGroupsService(STORAGE_DIR);
 const templates = new TemplatesService(STORAGE_DIR);
 const pipelineYaml = new PipelineYamlService(STORAGE_DIR);
-const globalSettings = new GlobalSettingsService(STORAGE_DIR);
 const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
+const services = new ServicesService(STORAGE_DIR);
+const products = new ProductsService(STORAGE_DIR);
+const enterpriseProductsServices = new EnterpriseProductsServicesService(STORAGE_DIR);
 
 @Controller('health')
 class HealthController {
@@ -47,7 +66,10 @@ class AccountsController {
         return await accounts.list();
     }
 
-    // original had no GET by id
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        return await accounts.get(Number(id));
+    }
 
     @Post()
     async create(@Body() body: any) {
@@ -58,14 +80,14 @@ class AccountsController {
     async update(@Body() body: any) {
         const {id, ...rest} = body || {};
         if (!id) return {error: 'id required'};
-        const updated = await accounts.update(id, rest);
+        const updated = await accounts.update(Number(id), rest);
         if (!updated) return {error: 'Not found'};
         return updated;
     }
 
     @Delete(':id')
     async remove(@Param('id') id: string) {
-        await accounts.remove(id);
+        await accounts.remove(Number(id));
         return {};
     }
 }
@@ -76,14 +98,36 @@ class EnterprisesController {
     async list() {
         return await enterprises.list();
     }
+    
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        return await enterprises.get(Number(id));
+    }
+    
     @Post()
     async create(@Body() body: any) {
         return await enterprises.create(body);
     }
-    // original had no PUT by id
+    
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        const updated = await enterprises.update(Number(id), body);
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+    
+    @Put()
+    async updateWithIdInBody(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        const updated = await enterprises.update(Number(id), rest);
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+    
     @Delete(':id')
     async remove(@Param('id') id: string) {
-        await enterprises.remove(id);
+        await enterprises.remove(Number(id));
         return {};
     }
 }
@@ -94,6 +138,10 @@ class BusinessUnitsController {
     async list() {
         return await businessUnits.list();
     }
+    @Get('entities')
+    async listEntities(@Query('accountId') accountId?: string, @Query('enterpriseId') enterpriseId?: string, @Query('enterpriseName') enterpriseName?: string) {
+        return await businessUnits.listEntities(accountId, enterpriseId);
+    }
     @Post()
     async create(@Body() body: any) {
         return await businessUnits.create(body);
@@ -102,17 +150,86 @@ class BusinessUnitsController {
     async update(@Body() body: any) {
         const {id, ...rest} = body || {};
         if (!id) return {error: 'id required'};
-        const updated = await businessUnits.update(id, rest);
+        const updated = await businessUnits.update(Number(id), rest);
         if (!updated) return {error: 'Not found'};
         return updated;
     }
     @Delete(':id')
     async remove(@Param('id') id: string) {
-        await businessUnits.remove(id);
+        await businessUnits.remove(Number(id));
         return {};
     }
+}
 
-    // original had no entities endpoint
+@Controller('api/services')
+class ServicesController {
+    @Get()
+    async list() {
+        return await services.list();
+    }
+    
+    @Get('debug')
+    async debug() {
+        return await services.debugTableContents();
+    }
+    
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        return await services.get(Number(id));
+    }
+    
+    @Post()
+    async create(@Body() body: any) {
+        return await services.create(body);
+    }
+    
+    @Put()
+    async update(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        const updated = await services.update(Number(id), rest);
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+    
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        await services.remove(Number(id));
+        return {};
+    }
+}
+
+@Controller('api/products')
+class ProductsController {
+    @Get()
+    async list() {
+        return await products.list();
+    }
+    
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        return await products.get(Number(id));
+    }
+    
+    @Post()
+    async create(@Body() body: any) {
+        return await products.create(body);
+    }
+    
+    @Put()
+    async update(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        const updated = await products.update(Number(id), rest);
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+    
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        await products.remove(Number(id));
+        return {};
+    }
 }
 
 @Controller('api/users')
@@ -268,35 +385,6 @@ class PipelineYamlController {
     }
 }
 
-@Controller('api/global-settings')
-class GlobalSettingsController {
-    @Get()
-    async list() {
-        return await globalSettings.list();
-    }
-
-    @Post()
-    async create(@Body() body: any) {
-        return await globalSettings.create(body);
-    }
-
-    @Get(':id')
-    async get(@Param('id') id: string) {
-        return await globalSettings.get(id);
-    }
-
-    @Put(':id')
-    async update(@Param('id') id: string, @Body() body: any) {
-        return await globalSettings.update(id, body);
-    }
-
-    @Delete(':id')
-    async remove(@Param('id') id: string) {
-        await globalSettings.remove(id);
-        return {};
-    }
-}
-
 @Controller('api/pipeline-config')
 class PipelineConfigController {
     @Get()
@@ -307,6 +395,92 @@ class PipelineConfigController {
     @Post()
     async save(@Body() body: any) {
         return await pipelineConfig.save(body || {});
+    }
+}
+
+@Controller('api/enterprise-products-services')
+class EnterpriseProductsServicesController {
+    @Get()
+    async list() {
+        return await enterpriseProductsServices.list();
+    }
+
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        return await enterpriseProductsServices.get(parseInt(id));
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        return await enterpriseProductsServices.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        return await enterpriseProductsServices.update(parseInt(id), body);
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        await enterpriseProductsServices.remove(parseInt(id));
+        return {};
+    }
+
+    // Get all linkages for a specific enterprise
+    @Get('enterprise/:enterpriseId')
+    async getByEnterprise(@Param('enterpriseId') enterpriseId: string) {
+        return await enterpriseProductsServices.getByEnterprise(parseInt(enterpriseId));
+    }
+
+    // Get detailed information with names for a specific enterprise
+    @Get('enterprise/:enterpriseId/detailed')
+    async getDetailedByEnterprise(@Param('enterpriseId') enterpriseId: string) {
+        return await enterpriseProductsServices.getDetailedByEnterprise(parseInt(enterpriseId));
+    }
+
+    // Get all linkages for a specific product
+    @Get('product/:productId')
+    async getByProduct(@Param('productId') productId: string) {
+        return await enterpriseProductsServices.getByProduct(parseInt(productId));
+    }
+
+    // Get all linkages for a specific service
+    @Get('service/:serviceId')
+    async getByService(@Param('serviceId') serviceId: string) {
+        return await enterpriseProductsServices.getByService(parseInt(serviceId));
+    }
+
+    // Remove all linkages for a specific enterprise
+    @Delete('enterprise/:enterpriseId')
+    async removeByEnterprise(@Param('enterpriseId') enterpriseId: string) {
+        await enterpriseProductsServices.removeByEnterprise(parseInt(enterpriseId));
+        return {};
+    }
+
+    // Remove all linkages for a specific product
+    @Delete('product/:productId')
+    async removeByProduct(@Param('productId') productId: string) {
+        await enterpriseProductsServices.removeByProduct(parseInt(productId));
+        return {};
+    }
+
+    // Remove all linkages for a specific service
+    @Delete('service/:serviceId')
+    async removeByService(@Param('serviceId') serviceId: string) {
+        await enterpriseProductsServices.removeByService(parseInt(serviceId));
+        return {};
+    }
+
+    // Debug endpoint to check table contents
+    @Get('debug/contents')
+    async debugContents() {
+        return await enterpriseProductsServices.debugTableContents();
+    }
+
+    // Debug endpoint to check table structure
+    @Get('debug/structure')
+    async debugStructure() {
+        return await enterpriseProductsServices.checkTableStructure();
     }
 }
 
@@ -321,16 +495,47 @@ class PipelineConfigController {
         AiController,
         TemplatesController,
         PipelineYamlController,
-        GlobalSettingsController,
         PipelineConfigController,
+        ServicesController,
+        ProductsController,
+        EnterpriseProductsServicesController,
     ],
 })
 class AppModule {}
 
 async function bootstrap() {
-    const app = await NestFactory.create(AppModule, {cors: true});
-    const PORT = Number(process.env.PORT || 4000);
-    await app.listen(PORT);
+    try {
+        console.log('Starting DevOps Automate Backend...');
+        console.log('Environment:', process.env.NODE_ENV || 'development');
+        console.log('Storage Mode:', process.env.STORAGE_MODE || 'postgres');
+        
+        // Force reload environment variables
+        dotenv.config();
+        const storageMode = process.env.STORAGE_MODE || 'postgres';
+        console.log('Reloaded Storage Mode:', storageMode);
+        
+        if (storageMode === 'postgres') {
+            console.log('Testing PostgreSQL connection...');
+            const dbConnected = await testConnection();
+            if (!dbConnected) {
+                console.error('Failed to connect to PostgreSQL. Please check your database configuration.');
+                process.exit(1);
+            }
+            console.log('PostgreSQL connection successful!');
+        }
+        
+        const app = await NestFactory.create(AppModule, {cors: true});
+        const PORT = Number(process.env.PORT || 4000);
+        await app.listen(PORT);
+        
+        console.log(`🚀 DevOps Automate Backend is running on port ${PORT}`);
+        console.log(`📊 Health check: http://localhost:${PORT}/health`);
+        console.log(`🔧 API endpoints: http://localhost:${PORT}/api`);
+        
+    } catch (error) {
+        console.error('Failed to start application:', error);
+        process.exit(1);
+    }
 }
 
 bootstrap();
