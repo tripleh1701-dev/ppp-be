@@ -1,7 +1,19 @@
 import 'reflect-metadata';
 import {NestFactory} from '@nestjs/core';
 import {Module} from '@nestjs/common';
-import {Controller, Get, Post, Put, Delete, Param, Body, Query} from '@nestjs/common';
+import {
+    Controller,
+    Get,
+    Post,
+    Put,
+    Delete,
+    Param,
+    Body,
+    Query,
+    Res,
+    HttpStatus,
+    Patch,
+} from '@nestjs/common';
 import dotenv from 'dotenv';
 import path from 'path';
 import {AccountsService} from './services/accounts';
@@ -9,6 +21,7 @@ import {EnterprisesService} from './services/enterprises';
 import {BusinessUnitsService} from './services/businessUnits';
 import {UsersService} from './services/users';
 import {UserGroupsService} from './services/userGroups';
+import {GroupsService} from './services/groups';
 import {TemplatesService} from './services/templates';
 import {PipelineYamlService} from './services/pipelineYaml';
 import {PipelineConfigService} from './services/pipelineConfig';
@@ -16,7 +29,6 @@ import {ServicesService} from './services/services';
 import {ProductsService} from './services/products';
 import {EnterpriseProductsServicesService} from './services/enterpriseProductsServices';
 import {testConnection} from './db';
-
 
 dotenv.config();
 
@@ -26,16 +38,16 @@ const STORAGE_DIR = process.env.STORAGE_DIR
 
 // Sample geo data
 const GEO_DATA: Record<string, Record<string, string[]>> = {
-    'US': {
-        'CA': ['Los Angeles', 'San Francisco', 'San Diego'],
-        'NY': ['New York City', 'Buffalo', 'Albany'],
-        'TX': ['Houston', 'Dallas', 'Austin']
+    US: {
+        CA: ['Los Angeles', 'San Francisco', 'San Diego'],
+        NY: ['New York City', 'Buffalo', 'Albany'],
+        TX: ['Houston', 'Dallas', 'Austin'],
     },
-    'UK': {
-        'England': ['London', 'Manchester', 'Birmingham'],
-        'Scotland': ['Edinburgh', 'Glasgow', 'Aberdeen'],
-        'Wales': ['Cardiff', 'Swansea', 'Newport']
-    }
+    UK: {
+        England: ['London', 'Manchester', 'Birmingham'],
+        Scotland: ['Edinburgh', 'Glasgow', 'Aberdeen'],
+        Wales: ['Cardiff', 'Swansea', 'Newport'],
+    },
 };
 
 // Providers (plain classes)
@@ -44,12 +56,15 @@ const enterprises = new EnterprisesService(STORAGE_DIR);
 const businessUnits = new BusinessUnitsService(STORAGE_DIR);
 const users = new UsersService(STORAGE_DIR);
 const userGroups = new UserGroupsService(STORAGE_DIR);
+const groups = new GroupsService(STORAGE_DIR);
 const templates = new TemplatesService(STORAGE_DIR);
 const pipelineYaml = new PipelineYamlService(STORAGE_DIR);
 const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
 const services = new ServicesService(STORAGE_DIR);
 const products = new ProductsService(STORAGE_DIR);
-const enterpriseProductsServices = new EnterpriseProductsServicesService(STORAGE_DIR);
+const enterpriseProductsServices = new EnterpriseProductsServicesService(
+    STORAGE_DIR,
+);
 
 @Controller('health')
 class HealthController {
@@ -98,24 +113,24 @@ class EnterprisesController {
     async list() {
         return await enterprises.list();
     }
-    
+
     @Get(':id')
     async get(@Param('id') id: string) {
         return await enterprises.get(Number(id));
     }
-    
+
     @Post()
     async create(@Body() body: any) {
         return await enterprises.create(body);
     }
-    
+
     @Put(':id')
     async update(@Param('id') id: string, @Body() body: any) {
         const updated = await enterprises.update(Number(id), body);
         if (!updated) return {error: 'Not found'};
         return updated;
     }
-    
+
     @Put()
     async updateWithIdInBody(@Body() body: any) {
         const {id, ...rest} = body || {};
@@ -124,7 +139,7 @@ class EnterprisesController {
         if (!updated) return {error: 'Not found'};
         return updated;
     }
-    
+
     @Delete(':id')
     async remove(@Param('id') id: string) {
         await enterprises.remove(Number(id));
@@ -139,7 +154,11 @@ class BusinessUnitsController {
         return await businessUnits.list();
     }
     @Get('entities')
-    async listEntities(@Query('accountId') accountId?: string, @Query('enterpriseId') enterpriseId?: string, @Query('enterpriseName') enterpriseName?: string) {
+    async listEntities(
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         return await businessUnits.listEntities(accountId, enterpriseId);
     }
     @Post()
@@ -167,22 +186,22 @@ class ServicesController {
     async list() {
         return await services.list();
     }
-    
+
     @Get('debug')
     async debug() {
         return await services.debugTableContents();
     }
-    
+
     @Get(':id')
     async get(@Param('id') id: string) {
         return await services.get(Number(id));
     }
-    
+
     @Post()
     async create(@Body() body: any) {
         return await services.create(body);
     }
-    
+
     @Put()
     async update(@Body() body: any) {
         const {id, ...rest} = body || {};
@@ -191,7 +210,7 @@ class ServicesController {
         if (!updated) return {error: 'Not found'};
         return updated;
     }
-    
+
     @Delete(':id')
     async remove(@Param('id') id: string) {
         await services.remove(Number(id));
@@ -205,17 +224,17 @@ class ProductsController {
     async list() {
         return await products.list();
     }
-    
+
     @Get(':id')
     async get(@Param('id') id: string) {
         return await products.get(Number(id));
     }
-    
+
     @Post()
     async create(@Body() body: any) {
         return await products.create(body);
     }
-    
+
     @Put()
     async update(@Body() body: any) {
         const {id, ...rest} = body || {};
@@ -224,7 +243,7 @@ class ProductsController {
         if (!updated) return {error: 'Not found'};
         return updated;
     }
-    
+
     @Delete(':id')
     async remove(@Param('id') id: string) {
         await products.remove(Number(id));
@@ -239,21 +258,133 @@ class UsersController {
         return await users.list();
     }
     @Post()
-    async create(@Body() body: any) {
-        return await users.create(body);
+    async create(@Body() body: any, @Res() res: any) {
+        const existing = users.getByEmail(body?.email);
+        if (existing) {
+            return res
+                .status(HttpStatus.CONFLICT)
+                .json({error: 'email already exists'});
+        }
+        const created = await users.create(body);
+        return res.status(HttpStatus.CREATED).json(created);
     }
     @Put()
-    async update(@Body() body: any) {
+    async update(@Body() body: any, @Res() res: any) {
         const {id, ...rest} = body || {};
-        if (!id) return {error: 'id required'};
+        if (!id)
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: 'id required'});
+        const exists = users.getById(id);
+        if (!exists)
+            return res.status(HttpStatus.NOT_FOUND).json({error: 'Not found'});
         const updated = await users.update(id, rest);
-        if (!updated) return {error: 'Not found'};
-        return updated;
+        return res.status(HttpStatus.OK).json(updated);
     }
     @Delete(':id')
-    async remove(@Param('id') id: string) {
+    async remove(@Param('id') id: string, @Res() res: any) {
+        const exists = users.getById(id);
+        if (!exists)
+            return res.status(HttpStatus.NOT_FOUND).json({error: 'Not found'});
         await users.remove(id);
-        return {};
+        return res.status(HttpStatus.NO_CONTENT).send();
+    }
+
+    // Optional granular endpoints
+    @Patch(':id/status')
+    async updateStatus(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        const exists = users.getById(id);
+        if (!exists)
+            return res.status(HttpStatus.NOT_FOUND).json({error: 'Not found'});
+        if (!['ACTIVE', 'INACTIVE'].includes(body?.status)) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: 'invalid status'});
+        }
+        const updated = users.partialUpdate(id, {status: body.status});
+        return res.status(HttpStatus.OK).json(updated);
+    }
+
+    @Patch(':id/lock')
+    async updateLock(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        const exists = users.getById(id);
+        if (!exists)
+            return res.status(HttpStatus.NOT_FOUND).json({error: 'Not found'});
+        if (typeof body?.locked !== 'boolean') {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: 'invalid locked flag'});
+        }
+        const updated = users.partialUpdate(id, {locked: body.locked});
+        return res.status(HttpStatus.OK).json(updated);
+    }
+
+    @Post(':id/password')
+    async updatePassword(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        const exists = users.getById(id);
+        if (!exists)
+            return res.status(HttpStatus.NOT_FOUND).json({error: 'Not found'});
+        const pwd: string = body?.password || '';
+        const valid =
+            /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^\da-zA-Z]).{8,}$/.test(pwd);
+        if (!valid)
+            return res.status(HttpStatus.BAD_REQUEST).json({
+                error: 'password does not meet complexity requirements',
+            });
+        // No-op store for filesystem mode
+        return res.status(HttpStatus.NO_CONTENT).send();
+    }
+
+    // Group assignment endpoints
+    @Post(':id/groups')
+    async assignGroup(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        const user = users.getById(id);
+        if (!user)
+            return res
+                .status(HttpStatus.NOT_FOUND)
+                .json({error: 'User not found'});
+        const group = groups.get(body?.groupId);
+        if (!group)
+            return res
+                .status(HttpStatus.NOT_FOUND)
+                .json({error: 'Group not found'});
+        await userGroups.create(user.username, {
+            id: group.id,
+            name: group.name,
+            description: group.description,
+        });
+        return res.status(HttpStatus.NO_CONTENT).send();
+    }
+
+    @Delete(':id/groups/:groupId')
+    async unassignGroup(
+        @Param('id') id: string,
+        @Param('groupId') groupId: string,
+        @Res() res: any,
+    ) {
+        const user = users.getById(id);
+        if (!user)
+            return res
+                .status(HttpStatus.NOT_FOUND)
+                .json({error: 'User not found'});
+        await userGroups.removeForUser(user.username, groupId);
+        return res.status(HttpStatus.NO_CONTENT).send();
     }
 }
 
@@ -264,13 +395,53 @@ class UserGroupsController {
         return await userGroups.list(username);
     }
     @Post(':username')
-    async create(@Param('username') username: string, @Body() body: any) {
-        return await userGroups.create(username, body);
+    async create(
+        @Param('username') username: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        // ensure group exists (create-and-assign)
+        let grp = groups.findByName(body?.name);
+        if (!grp) {
+            grp = groups.create({
+                name: body?.name,
+                description: body?.description,
+            });
+        }
+        const record = await userGroups.create(username, {
+            id: grp.id,
+            name: grp.name,
+            description: grp.description,
+            enterprise: body?.enterprise,
+        });
+        const resp = {
+            id: record.id,
+            name: record.name,
+            description: record.description,
+        };
+        return res.status(HttpStatus.CREATED).json(resp);
     }
     @Delete(':username/:id')
-    async remove(@Param('id') id: string) {
+    async remove(@Param('id') id: string, @Res() res: any) {
         await userGroups.remove(id);
-        return {};
+        return res.status(HttpStatus.NO_CONTENT).send();
+    }
+}
+
+@Controller('api/groups')
+class GroupsController {
+    @Get()
+    async list(@Query('search') search?: string) {
+        return groups.list(search);
+    }
+
+    @Post()
+    async create(@Body() body: any, @Res() res: any) {
+        const created = groups.create({
+            name: body?.name,
+            description: body?.description,
+        });
+        return res.status(HttpStatus.CREATED).json(created);
     }
 }
 
@@ -429,31 +600,41 @@ class EnterpriseProductsServicesController {
     // Get all linkages for a specific enterprise
     @Get('enterprise/:enterpriseId')
     async getByEnterprise(@Param('enterpriseId') enterpriseId: string) {
-        return await enterpriseProductsServices.getByEnterprise(parseInt(enterpriseId));
+        return await enterpriseProductsServices.getByEnterprise(
+            parseInt(enterpriseId),
+        );
     }
 
     // Get detailed information with names for a specific enterprise
     @Get('enterprise/:enterpriseId/detailed')
     async getDetailedByEnterprise(@Param('enterpriseId') enterpriseId: string) {
-        return await enterpriseProductsServices.getDetailedByEnterprise(parseInt(enterpriseId));
+        return await enterpriseProductsServices.getDetailedByEnterprise(
+            parseInt(enterpriseId),
+        );
     }
 
     // Get all linkages for a specific product
     @Get('product/:productId')
     async getByProduct(@Param('productId') productId: string) {
-        return await enterpriseProductsServices.getByProduct(parseInt(productId));
+        return await enterpriseProductsServices.getByProduct(
+            parseInt(productId),
+        );
     }
 
     // Get all linkages for a specific service
     @Get('service/:serviceId')
     async getByService(@Param('serviceId') serviceId: string) {
-        return await enterpriseProductsServices.getByService(parseInt(serviceId));
+        return await enterpriseProductsServices.getByService(
+            parseInt(serviceId),
+        );
     }
 
     // Remove all linkages for a specific enterprise
     @Delete('enterprise/:enterpriseId')
     async removeByEnterprise(@Param('enterpriseId') enterpriseId: string) {
-        await enterpriseProductsServices.removeByEnterprise(parseInt(enterpriseId));
+        await enterpriseProductsServices.removeByEnterprise(
+            parseInt(enterpriseId),
+        );
         return {};
     }
 
@@ -498,6 +679,7 @@ class EnterpriseProductsServicesController {
         PipelineConfigController,
         ServicesController,
         ProductsController,
+        GroupsController,
         EnterpriseProductsServicesController,
     ],
 })
@@ -508,30 +690,31 @@ async function bootstrap() {
         console.log('Starting DevOps Automate Backend...');
         console.log('Environment:', process.env.NODE_ENV || 'development');
         console.log('Storage Mode:', process.env.STORAGE_MODE || 'postgres');
-        
+
         // Force reload environment variables
         dotenv.config();
         const storageMode = process.env.STORAGE_MODE || 'postgres';
         console.log('Reloaded Storage Mode:', storageMode);
-        
+
         if (storageMode === 'postgres') {
             console.log('Testing PostgreSQL connection...');
             const dbConnected = await testConnection();
             if (!dbConnected) {
-                console.error('Failed to connect to PostgreSQL. Please check your database configuration.');
+                console.error(
+                    'Failed to connect to PostgreSQL. Please check your database configuration.',
+                );
                 process.exit(1);
             }
             console.log('PostgreSQL connection successful!');
         }
-        
+
         const app = await NestFactory.create(AppModule, {cors: true});
         const PORT = Number(process.env.PORT || 4000);
         await app.listen(PORT);
-        
+
         console.log(`🚀 DevOps Automate Backend is running on port ${PORT}`);
         console.log(`📊 Health check: http://localhost:${PORT}/health`);
         console.log(`🔧 API endpoints: http://localhost:${PORT}/api`);
-        
     } catch (error) {
         console.error('Failed to start application:', error);
         process.exit(1);

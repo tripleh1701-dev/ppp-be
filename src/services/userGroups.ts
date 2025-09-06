@@ -41,10 +41,13 @@ export class UserGroupsService {
         return this.store.readAll().filter((g) => g.username === username);
     }
 
-    async create(username: string, body: Omit<GroupRecord, 'id' | 'username'>) {
+    async create(
+        username: string,
+        body: Omit<GroupRecord, 'username'> & {id?: string},
+    ) {
         if (STORAGE_MODE === 'postgres') {
             const created = await withPg(async (c) => {
-                const id = uuid();
+                const id = body.id || uuid();
                 await c.query(
                     `insert into ${this.schema}.user_group(
                         group_id, username, name, description, enterprise_id
@@ -57,11 +60,13 @@ export class UserGroupsService {
                         body.enterprise || null,
                     ],
                 );
-                return {id, username, ...body} as GroupRecord;
+                const {id: _omitId, ...rest} = body as any; return {id, username, ...rest} as GroupRecord;
             });
             return created;
         }
-        const record: GroupRecord = {id: uuid(), username, ...body};
+        const id = body.id || uuid();
+        const {id: _omitId, ...rest} = body as any;
+        const record: GroupRecord = {id, username, ...rest};
         const next = [...this.store.readAll(), record];
         this.store.writeAll(next);
         return record;
@@ -78,6 +83,22 @@ export class UserGroupsService {
             return;
         }
         const next = this.store.readAll().filter((g) => g.id !== id);
+        this.store.writeAll(next);
+    }
+
+    async removeForUser(username: string, groupId: string) {
+        if (STORAGE_MODE === 'postgres') {
+            await withPg(async (c) => {
+                await c.query(
+                    `delete from ${this.schema}.user_group where username=$1 and group_id=$2`,
+                    [username, groupId],
+                );
+            });
+            return;
+        }
+        const next = this.store
+            .readAll()
+            .filter((g) => !(g.username === username && g.id === groupId));
         this.store.writeAll(next);
     }
 }

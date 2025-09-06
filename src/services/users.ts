@@ -5,10 +5,13 @@ export interface UserRecord {
     id: string;
     username: string;
     firstName: string;
+    middleName?: string;
     lastName: string;
     email: string;
+    status: 'ACTIVE' | 'INACTIVE';
+    locked: boolean;
     startDate: string;
-    endDate?: string;
+    endDate?: string | null;
     groupName: string;
     updatedAt: string;
 }
@@ -22,6 +25,14 @@ export class UsersService {
 
     list() {
         return this.store.readAll();
+    }
+
+    getById(id: string): UserRecord | undefined {
+        return this.store.readAll().find((u) => u.id === id);
+    }
+
+    getByEmail(email: string): UserRecord | undefined {
+        return this.store.readAll().find((u) => u.email === email);
     }
 
     create(body: Omit<UserRecord, 'id' | 'updatedAt'>) {
@@ -44,6 +55,22 @@ export class UsersService {
         all[idx] = {id, updatedAt: new Date().toISOString(), ...body};
         this.store.writeAll(all);
         return all[idx];
+    }
+
+    partialUpdate(id: string, patch: Partial<Omit<UserRecord, 'id'>>) {
+        const all = this.store.readAll();
+        const idx = all.findIndex((a) => a.id === id);
+        if (idx === -1) return undefined;
+        const current = all[idx];
+        const updated: UserRecord = {
+            ...current,
+            ...patch,
+            id,
+            updatedAt: new Date().toISOString(),
+        } as UserRecord;
+        all[idx] = updated;
+        this.store.writeAll(all);
+        return updated;
     }
 
     remove(id: string) {
