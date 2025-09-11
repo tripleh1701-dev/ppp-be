@@ -1406,6 +1406,17 @@ class UsersController {
         }
     }
 
+    // Alternative endpoint name for frontend compatibility
+    @Post(':id/assign-groups')
+    async assignGroupsAlternative(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Res() res: any,
+    ) {
+        // Delegate to the main implementation
+        return this.assignGroupsToUser(id, body, res);
+    }
+
     @Delete(':id/groups')
     async removeGroupsFromUser(
         @Param('id') id: string,

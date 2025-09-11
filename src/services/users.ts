@@ -190,7 +190,7 @@ export class UsersService {
         });
     }
 
-    async getById(id: string): Promise<UserRecord | undefined> {
+    async getById(id: string | number): Promise<UserRecord | undefined> {
         return await withPg(async (c) => {
             const res = await c.query(
                 `SELECT
@@ -203,11 +203,12 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    assigned_user_group as "assignedUserGroups",
                     created_at as "createdAt",
                     updated_at as "updatedAt"
                 FROM ${this.schema}.fnd_users
                 WHERE id = $1`,
-                [id],
+                [parseInt(id.toString())],
             );
             return res.rows[0] || undefined;
         });
@@ -281,12 +282,12 @@ export class UsersService {
     }
 
     async updateUser(
-        id: string,
+        id: string | number,
         body: UpdateUserRequest,
     ): Promise<UserRecord | undefined> {
         return await withPg(async (c) => {
             const setClauses: string[] = [];
-            const values: any[] = [id];
+            const values: any[] = [parseInt(id.toString())];
             let paramIndex = 2;
 
             if (body.firstName !== undefined) {
@@ -321,6 +322,10 @@ export class UsersService {
                 setClauses.push(`technical_user = $${paramIndex++}`);
                 values.push(body.technicalUser);
             }
+            if (body.assignedUserGroups !== undefined) {
+                setClauses.push(`assigned_user_group = $${paramIndex++}`);
+                values.push(body.assignedUserGroups);
+            }
 
             setClauses.push(`updated_at = $${paramIndex++}`);
             values.push(new Date().toISOString());
@@ -341,6 +346,7 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    assigned_user_group as "assignedUserGroups",
                     created_at as "createdAt",
                     updated_at as "updatedAt"
             `;
@@ -350,11 +356,11 @@ export class UsersService {
         });
     }
 
-    async deleteUser(id: string): Promise<boolean> {
+    async deleteUser(id: string | number): Promise<boolean> {
         return await withPg(async (c) => {
             const res = await c.query(
                 `DELETE FROM ${this.schema}.fnd_users WHERE id = $1`,
-                [id],
+                [parseInt(id.toString())],
             );
             return res.rowCount && res.rowCount > 0;
         });
