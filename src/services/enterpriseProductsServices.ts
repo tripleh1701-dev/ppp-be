@@ -11,7 +11,7 @@ export class EnterpriseProductsServicesService {
     private readonly schema: string;
 
     constructor(dir: string) {
-        this.schema = process.env.PGSCHEMA || 'acme'; // Use acme schema for existing tables
+        this.schema = process.env.PGSCHEMA || 'systiva'; // Use systiva schema for existing tables
     }
 
     // Check if table exists and get its structure

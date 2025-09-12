@@ -9,7 +9,7 @@ export class ProductsService {
     private readonly schema: string;
 
     constructor(dir: string) {
-        this.schema = process.env.PGSCHEMA || 'acme'; // Use acme schema for existing tables
+        this.schema = process.env.PGSCHEMA || 'systiva'; // Use systiva schema for existing tables
     }
 
     async list(): Promise<Product[]> {

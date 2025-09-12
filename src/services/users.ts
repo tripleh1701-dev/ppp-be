@@ -79,7 +79,7 @@ export class UsersService {
     private readonly schema: string;
 
     constructor() {
-        this.schema = process.env.PGSCHEMA || 'acme';
+        this.schema = process.env.PGSCHEMA || 'systiva';
     }
 
     private async hashPassword(password: string): Promise<string> {

@@ -1566,7 +1566,7 @@ class UsersController {
     async debugInfo(@Res() res: any) {
         try {
             const storageMode = process.env.STORAGE_MODE || 'filesystem';
-            const schema = process.env.PGSCHEMA || 'acme';
+            const schema = process.env.PGSCHEMA || 'systiva';
             const response: any = {
                 storageMode,
                 environment: process.env.NODE_ENV,

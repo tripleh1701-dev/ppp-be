@@ -21,7 +21,7 @@ export function getPool(): Pool {
             port: Number(process.env.PGPORT || 5432),
             user: process.env.PGUSER || 'postgres',
             database: process.env.PGDATABASE || 'postgres',
-            schema: process.env.PGSCHEMA || 'acme',
+            schema: process.env.PGSCHEMA || 'systiva',
         });
 
         pool = new Pool({

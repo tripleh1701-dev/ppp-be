@@ -23,7 +23,7 @@ export class RolesService {
             dir,
             'roleGroupAssignments.json',
         );
-        this.schema = process.env.PGSCHEMA || 'acme'; // Use acme schema for fnd_ tables
+        this.schema = process.env.PGSCHEMA || 'systiva'; // Use systiva schema for fnd_ tables
     }
 
     async list(): Promise<RoleRecord[]> {
@@ -172,13 +172,13 @@ export class RolesService {
             const rows = await withPg(async (c) => {
                 const res = await c.query(
                     `select
-                        acme.role_id as id,
-                        acme.role_name as name,
-                        acme.role_description as description,
+                        systiva.role_id as id,
+                        systiva.role_name as name,
+                        systiva.role_description as description,
                         '[]'::json as permissions
-                    from ${this.schema}.fnd_user_group_roles acme
-                    where acme.user_group_id = $1
-                    order by acme.role_name`,
+                    from ${this.schema}.fnd_user_group_roles systiva
+                    where systiva.user_group_id = $1
+                    order by systiva.role_name`,
                     [groupId],
                 );
 

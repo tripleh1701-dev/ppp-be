@@ -24,7 +24,7 @@ export class AttributesService {
             dir,
             'roleAttributeAssignments.json',
         );
-        this.schema = process.env.PGSCHEMA || 'acme'; // Use acme schema for fnd_ tables
+        this.schema = process.env.PGSCHEMA || 'systiva'; // Use systiva schema for fnd_ tables
     }
 
     async list(): Promise<AttributeRecord[]> {

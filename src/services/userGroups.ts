@@ -62,7 +62,7 @@ export class UserGroupsService {
             dir,
             'accessControlUserGroups.json',
         );
-        this.schema = process.env.PGSCHEMA || 'acme'; // Use acme schema for fnd_ tables
+        this.schema = process.env.PGSCHEMA || 'systiva'; // Use systiva schema for fnd_ tables
     }
 
     async list(username: string): Promise<GroupRecord[]> {
@@ -247,15 +247,15 @@ export class UserGroupsService {
                         coalesce(
                             json_agg(
                                 distinct jsonb_build_object(
-                                    'id', acme.role_id
+                                    'id', systiva.role_id
                                 )
-                            ) filter (where acme.role_id is not null),
+                            ) filter (where systiva.role_id is not null),
                             '[]'::json
                         ) as roles
                     from ${this.schema}.fnd_user_groups ug
                     left join ${this.schema}.fnd_user_group_entities uge on ug.id = uge.user_group_id
                     left join ${this.schema}.fnd_user_group_services ugs on ug.id = ugs.user_group_id
-                    left join ${this.schema}.fnd_user_group_roles acme on ug.id = acme.user_group_id
+                    left join ${this.schema}.fnd_user_group_roles systiva on ug.id = systiva.user_group_id
                     ${whereSql}
                     group by ug.id, ug.name, ug.description, ug.account_id, ug.enterprise_id, ug.created_at, ug.updated_at
                     order by ug.created_at desc`,
