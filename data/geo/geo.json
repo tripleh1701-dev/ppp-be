@@ -1,0 +1,28 @@
+{
+  "USA": {
+    "California": ["Los Angeles", "San Francisco", "San Diego"],
+    "Texas": ["Austin", "Dallas", "Houston"],
+    "New York": ["New York", "Buffalo", "Rochester"]
+  },
+  "India": {
+    "Maharashtra": ["Mumbai", "Pune", "Nagpur"],
+    "Karnataka": ["Bengaluru", "Mysuru", "Mangaluru"],
+    "Delhi": ["New Delhi"]
+  },
+  "Germany": {
+    "Bavaria": ["Munich", "Nuremberg"],
+    "Hesse": ["Frankfurt", "Wiesbaden"]
+  },
+  "Canada": {
+    "Ontario": ["Toronto", "Ottawa", "Hamilton"],
+    "Quebec": ["Montreal", "Quebec City"]
+  },
+  "United Kingdom": {
+    "England": ["London", "Manchester", "Birmingham"],
+    "Scotland": ["Edinburgh", "Glasgow"]
+  },
+  "Australia": {
+    "New South Wales": ["Sydney", "Newcastle"],
+    "Victoria": ["Melbourne", "Geelong"]
+  }
+}
