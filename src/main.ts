@@ -263,8 +263,20 @@ class ServicesController {
         return await services.create(body);
     }
 
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await services.update(id, body); // String ID for DynamoDB
+        } else {
+            updated = await services.update(Number(id), body); // Number ID for PostgreSQL
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
     @Put()
-    async update(@Body() body: any) {
+    async updateWithIdInBody(@Body() body: any) {
         const {id, ...rest} = body || {};
         if (!id) return {error: 'id required'};
         let updated;
@@ -309,8 +321,20 @@ class ProductsController {
         return await products.create(body);
     }
 
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await products.update(id, body); // String ID for DynamoDB
+        } else {
+            updated = await products.update(Number(id), body); // Number ID for PostgreSQL
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
     @Put()
-    async update(@Body() body: any) {
+    async updateWithIdInBody(@Body() body: any) {
         const {id, ...rest} = body || {};
         if (!id) return {error: 'id required'};
         let updated;
