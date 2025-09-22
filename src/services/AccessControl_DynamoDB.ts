@@ -36,11 +36,31 @@ export interface GroupRecord {
     updatedAt: string;
 }
 
+export interface ScopePermission {
+    resource: string;
+    view?: boolean;
+    create?: boolean;
+    edit?: boolean;
+    delete?: boolean;
+}
+
+export interface ScopeConfiguration {
+    configured?: boolean;
+    accountSettings?: ScopePermission[];
+    accessControl?: ScopePermission[];
+    securityGovernance?: ScopePermission[];
+    pipelines?: ScopePermission[];
+    builds?: ScopePermission[];
+    createdAt?: string;
+    updatedAt?: string;
+}
+
 export interface RoleRecord {
     id: string;
     name: string;
     description?: string;
     permissions?: string[];
+    scopeConfig?: ScopeConfiguration;
     createdAt: string;
     updatedAt: string;
 }
@@ -507,6 +527,46 @@ export class AccessControl_DynamoDBService {
 
         const {PK, SK, entityType, ...role} = result.Attributes;
         return role as RoleRecord;
+    }
+
+    // Scope Configuration methods
+    async updateRoleScope(
+        roleId: string,
+        scopeConfig: ScopeConfiguration,
+    ): Promise<RoleRecord | null> {
+        const now = new Date().toISOString();
+        scopeConfig.updatedAt = now;
+        scopeConfig.configured = true;
+
+        const command = new UpdateCommand({
+            TableName: this.tableName,
+            Key: {
+                PK: `ROLE#${roleId}`,
+                SK: 'PROFILE',
+            },
+            UpdateExpression:
+                'SET #scopeConfig = :scopeConfig, #updatedAt = :updatedAt',
+            ExpressionAttributeNames: {
+                '#scopeConfig': 'scopeConfig',
+                '#updatedAt': 'updatedAt',
+            },
+            ExpressionAttributeValues: {
+                ':scopeConfig': scopeConfig,
+                ':updatedAt': now,
+            },
+            ReturnValues: 'ALL_NEW',
+        });
+
+        const result = await this.client.send(command);
+        if (!result.Attributes) return null;
+
+        const {PK, SK, entityType, ...role} = result.Attributes;
+        return role as RoleRecord;
+    }
+
+    async getRoleScope(roleId: string): Promise<ScopeConfiguration | null> {
+        const role = await this.getRole(roleId);
+        return role?.scopeConfig || null;
     }
 
     async deleteRole(roleId: string): Promise<void> {

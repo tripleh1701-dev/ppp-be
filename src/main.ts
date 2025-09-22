@@ -2845,6 +2845,81 @@ class RolesController {
                 .json({error: error.message});
         }
     }
+
+    // Scope Configuration endpoints
+    @Get(':id/scope')
+    async getRoleScope(@Param('id') id: string, @Res() res: any) {
+        try {
+            if (storageMode === 'dynamodb' && AccessControl_Service) {
+                const scopeConfig = await AccessControl_Service.getRoleScope(
+                    id,
+                );
+                if (!scopeConfig) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        error: 'Role or scope configuration not found',
+                    });
+                }
+                return res.json(scopeConfig);
+            } else {
+                // For file-based storage, we can extend the roles service later
+                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
+                    error: 'Scope configuration only available with DynamoDB storage',
+                });
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: error.message});
+        }
+    }
+
+    @Put(':id/scope')
+    async updateRoleScope(
+        @Param('id') id: string,
+        @Body() scopeConfig: any,
+        @Res() res: any,
+    ) {
+        try {
+            if (storageMode === 'dynamodb' && AccessControl_Service) {
+                // Validate the scope configuration structure
+                const validatedConfig = {
+                    accountSettings: scopeConfig.accountSettings || [],
+                    accessControl: scopeConfig.accessControl || [],
+                    securityGovernance: scopeConfig.securityGovernance || [],
+                    pipelines: scopeConfig.pipelines || [],
+                    builds: scopeConfig.builds || [],
+                    configured: true,
+                    createdAt:
+                        scopeConfig.createdAt || new Date().toISOString(),
+                };
+
+                const updatedRole = await AccessControl_Service.updateRoleScope(
+                    id,
+                    validatedConfig,
+                );
+
+                if (!updatedRole) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        error: 'Role not found',
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    message: 'Scope configuration updated successfully',
+                    role: updatedRole,
+                });
+            } else {
+                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
+                    error: 'Scope configuration only available with DynamoDB storage',
+                });
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: error.message});
+        }
+    }
 }
 
 @Controller('api/attributes')
