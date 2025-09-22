@@ -1,0 +1,13 @@
+[
+  {
+    "firstName": "Test Create",
+    "lastName": "User",
+    "emailAddress": "testcreate@example.com",
+    "status": "ACTIVE",
+    "startDate": "2024-12-31",
+    "technicalUser": false,
+    "id": "72bad087-93f7-4f57-81ef-c1deba33984f",
+    "updatedAt": "2025-09-10T19:07:27.195Z",
+    "createdAt": "2025-09-10T19:07:27.195Z"
+  }
+]

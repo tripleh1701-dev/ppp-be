@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Enterprise Configuration Demo</title>
+        <style>
+            body {
+                font-family: Arial, sans-serif;
+                max-width: 1200px;
+                margin: 0 auto;
+                padding: 20px;
+                background-color: #f5f5f5;
+            }
+            .container {
+                background: white;
+                padding: 20px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+                margin-bottom: 20px;
+            }
+            .form-group {
+                margin-bottom: 15px;
+            }
+            label {
+                display: block;
+                margin-bottom: 5px;
+                font-weight: bold;
+            }
+            select,
+            input {
+                width: 100%;
+                padding: 8px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 14px;
+            }
+            button {
+                background-color: #007bff;
+                color: white;
+                padding: 10px 20px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            button:hover {
+                background-color: #0056b3;
+            }
+            .success {
+                background-color: #d4edda;
+                color: #155724;
+                padding: 10px;
+                border-radius: 4px;
+                margin: 10px 0;
+            }
+            .error {
+                background-color: #f8d7da;
+                color: #721c24;
+                padding: 10px;
+                border-radius: 4px;
+                margin: 10px 0;
+            }
+            .checkbox-group {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                gap: 10px;
+            }
+            .checkbox-item {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            }
+            .linkage-card {
+                border: 1px solid #ddd;
+                padding: 15px;
+                margin: 10px 0;
+                border-radius: 4px;
+                background-color: #f9f9f9;
+            }
+            .service-tag {
+                display: inline-block;
+                background-color: #007bff;
+                color: white;
+                padding: 4px 8px;
+                border-radius: 12px;
+                font-size: 12px;
+                margin: 2px;
+            }
+        </style>
+    </head>
+    <body>
+        <h1>Enterprise Configuration Management</h1>
+
+        <!-- Create Enterprise -->
+        <div class="container">
+            <h2>Create Enterprise</h2>
+            <form id="enterpriseForm">
+                <div class="form-group">
+                    <label for="enterpriseName">Enterprise Name:</label>
+                    <input type="text" id="enterpriseName" required />
+                </div>
+                <button type="submit">Create Enterprise</button>
+            </form>
+            <div id="enterpriseMessage"></div>
+        </div>
+
+        <!-- Create Product -->
+        <div class="container">
+            <h2>Create Product</h2>
+            <form id="productForm">
+                <div class="form-group">
+                    <label for="productName">Product Name:</label>
+                    <input type="text" id="productName" required />
+                </div>
+                <button type="submit">Create Product</button>
+            </form>
+            <div id="productMessage"></div>
+        </div>
+
+        <!-- Create Service -->
+        <div class="container">
+            <h2>Create Service</h2>
+            <form id="serviceForm">
+                <div class="form-group">
+                    <label for="serviceName">Service Name:</label>
+                    <input type="text" id="serviceName" required />
+                </div>
+                <button type="submit">Create Service</button>
+            </form>
+            <div id="serviceMessage"></div>
+        </div>
+
+        <!-- Create Linkage -->
+        <div class="container">
+            <h2>Create Enterprise-Product-Service Linkage</h2>
+            <form id="linkageForm">
+                <div class="form-group">
+                    <label for="enterpriseSelect">Select Enterprise:</label>
+                    <select id="enterpriseSelect" required>
+                        <option value="">Choose Enterprise...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="productSelect">Select Product:</label>
+                    <select id="productSelect" required>
+                        <option value="">Choose Product...</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Select Services:</label>
+                    <div id="servicesCheckboxes" class="checkbox-group">
+                        <!-- Checkboxes will be populated here -->
+                    </div>
+                </div>
+
+                <button type="submit">Create Linkage</button>
+            </form>
+            <div id="linkageMessage"></div>
+        </div>
+
+        <!-- View Enterprise Configuration -->
+        <div class="container">
+            <h2>View Enterprise Configuration</h2>
+            <div class="form-group">
+                <label for="viewEnterpriseSelect"
+                    >Select Enterprise to View:</label
+                >
+                <select id="viewEnterpriseSelect">
+                    <option value="">Choose Enterprise...</option>
+                </select>
+            </div>
+            <button onclick="loadEnterpriseConfiguration()">
+                Load Configuration
+            </button>
+            <div id="enterpriseConfiguration"></div>
+        </div>
+
+        <script>
+            const API_BASE_URL = 'http://localhost:4000/api';
+
+            // Utility function for API calls
+            async function apiCall(endpoint, options = {}) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                        headers: {
+                            'Content-Type': 'application/json',
+                            ...options.headers,
+                        },
+                        ...options,
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(
+                            `HTTP error! status: ${response.status}`,
+                        );
+                    }
+
+                    return await response.json();
+                } catch (error) {
+                    console.error('API call failed:', error);
+                    throw error;
+                }
+            }
+
+            // Show message function
+            function showMessage(elementId, message, isError = false) {
+                const element = document.getElementById(elementId);
+                element.innerHTML = `<div class="${
+                    isError ? 'error' : 'success'
+                }">${message}</div>`;
+                setTimeout(() => (element.innerHTML = ''), 5000);
+            }
+
+            // Load initial data
+            async function loadInitialData() {
+                try {
+                    const [enterprises, products, services] = await Promise.all(
+                        [
+                            apiCall('/enterprises'),
+                            apiCall('/products'),
+                            apiCall('/services'),
+                        ],
+                    );
+
+                    // Populate enterprise dropdowns
+                    const enterpriseSelects = [
+                        'enterpriseSelect',
+                        'viewEnterpriseSelect',
+                    ];
+                    enterpriseSelects.forEach((selectId) => {
+                        const select = document.getElementById(selectId);
+                        select.innerHTML =
+                            '<option value="">Choose Enterprise...</option>';
+                        enterprises.forEach((enterprise) => {
+                            select.innerHTML += `<option value="${enterprise.id}">${enterprise.name}</option>`;
+                        });
+                    });
+
+                    // Populate product dropdown
+                    const productSelect =
+                        document.getElementById('productSelect');
+                    productSelect.innerHTML =
+                        '<option value="">Choose Product...</option>';
+                    products.forEach((product) => {
+                        productSelect.innerHTML += `<option value="${product.id}">${product.name}</option>`;
+                    });
+
+                    // Populate services checkboxes
+                    const servicesContainer =
+                        document.getElementById('servicesCheckboxes');
+                    servicesContainer.innerHTML = '';
+                    services.forEach((service) => {
+                        servicesContainer.innerHTML += `
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="service_${service.id}" value="${service.id}">
+                            <label for="service_${service.id}">${service.name}</label>
+                        </div>
+                    `;
+                    });
+                } catch (error) {
+                    console.error('Error loading initial data:', error);
+                }
+            }
+
+            // Create Enterprise
+            document
+                .getElementById('enterpriseForm')
+                .addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const name =
+                        document.getElementById('enterpriseName').value;
+
+                    try {
+                        const result = await apiCall('/enterprises', {
+                            method: 'POST',
+                            body: JSON.stringify({name}),
+                        });
+
+                        showMessage(
+                            'enterpriseMessage',
+                            `Enterprise "${result.name}" created successfully! ID: ${result.id}`,
+                        );
+                        document.getElementById('enterpriseName').value = '';
+                        await loadInitialData(); // Refresh dropdowns
+                    } catch (error) {
+                        showMessage(
+                            'enterpriseMessage',
+                            `Error creating enterprise: ${error.message}`,
+                            true,
+                        );
+                    }
+                });
+
+            // Create Product
+            document
+                .getElementById('productForm')
+                .addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const name = document.getElementById('productName').value;
+
+                    try {
+                        const result = await apiCall('/products', {
+                            method: 'POST',
+                            body: JSON.stringify({name}),
+                        });
+
+                        showMessage(
+                            'productMessage',
+                            `Product "${result.name}" created successfully! ID: ${result.id}`,
+                        );
+                        document.getElementById('productName').value = '';
+                        await loadInitialData(); // Refresh dropdowns
+                    } catch (error) {
+                        showMessage(
+                            'productMessage',
+                            `Error creating product: ${error.message}`,
+                            true,
+                        );
+                    }
+                });
+
+            // Create Service
+            document
+                .getElementById('serviceForm')
+                .addEventListener('submit', async (e) => {
+                    e.preventDefault();
+                    const name = document.getElementById('serviceName').value;
+
+                    try {
+                        const result = await apiCall('/services', {
+                            method: 'POST',
+                            body: JSON.stringify({name}),
+                        });
+
+                        showMessage(
+                            'serviceMessage',
+                            `Service "${result.name}" created successfully! ID: ${result.id}`,
+                        );
+                        document.getElementById('serviceName').value = '';
+                        await loadInitialData(); // Refresh dropdowns
+                    } catch (error) {
+                        showMessage(
+                            'serviceMessage',
+                            `Error creating service: ${error.message}`,
+                            true,
+                        );
+                    }
+                });
+
+            // Create Linkage
+            document
+                .getElementById('linkageForm')
+                .addEventListener('submit', async (e) => {
+                    e.preventDefault();
+
+                    const enterpriseId =
+                        document.getElementById('enterpriseSelect').value;
+                    const productId =
+                        document.getElementById('productSelect').value;
+
+                    // Get selected services
+                    const serviceCheckboxes = document.querySelectorAll(
+                        '#servicesCheckboxes input[type="checkbox"]:checked',
+                    );
+                    const serviceIds = Array.from(serviceCheckboxes).map(
+                        (cb) => cb.value,
+                    );
+
+                    if (
+                        !enterpriseId ||
+                        !productId ||
+                        serviceIds.length === 0
+                    ) {
+                        showMessage(
+                            'linkageMessage',
+                            'Please select enterprise, product, and at least one service',
+                            true,
+                        );
+                        return;
+                    }
+
+                    try {
+                        const result = await apiCall(
+                            '/enterprise-products-services',
+                            {
+                                method: 'POST',
+                                body: JSON.stringify({
+                                    enterpriseId,
+                                    productId,
+                                    serviceIds,
+                                }),
+                            },
+                        );
+
+                        showMessage(
+                            'linkageMessage',
+                            `Linkage created successfully! ID: ${result.id}`,
+                        );
+
+                        // Reset form
+                        document.getElementById('enterpriseSelect').value = '';
+                        document.getElementById('productSelect').value = '';
+                        serviceCheckboxes.forEach((cb) => (cb.checked = false));
+                    } catch (error) {
+                        showMessage(
+                            'linkageMessage',
+                            `Error creating linkage: ${error.message}`,
+                            true,
+                        );
+                    }
+                });
+
+            // Load Enterprise Configuration
+            async function loadEnterpriseConfiguration() {
+                const enterpriseId = document.getElementById(
+                    'viewEnterpriseSelect',
+                ).value;
+                const configContainer = document.getElementById(
+                    'enterpriseConfiguration',
+                );
+
+                if (!enterpriseId) {
+                    configContainer.innerHTML =
+                        '<div class="error">Please select an enterprise</div>';
+                    return;
+                }
+
+                try {
+                    const linkages = await apiCall(
+                        `/enterprise-products-services/enterprise/${enterpriseId}/detailed`,
+                    );
+
+                    if (linkages.length === 0) {
+                        configContainer.innerHTML =
+                            '<div class="error">No configurations found for this enterprise</div>';
+                        return;
+                    }
+
+                    let html = '<h3>Enterprise Configuration</h3>';
+                    linkages.forEach((linkage) => {
+                        html += `
+                        <div class="linkage-card">
+                            <h4>${linkage.enterprise.name}</h4>
+                            <p><strong>Product:</strong> ${
+                                linkage.product.name
+                            }</p>
+                            <p><strong>Services:</strong></p>
+                            <div>
+                                ${linkage.services
+                                    .map(
+                                        (service) =>
+                                            `<span class="service-tag">${service.name}</span>`,
+                                    )
+                                    .join('')}
+                            </div>
+                            <small>Created: ${new Date(
+                                linkage.createdAt,
+                            ).toLocaleString()}</small>
+                        </div>
+                    `;
+                    });
+
+                    configContainer.innerHTML = html;
+                } catch (error) {
+                    configContainer.innerHTML = `<div class="error">Error loading configuration: ${error.message}</div>`;
+                }
+            }
+
+            // Load initial data when page loads
+            window.addEventListener('load', loadInitialData);
+        </script>
+    </body>
+</html>
