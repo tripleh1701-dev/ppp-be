@@ -432,7 +432,9 @@ class UsersController {
                     lastName: body.lastName,
                     emailAddress: emailToCheck,
                     password: body.password,
-                    status: body.status === 'Active' ? 'ACTIVE' : 'INACTIVE',
+                    status: (body.status === 'Active'
+                        ? 'ACTIVE'
+                        : 'INACTIVE') as 'ACTIVE' | 'INACTIVE',
                     startDate:
                         body.startDate ||
                         new Date().toISOString().split('T')[0],
@@ -1818,7 +1820,7 @@ class UsersController {
         @Res() res: any,
     ) {
         // Delegate to the main implementation
-        return this.assignGroupsToUser(id, body, res);
+        return this.assignGroupToUser(id, body, res);
     }
 
     @Delete(':id/groups')
