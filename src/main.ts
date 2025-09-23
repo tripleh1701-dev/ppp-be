@@ -2880,6 +2880,8 @@ class RolesController {
         @Res() res: any,
     ) {
         try {
+            console.log('🔄 Received scope update request for role:', id);
+
             if (storageMode === 'dynamodb' && AccessControl_Service) {
                 // Validate the scope configuration structure
                 const validatedConfig = {
