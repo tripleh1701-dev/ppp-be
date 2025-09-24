@@ -246,15 +246,18 @@ export class UsersService {
         const normalizedStatus = this.normalizeStatus(body.status);
 
         return await withPg(async (c) => {
-            // Check if email already exists
+            // Check if email already exists (case-insensitive and trimmed)
+            const normalizedEmail = body.emailAddress.trim().toLowerCase();
             const existingUser = await c.query(
-                `SELECT id, first_name, last_name FROM ${this.schema}.fnd_users WHERE email_address = $1`,
-                [body.emailAddress]
+                `SELECT id, first_name, last_name, email_address FROM ${this.schema}.fnd_users WHERE LOWER(TRIM(email_address)) = $1`,
+                [normalizedEmail],
             );
-            
+
             if (existingUser.rows.length > 0) {
                 const existing = existingUser.rows[0];
-                throw new Error(`Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id})`);
+                throw new Error(
+                    `Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id}). Existing email: ${existing.email_address}`,
+                );
             }
             const res = await c.query(
                 `INSERT INTO ${this.schema}.fnd_users (
@@ -304,16 +307,19 @@ export class UsersService {
             const values: any[] = [parseInt(id.toString())];
             let paramIndex = 2;
 
-            // Check for email conflicts if email is being updated
+            // Check for email conflicts if email is being updated (case-insensitive and trimmed)
             if (body.emailAddress !== undefined) {
+                const normalizedEmail = body.emailAddress.trim().toLowerCase();
                 const existingUser = await c.query(
-                    `SELECT id, first_name, last_name FROM ${this.schema}.fnd_users WHERE email_address = $1 AND id != $2`,
-                    [body.emailAddress, parseInt(id.toString())]
+                    `SELECT id, first_name, last_name, email_address FROM ${this.schema}.fnd_users WHERE LOWER(TRIM(email_address)) = $1 AND id != $2`,
+                    [normalizedEmail, parseInt(id.toString())],
                 );
-                
+
                 if (existingUser.rows.length > 0) {
                     const existing = existingUser.rows[0];
-                    throw new Error(`Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id})`);
+                    throw new Error(
+                        `Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id}). Existing email: ${existing.email_address}`,
+                    );
                 }
             }
 
