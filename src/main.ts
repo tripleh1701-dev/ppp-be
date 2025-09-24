@@ -821,6 +821,54 @@ class UsersController {
         const updated = await users.updateUser(id, rest);
         return res.status(HttpStatus.OK).json(updated);
     }
+    // Cleanup endpoint to remove incomplete users
+    @Delete('cleanup/incomplete')
+    async cleanupIncompleteUsers(@Res() res: any) {
+        try {
+            if (storageMode === 'dynamodb' && AccessControl_Service) {
+                // Get all users
+                const result = await AccessControl_Service.listUsers({
+                    limit: 1000,
+                });
+                const incompleteUsers = result.users.filter(
+                    (user) =>
+                        !user.firstName ||
+                        !user.lastName ||
+                        !user.emailAddress ||
+                        user.firstName.trim() === '' ||
+                        user.lastName.trim() === '' ||
+                        user.emailAddress.trim() === '',
+                );
+
+                console.log(
+                    `🧹 Found ${incompleteUsers.length} incomplete users to cleanup`,
+                );
+
+                // Delete incomplete users
+                for (const user of incompleteUsers) {
+                    await AccessControl_Service.deleteUser(user.id);
+                    console.log(`🗑️ Deleted incomplete user: ${user.id}`);
+                }
+
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    deletedCount: incompleteUsers.length,
+                    message: `Cleaned up ${incompleteUsers.length} incomplete users`,
+                });
+            } else {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    error: 'Cleanup only available in DynamoDB mode',
+                });
+            }
+        } catch (error: any) {
+            console.error('Error cleaning up incomplete users:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                error: 'Failed to cleanup incomplete users',
+                details: error.message,
+            });
+        }
+    }
+
     @Delete(':id')
     async remove(@Param('id') id: string, @Res() res: any) {
         try {
