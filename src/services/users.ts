@@ -12,6 +12,7 @@ export interface UserRecord {
     endDate?: string | null;
     password?: string;
     technicalUser: boolean;
+    hasPasswordHash?: boolean;
     assignedUserGroups?: number[];
     createdAt: string;
     updatedAt: string;
@@ -167,6 +168,7 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN true ELSE false END as "hasPasswordHash",
                     created_at as "createdAt",
                     updated_at as "updatedAt"
                 FROM ${this.schema}.fnd_users
@@ -203,6 +205,7 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN true ELSE false END as "hasPasswordHash",
                     assigned_user_group as "assignedUserGroups",
                     created_at as "createdAt",
                     updated_at as "updatedAt"
@@ -259,6 +262,7 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN true ELSE false END as "hasPasswordHash",
                     created_at as "createdAt",
                     updated_at as "updatedAt"`,
                 [
@@ -346,6 +350,7 @@ export class UsersService {
                     start_date as "startDate",
                     end_date as "endDate",
                     technical_user as "technicalUser",
+                    CASE WHEN password_hash IS NOT NULL AND password_hash != '' THEN true ELSE false END as "hasPasswordHash",
                     assigned_user_group as "assignedUserGroups",
                     created_at as "createdAt",
                     updated_at as "updatedAt"
