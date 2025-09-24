@@ -246,6 +246,16 @@ export class UsersService {
         const normalizedStatus = this.normalizeStatus(body.status);
 
         return await withPg(async (c) => {
+            // Check if email already exists
+            const existingUser = await c.query(
+                `SELECT id, first_name, last_name FROM ${this.schema}.fnd_users WHERE email_address = $1`,
+                [body.emailAddress]
+            );
+            
+            if (existingUser.rows.length > 0) {
+                const existing = existingUser.rows[0];
+                throw new Error(`Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id})`);
+            }
             const res = await c.query(
                 `INSERT INTO ${this.schema}.fnd_users (
                     first_name, middle_name, last_name, email_address,
@@ -293,6 +303,19 @@ export class UsersService {
             const setClauses: string[] = [];
             const values: any[] = [parseInt(id.toString())];
             let paramIndex = 2;
+
+            // Check for email conflicts if email is being updated
+            if (body.emailAddress !== undefined) {
+                const existingUser = await c.query(
+                    `SELECT id, first_name, last_name FROM ${this.schema}.fnd_users WHERE email_address = $1 AND id != $2`,
+                    [body.emailAddress, parseInt(id.toString())]
+                );
+                
+                if (existingUser.rows.length > 0) {
+                    const existing = existingUser.rows[0];
+                    throw new Error(`Email ${body.emailAddress} is already used by ${existing.first_name} ${existing.last_name} (ID: ${existing.id})`);
+                }
+            }
 
             if (body.firstName !== undefined) {
                 setClauses.push(`first_name = $${paramIndex++}`);
