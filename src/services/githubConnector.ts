@@ -125,7 +125,7 @@ export class GitHubConnectorService {
         try {
             // Validate SSH key format
             const key = sshpk.parsePrivateKey(config.sshKey, 'auto');
-            if (!key.type.includes('private')) {
+            if (!key.isPrivate()) {
                 throw new Error('Invalid SSH key: Must be a private key');
             }
 
