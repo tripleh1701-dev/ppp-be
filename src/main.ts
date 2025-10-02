@@ -24,7 +24,7 @@ import {BusinessUnitsService} from './services/businessUnits';
 import {UsersService} from './services/users';
 import {UserGroupsService} from './services/userGroups';
 import {GroupsService} from './services/groups';
-import {TemplatesService} from './services/templates';
+import {TemplatesService, templatesService} from './services/templates';
 import {PipelineYamlService} from './services/pipelineYaml';
 import {PipelineConfigService} from './services/pipelineConfig';
 import {ServicesService} from './services/services';
