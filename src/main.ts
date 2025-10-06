@@ -17,7 +17,9 @@ import {
 } from '@nestjs/common';
 
 import path from 'path';
+import * as fs from 'fs';
 import {AccountsService} from './services/accounts';
+import {AccountsDynamoDBService} from './services/accounts-dynamodb';
 import {EnterprisesService} from './services/enterprises';
 import {EnterprisesDynamoDBService} from './services/enterprises-dynamodb';
 import {BusinessUnitsService} from './services/businessUnits';
@@ -36,6 +38,8 @@ import {EnterpriseProductsServicesDynamoDBService} from './services/enterprisePr
 import {RolesService} from './services/roles';
 import {AttributesService} from './services/attributes';
 import {AccessControl_DynamoDBService} from './services/AccessControl_DynamoDB';
+import {AccountLicensesDynamoDBService} from './services/accountLicenses-dynamodb';
+import {UserManagementDynamoDBService} from './services/userManagement-dynamodb';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 
@@ -45,22 +49,20 @@ const STORAGE_DIR = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
     : path.join(process.cwd(), 'data');
 
-// Sample geo data
-const GEO_DATA: Record<string, Record<string, string[]>> = {
-    US: {
-        CA: ['Los Angeles', 'San Francisco', 'San Diego'],
-        NY: ['New York City', 'Buffalo', 'Albany'],
-        TX: ['Houston', 'Dallas', 'Austin'],
-    },
-    UK: {
-        England: ['London', 'Manchester', 'Birmingham'],
-        Scotland: ['Edinburgh', 'Glasgow', 'Aberdeen'],
-        Wales: ['Cardiff', 'Swansea', 'Newport'],
-    },
-};
+// Load geo data from file
+let GEO_DATA: Record<string, Record<string, string[]>> = {};
+try {
+    const geoDataPath = path.join(STORAGE_DIR, 'geo', 'geo.json');
+    const geoDataContent = fs.readFileSync(geoDataPath, 'utf-8');
+    GEO_DATA = JSON.parse(geoDataContent);
+} catch (error) {
+    console.error('Warning: Could not load geo data from file:', error);
+    GEO_DATA = {};
+}
 
 // Providers (plain classes)
 const accounts = new AccountsService(STORAGE_DIR);
+let accountsDynamoDB: AccountsDynamoDBService | null = null;
 
 // Global service variables - will be initialized in bootstrap after env vars are loaded
 let storageMode: string;
@@ -74,6 +76,8 @@ const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
 let services: any;
 let products: any;
 let enterpriseProductsServices: any;
+let accountLicenses: AccountLicensesDynamoDBService;
+let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
@@ -94,16 +98,25 @@ class HealthController {
 class AccountsController {
     @Get()
     async list() {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.list();
+        }
         return await accounts.list();
     }
 
     @Get(':id')
     async get(@Param('id') id: string) {
-        return await accounts.get(Number(id));
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.get(id); // String ID for DynamoDB
+        }
+        return await accounts.get(Number(id)); // Number ID for PostgreSQL
     }
 
     @Post()
     async create(@Body() body: any) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.create(body);
+        }
         return await accounts.create(body);
     }
 
@@ -111,14 +124,25 @@ class AccountsController {
     async update(@Body() body: any) {
         const {id, ...rest} = body || {};
         if (!id) return {error: 'id required'};
-        const updated = await accounts.update(Number(id), rest);
+
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            const updated = await accountsDynamoDB.update(id, rest); // String ID for DynamoDB
+            if (!updated) return {error: 'Not found'};
+            return updated;
+        }
+
+        const updated = await accounts.update(Number(id), rest); // Number ID for PostgreSQL
         if (!updated) return {error: 'Not found'};
         return updated;
     }
 
     @Delete(':id')
     async remove(@Param('id') id: string) {
-        await accounts.remove(Number(id));
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            await accountsDynamoDB.remove(id); // String ID for DynamoDB
+            return {};
+        }
+        await accounts.remove(Number(id)); // Number ID for PostgreSQL
         return {};
     }
 }
@@ -364,22 +388,37 @@ class ProductsController {
 @Controller('api/users')
 class UsersController {
     @Get()
-    async list() {
+    async list(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Use AccessControl DynamoDB service
-                const result = await AccessControl_Service.listUsers({
-                    limit: 1000,
-                });
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Determine if filtering by account
+                // Check for empty strings, null, undefined, or "systiva"
+                const isSystivaAccount =
+                    !accountId ||
+                    accountId === '' ||
+                    !accountName ||
+                    accountName === '' ||
+                    accountName.toLowerCase() === 'systiva';
+
+                let usersFromDB;
+                if (isSystivaAccount) {
+                    usersFromDB = await userManagement.listUsers();
+                } else {
+                    usersFromDB = await userManagement.listUsersByAccount(
+                        accountId,
+                        accountName,
+                    );
+                }
 
                 // Fetch assigned groups for each user
                 const usersWithGroups = await Promise.all(
-                    result.users.map(async (user) => {
+                    usersFromDB.map(async (user) => {
                         try {
                             const assignedGroups =
-                                await AccessControl_Service.getUserGroups(
-                                    user.id,
-                                );
+                                await userManagement.getUserGroups(user.id);
                             return {
                                 ...user,
                                 assignedUserGroups: assignedGroups,
@@ -418,14 +457,7 @@ class UsersController {
             // Check both email and emailAddress fields for compatibility
             const emailToCheck = body?.emailAddress || body?.email;
 
-            // Debug: Backend received request
-            console.log('🔍 Backend received user creation request:', {
-                technicalUser: body.technicalUser,
-                emailAddress: emailToCheck,
-            });
-
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Use AccessControl DynamoDB service
+            if (storageMode === 'dynamodb' && userManagement) {
                 const userPayload = {
                     firstName: body.firstName,
                     middleName: body.middleName,
@@ -442,50 +474,40 @@ class UsersController {
                     technicalUser:
                         body.technicalUser === true ||
                         body.technicalUser === 'true',
+                    assignedGroups: body.assignedUserGroups
+                        ? body.assignedUserGroups.map(
+                              (group: any) => group.id || group,
+                          )
+                        : [],
                 };
 
-                // Debug: Sending to DynamoDB
-                console.log(
-                    '🔍 Saving user to DynamoDB with technicalUser:',
-                    userPayload.technicalUser,
-                );
+                // Determine which table to use based on selected account
+                const selectedAccountId = body.selectedAccountId;
+                const selectedAccountName = body.selectedAccountName;
 
-                const created = await AccessControl_Service.createUser(
-                    userPayload,
-                );
+                // If Systiva is selected or no account is selected, use systiva table
+                // Check for null, undefined, empty string, or string "null"
+                const isSystivaAccount =
+                    !selectedAccountId ||
+                    !selectedAccountName ||
+                    selectedAccountId === 'null' ||
+                    selectedAccountName === 'null' ||
+                    selectedAccountName.toLowerCase() === 'systiva';
 
-                // Handle user group assignments if provided
-                if (
-                    body.assignedUserGroups &&
-                    Array.isArray(body.assignedUserGroups)
-                ) {
-                    console.log(
-                        '🔗 Assigning user to groups:',
-                        body.assignedUserGroups,
+                if (isSystivaAccount) {
+                    const created = await userManagement.createUser(
+                        userPayload,
                     );
-
-                    for (const group of body.assignedUserGroups) {
-                        try {
-                            const groupId = group.id || group;
-                            if (groupId) {
-                                await AccessControl_Service.assignUserToGroup(
-                                    created.id,
-                                    groupId,
-                                );
-                                console.log(
-                                    `✅ Assigned user ${created.id} to group ${groupId}`,
-                                );
-                            }
-                        } catch (error) {
-                            console.error(
-                                `❌ Failed to assign user to group:`,
-                                error,
-                            );
-                        }
-                    }
+                    return res.status(HttpStatus.CREATED).json(created);
+                } else {
+                    const created =
+                        await userManagement.createUserInAccountTable(
+                            userPayload,
+                            selectedAccountId,
+                            selectedAccountName,
+                        );
+                    return res.status(HttpStatus.CREATED).json(created);
                 }
-
-                return res.status(HttpStatus.CREATED).json(created);
             } else if (storageMode === 'postgres') {
                 // Use legacy PostgreSQL service
                 if (emailToCheck) {
@@ -518,24 +540,12 @@ class UsersController {
                 const {password, ...userResponse} = created;
                 return res.status(HttpStatus.CREATED).json(userResponse);
             } else {
-                // Filesystem mode - create a mock user for testing
-                console.log('📁 Filesystem mode: creating mock user');
-                const mockUser = {
-                    id: `user-${Date.now()}`,
-                    firstName: body.firstName,
-                    middleName: body.middleName,
-                    lastName: body.lastName,
-                    emailAddress: emailToCheck,
-                    status: body.status === 'Active' ? 'ACTIVE' : 'INACTIVE',
-                    startDate:
-                        body.startDate ||
-                        new Date().toISOString().split('T')[0],
-                    endDate: body.endDate,
-                    technicalUser: body.technicalUser || false,
-                    createdAt: new Date().toISOString(),
-                    updatedAt: new Date().toISOString(),
-                };
-                return res.status(HttpStatus.CREATED).json(mockUser);
+                // Filesystem mode not supported for user creation
+                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
+                    error: 'User creation requires database storage mode',
+                    message:
+                        'Please configure STORAGE_MODE to postgres or dynamodb',
+                });
             }
         } catch (error: any) {
             console.error('Error creating user:', error);
@@ -575,9 +585,19 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Use AccessControl DynamoDB service
-                const updatedUser = await AccessControl_Service.updateUser(id, {
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Check account context from request body
+                const selectedAccountId = body.selectedAccountId;
+                const selectedAccountName = body.selectedAccountName;
+
+                const isSystivaAccount =
+                    !selectedAccountId ||
+                    !selectedAccountName ||
+                    selectedAccountId === 'null' ||
+                    selectedAccountName === 'null' ||
+                    selectedAccountName.toLowerCase() === 'systiva';
+
+                const updatePayload: any = {
                     firstName: body.firstName,
                     middleName: body.middleName,
                     lastName: body.lastName,
@@ -586,61 +606,39 @@ class UsersController {
                     startDate: body.startDate,
                     endDate: body.endDate,
                     technicalUser: body.technicalUser || false,
-                });
-
-                if (!updatedUser) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
-                        error: 'User not found',
-                    });
-                }
+                };
 
                 // Handle user group assignments if provided
                 if (
                     body.assignedUserGroups &&
                     Array.isArray(body.assignedUserGroups)
                 ) {
-                    console.log(
-                        '🔗 Updating user group assignments:',
-                        body.assignedUserGroups,
+                    updatePayload.assignedGroups = body.assignedUserGroups.map(
+                        (group: any) => group.id || group,
                     );
+                }
 
-                    // First, remove all existing group assignments for this user
-                    try {
-                        const existingGroups =
-                            await AccessControl_Service.getUserGroups(id);
-                        for (const group of existingGroups) {
-                            await AccessControl_Service.removeUserFromGroup(
-                                id,
-                                group.id,
-                            );
-                        }
-                    } catch (error) {
-                        console.error(
-                            '❌ Failed to remove existing group assignments:',
-                            error,
-                        );
-                    }
+                let updatedUser;
+                if (isSystivaAccount) {
+                    // Update in systiva table
+                    updatedUser = await userManagement.updateUser(
+                        id,
+                        updatePayload,
+                    );
+                } else {
+                    // Update in sys_accounts table
+                    updatedUser = await userManagement.updateUserInAccountTable(
+                        id,
+                        updatePayload,
+                        selectedAccountId,
+                        selectedAccountName,
+                    );
+                }
 
-                    // Then, add the new group assignments
-                    for (const group of body.assignedUserGroups) {
-                        try {
-                            const groupId = group.id || group;
-                            if (groupId) {
-                                await AccessControl_Service.assignUserToGroup(
-                                    id,
-                                    groupId,
-                                );
-                                console.log(
-                                    `✅ Assigned user ${id} to group ${groupId}`,
-                                );
-                            }
-                        } catch (error) {
-                            console.error(
-                                `❌ Failed to assign user to group:`,
-                                error,
-                            );
-                        }
-                    }
+                if (!updatedUser) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        error: 'User not found',
+                    });
                 }
 
                 return res.status(HttpStatus.OK).json(updatedUser);
@@ -713,9 +711,9 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Use AccessControl DynamoDB service for partial updates
-                const updatedUser = await AccessControl_Service.updateUser(id, {
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Use UserManagement DynamoDB service for partial updates (saves to systiva table)
+                const updatePayload: any = {
                     ...(body.firstName && {firstName: body.firstName}),
                     ...(body.middleName && {middleName: body.middleName}),
                     ...(body.lastName && {lastName: body.lastName}),
@@ -729,13 +727,30 @@ class UsersController {
                     ...(body.technicalUser !== undefined && {
                         technicalUser: body.technicalUser,
                     }),
-                });
+                };
+
+                // Handle assigned groups if provided
+                if (
+                    body.assignedUserGroups &&
+                    Array.isArray(body.assignedUserGroups)
+                ) {
+                    updatePayload.assignedGroups = body.assignedUserGroups.map(
+                        (group: any) => group.id || group,
+                    );
+                }
+
+                const updatedUser = await userManagement.updateUser(
+                    id,
+                    updatePayload,
+                );
 
                 if (!updatedUser) {
                     return res.status(HttpStatus.NOT_FOUND).json({
                         error: 'User not found',
                     });
                 }
+
+                console.log(`✅ User ${id} partially updated in systiva table`);
 
                 return res.status(HttpStatus.OK).json(updatedUser);
             } else if (storageMode === 'postgres') {
@@ -825,12 +840,10 @@ class UsersController {
     @Delete('cleanup/incomplete')
     async cleanupIncompleteUsers(@Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Get all users
-                const result = await AccessControl_Service.listUsers({
-                    limit: 1000,
-                });
-                const incompleteUsers = result.users.filter(
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Get all users from systiva table
+                const allUsers = await userManagement.listUsers();
+                const incompleteUsers = allUsers.filter(
                     (user) =>
                         !user.firstName ||
                         !user.lastName ||
@@ -846,8 +859,10 @@ class UsersController {
 
                 // Delete incomplete users
                 for (const user of incompleteUsers) {
-                    await AccessControl_Service.deleteUser(user.id);
-                    console.log(`🗑️ Deleted incomplete user: ${user.id}`);
+                    await userManagement.deleteUser(user.id);
+                    console.log(
+                        `🗑️ Deleted incomplete user: ${user.id} from systiva table`,
+                    );
                 }
 
                 return res.status(HttpStatus.OK).json({
@@ -870,11 +885,34 @@ class UsersController {
     }
 
     @Delete(':id')
-    async remove(@Param('id') id: string, @Res() res: any) {
+    async remove(
+        @Param('id') id: string,
+        @Res() res: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                // Use AccessControl DynamoDB service
-                await AccessControl_Service.deleteUser(id);
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Check account context from query parameters
+                const isSystivaAccount =
+                    !accountId ||
+                    !accountName ||
+                    accountId === 'null' ||
+                    accountName === 'null' ||
+                    accountName.toLowerCase() === 'systiva';
+
+                if (isSystivaAccount) {
+                    // Delete from systiva table
+                    await userManagement.deleteUser(id);
+                } else {
+                    // Delete from sys_accounts table
+                    await userManagement.deleteUserFromAccountTable(
+                        id,
+                        accountId,
+                        accountName,
+                    );
+                }
+
                 return res.status(HttpStatus.NO_CONTENT).send();
             } else if (storageMode === 'postgres') {
                 // Use legacy PostgreSQL service
@@ -1790,13 +1828,25 @@ class UsersController {
             // Check if this is a single group assignment {groupId: "..."} or bulk assignment {groupIds: [...]}
             if (body.groupId) {
                 // Single group assignment (new format for individual assignments)
-                if (storageMode === 'dynamodb' && AccessControl_Service) {
-                    await AccessControl_Service.assignUserToGroup(
-                        id,
-                        body.groupId,
-                    );
+                if (storageMode === 'dynamodb' && userManagement) {
+                    // Get current user to update assigned groups
+                    const user = await userManagement.getUser(id);
+                    if (!user) {
+                        return res.status(HttpStatus.NOT_FOUND).json({
+                            success: false,
+                            error: 'User not found',
+                        });
+                    }
+
+                    const currentGroups = user.assignedGroups || [];
+                    if (!currentGroups.includes(body.groupId)) {
+                        await userManagement.updateUser(id, {
+                            assignedGroups: [...currentGroups, body.groupId],
+                        });
+                    }
+
                     console.log(
-                        `✅ Assigned user ${id} to group ${body.groupId} via DynamoDB`,
+                        `✅ Assigned user ${id} to group ${body.groupId} in systiva table`,
                     );
 
                     return res.status(HttpStatus.OK).json({
@@ -1926,8 +1976,8 @@ class UsersController {
     @Get(':id/groups')
     async getUserGroups(@Param('id') id: string, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const user = await AccessControl_Service.getUser(id);
+            if (storageMode === 'dynamodb' && userManagement) {
+                const user = await userManagement.getUser(id);
                 if (!user) {
                     return res.status(HttpStatus.NOT_FOUND).json({
                         success: false,
@@ -1935,7 +1985,7 @@ class UsersController {
                     });
                 }
 
-                const groups = await AccessControl_Service.getUserGroups(id);
+                const groups = await userManagement.getUserGroups(id);
                 return res.status(HttpStatus.OK).json({
                     success: true,
                     data: {
@@ -1985,11 +2035,22 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                await AccessControl_Service.assignUserToGroup(
-                    userId,
-                    body.groupId,
-                );
+            if (storageMode === 'dynamodb' && userManagement) {
+                const user = await userManagement.getUser(userId);
+                if (!user) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'User not found',
+                    });
+                }
+
+                const currentGroups = user.assignedGroups || [];
+                if (!currentGroups.includes(body.groupId)) {
+                    await userManagement.updateUser(userId, {
+                        assignedGroups: [...currentGroups, body.groupId],
+                    });
+                }
+
                 return res.status(HttpStatus.CREATED).json({
                     success: true,
                     message: 'User assigned to group successfully',
@@ -2016,11 +2077,23 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                await AccessControl_Service.removeUserFromGroup(
-                    userId,
-                    groupId,
+            if (storageMode === 'dynamodb' && userManagement) {
+                const user = await userManagement.getUser(userId);
+                if (!user) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'User not found',
+                    });
+                }
+
+                const currentGroups = user.assignedGroups || [];
+                const updatedGroups = currentGroups.filter(
+                    (g) => g !== groupId,
                 );
+                await userManagement.updateUser(userId, {
+                    assignedGroups: updatedGroups,
+                });
+
                 return res.status(HttpStatus.NO_CONTENT).send();
             } else {
                 // Legacy implementation would go here
@@ -2441,11 +2514,22 @@ class UserGroupsController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                await AccessControl_Service.assignRoleToGroup(
-                    groupId,
-                    body.roleId,
-                );
+            if (storageMode === 'dynamodb' && userManagement) {
+                const group = await userManagement.getGroup(groupId);
+                if (!group) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'Group not found',
+                    });
+                }
+
+                const currentRoles = group.assignedRoles || [];
+                if (!currentRoles.includes(body.roleId)) {
+                    await userManagement.updateGroup(groupId, {
+                        assignedRoles: [...currentRoles, body.roleId],
+                    });
+                }
+
                 return res.status(HttpStatus.CREATED).json({
                     success: true,
                     message: 'Role assigned to group successfully',
@@ -2472,11 +2556,20 @@ class UserGroupsController {
         @Res() res: any,
     ) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                await AccessControl_Service.removeRoleFromGroup(
-                    groupId,
-                    roleId,
-                );
+            if (storageMode === 'dynamodb' && userManagement) {
+                const group = await userManagement.getGroup(groupId);
+                if (!group) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'Group not found',
+                    });
+                }
+
+                const currentRoles = group.assignedRoles || [];
+                const updatedRoles = currentRoles.filter((r) => r !== roleId);
+                await userManagement.updateGroup(groupId, {
+                    assignedRoles: updatedRoles,
+                });
             } else {
                 await roles.removeRoleFromGroup(groupId, roleId);
             }
@@ -2491,10 +2584,8 @@ class UserGroupsController {
     @Get(':groupId/roles')
     async getGroupRoles(@Param('groupId') groupId: string, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const groupRoles = await AccessControl_Service.getGroupRoles(
-                    groupId,
-                );
+            if (storageMode === 'dynamodb' && userManagement) {
+                const groupRoles = await userManagement.getGroupRoles(groupId);
                 return res.status(HttpStatus.OK).json({
                     success: true,
                     data: {roles: groupRoles},
@@ -2516,13 +2607,17 @@ class UserGroupsController {
     @Get(':groupId/users')
     async getGroupUsers(@Param('groupId') groupId: string, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const users = await AccessControl_Service.getGroupUsers(
-                    groupId,
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Get all users and filter by assigned groups
+                const allUsers = await userManagement.listUsers();
+                const groupUsers = allUsers.filter(
+                    (user) =>
+                        user.assignedGroups &&
+                        user.assignedGroups.includes(groupId),
                 );
                 return res.status(HttpStatus.OK).json({
                     success: true,
-                    data: {users},
+                    data: {users: groupUsers},
                 });
             } else {
                 // Legacy implementation would need to be added here
@@ -2792,12 +2887,55 @@ class UserGroupsController {
 @Controller('api/roles')
 class RolesController {
     @Get()
-    async list(@Query('groupId') groupId?: string) {
-        if (storageMode === 'dynamodb' && AccessControl_Service) {
+    async list(
+        @Query('groupId') groupId?: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
+        console.log('📋 listRoles API called with:', {
+            groupId,
+            accountId,
+            accountName,
+            accountIdType: typeof accountId,
+            accountNameType: typeof accountName,
+        });
+
+        if (storageMode === 'dynamodb' && userManagement) {
             if (groupId) {
-                return await AccessControl_Service.getGroupRoles(groupId);
+                return await userManagement.getGroupRoles(groupId);
             }
-            return await AccessControl_Service.listRoles();
+
+            // Determine if this is a Systiva account request
+            const isSystivaAccount =
+                !accountId ||
+                accountId === '' ||
+                !accountName ||
+                accountName === '' ||
+                accountName.toLowerCase() === 'systiva';
+
+            console.log('📋 isSystivaAccount check:', {
+                isSystivaAccount,
+                checks: {
+                    noAccountId: !accountId,
+                    emptyAccountId: accountId === '',
+                    noAccountName: !accountName,
+                    emptyAccountName: accountName === '',
+                    isSystivaName: accountName?.toLowerCase() === 'systiva',
+                },
+            });
+
+            if (isSystivaAccount) {
+                console.log('📋 Calling listRoles() for Systiva');
+                return await userManagement.listRoles();
+            } else {
+                console.log(
+                    `📋 Calling listRolesByAccount() for ${accountName}`,
+                );
+                return await userManagement.listRolesByAccount(
+                    accountId,
+                    accountName,
+                );
+            }
         } else {
             if (groupId) {
                 return await roles.getRolesForGroup(groupId);
@@ -2808,8 +2946,8 @@ class RolesController {
 
     @Get(':id')
     async get(@Param('id') id: string, @Res() res: any) {
-        if (storageMode === 'dynamodb' && AccessControl_Service) {
-            const role = await AccessControl_Service.getRole(id);
+        if (storageMode === 'dynamodb' && userManagement) {
+            const role = await userManagement.getRole(id);
             if (!role) {
                 return res
                     .status(HttpStatus.NOT_FOUND)
@@ -2830,11 +2968,11 @@ class RolesController {
     @Post()
     async create(@Body() body: any, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const role = await AccessControl_Service.createRole({
+            if (storageMode === 'dynamodb' && userManagement) {
+                const role = await userManagement.createRole({
                     name: body.name,
                     description: body.description,
-                    permissions: body.permissions || [],
+                    scopeConfig: body.scopeConfig,
                 });
                 return res.status(HttpStatus.CREATED).json(role);
             } else {
@@ -2851,11 +2989,8 @@ class RolesController {
     @Put(':id')
     async update(@Param('id') id: string, @Body() body: any, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const updated = await AccessControl_Service.updateRole(
-                    id,
-                    body,
-                );
+            if (storageMode === 'dynamodb' && userManagement) {
+                const updated = await userManagement.updateRole(id, body);
                 if (!updated) {
                     return res
                         .status(HttpStatus.NOT_FOUND)
@@ -2881,8 +3016,8 @@ class RolesController {
     @Delete(':id')
     async delete(@Param('id') id: string, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                await AccessControl_Service.deleteRole(id);
+            if (storageMode === 'dynamodb' && userManagement) {
+                await userManagement.deleteRole(id);
             } else {
                 await roles.delete(id);
             }
@@ -2898,15 +3033,14 @@ class RolesController {
     @Get(':id/scope')
     async getRoleScope(@Param('id') id: string, @Res() res: any) {
         try {
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
-                const scopeConfig = await AccessControl_Service.getRoleScope(
-                    id,
-                );
-                if (!scopeConfig) {
+            if (storageMode === 'dynamodb' && userManagement) {
+                const role = await userManagement.getRole(id);
+                if (!role) {
                     return res.status(HttpStatus.NOT_FOUND).json({
-                        error: 'Role or scope configuration not found',
+                        error: 'Role not found',
                     });
                 }
+                const scopeConfig = role.scopeConfig || {};
                 return res.json(scopeConfig);
             } else {
                 // For file-based storage, we can extend the roles service later
@@ -2930,7 +3064,7 @@ class RolesController {
         try {
             console.log('🔄 Received scope update request for role:', id);
 
-            if (storageMode === 'dynamodb' && AccessControl_Service) {
+            if (storageMode === 'dynamodb' && userManagement) {
                 // Validate the scope configuration structure
                 const validatedConfig = {
                     accountSettings: scopeConfig.accountSettings || [],
@@ -2941,12 +3075,12 @@ class RolesController {
                     configured: true,
                     createdAt:
                         scopeConfig.createdAt || new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
                 };
 
-                const updatedRole = await AccessControl_Service.updateRoleScope(
-                    id,
-                    validatedConfig,
-                );
+                const updatedRole = await userManagement.updateRole(id, {
+                    scopeConfig: validatedConfig,
+                });
 
                 if (!updatedRole) {
                     return res.status(HttpStatus.NOT_FOUND).json({
@@ -3069,8 +3203,8 @@ class BreadcrumbController {
 class GroupsController {
     @Get()
     async list(@Query('search') search?: string) {
-        if (storageMode === 'dynamodb' && AccessControl_Service) {
-            const allGroups = await AccessControl_Service.listGroups();
+        if (storageMode === 'dynamodb' && userManagement) {
+            const allGroups = await userManagement.listGroups();
             if (!search) return allGroups;
             const searchLower = search.toLowerCase();
             return allGroups.filter(
@@ -3086,8 +3220,8 @@ class GroupsController {
 
     @Post()
     async create(@Body() body: any, @Res() res: any) {
-        if (storageMode === 'dynamodb' && AccessControl_Service) {
-            const created = await AccessControl_Service.createGroup({
+        if (storageMode === 'dynamodb' && userManagement) {
+            const created = await userManagement.createGroup({
                 name: body?.name,
                 description: body?.description,
             });
@@ -3446,6 +3580,439 @@ class EnterpriseProductsServicesController {
     }
 }
 
+@Controller('api/account-licenses')
+class AccountLicensesController {
+    @Get('account/:accountId')
+    async getByAccount(@Param('accountId') accountId: string) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+        return await accountLicenses.getByAccount(accountId);
+    }
+
+    @Get('account/:accountId/license/:licenseId')
+    async get(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+        return await accountLicenses.get(accountId, licenseId);
+    }
+
+    @Post('sync')
+    async syncToAccount(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+
+        const {
+            accountId,
+            accountName,
+            enterpriseId,
+            productId,
+            serviceId,
+            licenseStart,
+            licenseEnd,
+        } = body;
+
+        if (
+            !accountId ||
+            !accountName ||
+            !enterpriseId ||
+            !productId ||
+            !serviceId
+        ) {
+            return {
+                error: 'Missing required fields: accountId, accountName, enterpriseId, productId, serviceId',
+            };
+        }
+
+        // Get the names from the respective services
+        const [enterprise, product, service] = await Promise.all([
+            enterprises.get(enterpriseId),
+            products.get(productId),
+            services.get(serviceId),
+        ]);
+
+        if (!enterprise || !product || !service) {
+            return {error: 'Enterprise, product, or service not found'};
+        }
+
+        return await accountLicenses.syncToAccount({
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName: enterprise.name,
+            productId,
+            productName: product.name,
+            serviceId,
+            serviceName: service.name,
+            licenseStart,
+            licenseEnd,
+        });
+    }
+
+    @Post('sync-linkage')
+    async syncLinkageToAccount(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+
+        const {accountId, accountName, linkageId, licenseStart, licenseEnd} =
+            body;
+
+        if (!accountId || !accountName || !linkageId) {
+            return {
+                error: 'Missing required fields: accountId, accountName, linkageId',
+            };
+        }
+
+        // Get the linkage data
+        const linkage = await enterpriseProductsServices.get(linkageId);
+        if (!linkage) {
+            return {error: 'Linkage not found'};
+        }
+
+        // Get the names from the respective services
+        const [enterprise, product, ...serviceList] = await Promise.all([
+            enterprises.get(linkage.enterpriseId),
+            products.get(linkage.productId),
+            ...linkage.serviceIds.map((serviceId: string) =>
+                services.get(serviceId),
+            ),
+        ]);
+
+        if (!enterprise || !product) {
+            return {error: 'Enterprise or product not found'};
+        }
+
+        const servicesData = linkage.serviceIds
+            .map((serviceId: string, index: number) => {
+                const svc = serviceList[index];
+                if (svc) {
+                    return {id: serviceId, name: svc.name};
+                }
+                return null;
+            })
+            .filter((s: any) => s !== null);
+
+        return await accountLicenses.syncLinkageToAccount({
+            accountId,
+            accountName,
+            enterpriseId: linkage.enterpriseId,
+            enterpriseName: enterprise.name,
+            productId: linkage.productId,
+            productName: product.name,
+            services: servicesData,
+            licenseStart,
+            licenseEnd,
+        });
+    }
+
+    @Delete('account/:accountId/license/:licenseId')
+    async remove(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+        await accountLicenses.remove(accountId, licenseId);
+        return {};
+    }
+
+    @Put('account/:accountId/license/:licenseId')
+    async updateLicensePeriod(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+        @Body() body: any,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+
+        const {licenseStart, licenseEnd} = body;
+
+        if (!licenseStart || !licenseEnd) {
+            return {
+                error: 'Missing required fields: licenseStart, licenseEnd',
+            };
+        }
+
+        return await accountLicenses.updateLicensePeriod(
+            accountId,
+            licenseId,
+            licenseStart,
+            licenseEnd,
+        );
+    }
+
+    @Get('debug')
+    async debug() {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Account licenses only available in DynamoDB mode'};
+        }
+        return await accountLicenses.debugTableContents();
+    }
+}
+
+@Controller('api/user-management')
+class UserManagementController {
+    // ==========================================
+    // USER ENDPOINTS
+    // ==========================================
+
+    @Get('users')
+    async listUsers() {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.listUsers();
+    }
+
+    @Get('users/:id')
+    async getUser(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.getUser(id);
+    }
+
+    @Get('users/:id/hierarchy')
+    async getUserWithHierarchy(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.getUserWithFullHierarchy(id);
+    }
+
+    @Post('users')
+    async createUser(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.createUser(body);
+    }
+
+    @Put('users/:id')
+    async updateUser(@Param('id') id: string, @Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.updateUser(id, body);
+    }
+
+    @Delete('users/:id')
+    async deleteUser(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        await userManagement.deleteUser(id);
+        return {};
+    }
+
+    // ==========================================
+    // GROUP ENDPOINTS
+    // ==========================================
+
+    @Get('groups')
+    async listGroups(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        console.log('📋 listGroups API called with account context:', {
+            accountId,
+            accountName,
+        });
+        const groups = await userManagement.listGroups(accountId, accountName);
+        console.log(`📋 listGroups returning ${groups.length} groups`);
+        return groups;
+    }
+
+    @Get('groups/:id')
+    async getGroup(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.getGroup(id);
+    }
+
+    @Get('groups/:id/roles')
+    async getGroupRoles(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.getGroupRoles(id);
+    }
+
+    @Post('groups')
+    async createGroup(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        console.log('🆕 createGroup API called with body:', body);
+        const result = await userManagement.createGroup(body);
+        console.log('🆕 createGroup created group:', result);
+        return result;
+    }
+
+    @Put('groups/:id')
+    async updateGroup(@Param('id') id: string, @Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        console.log(`🔄 updateGroup API called for id: ${id} with body:`, body);
+        const result = await userManagement.updateGroup(id, body);
+        console.log(`🔄 updateGroup result:`, result);
+        return result;
+    }
+
+    @Delete('groups/:id')
+    async deleteGroup(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        await userManagement.deleteGroup(id);
+        return {};
+    }
+
+    // ==========================================
+    // ROLE ENDPOINTS
+    // ==========================================
+
+    @Get('roles')
+    async listRoles(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
+        console.log('📋 listRoles API called with:', {
+            accountId,
+            accountName,
+            accountIdType: typeof accountId,
+            accountNameType: typeof accountName,
+        });
+
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        const isSystivaAccount =
+            !accountId ||
+            accountId === '' ||
+            !accountName ||
+            accountName === '' ||
+            accountName.toLowerCase() === 'systiva';
+
+        console.log('📋 isSystivaAccount check:', {
+            isSystivaAccount,
+            checks: {
+                noAccountId: !accountId,
+                emptyAccountId: accountId === '',
+                noAccountName: !accountName,
+                emptyAccountName: accountName === '',
+                isSystivaName: accountName?.toLowerCase() === 'systiva',
+            },
+        });
+
+        if (isSystivaAccount) {
+            console.log('📋 Calling listRoles() for Systiva');
+            return await userManagement.listRoles();
+        } else {
+            console.log(`📋 Calling listRolesByAccount() for ${accountName}`);
+            return await userManagement.listRolesByAccount(
+                accountId,
+                accountName,
+            );
+        }
+    }
+
+    @Get('roles/:id')
+    async getRole(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.getRole(id);
+    }
+
+    @Post('roles')
+    async createRole(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.createRole(body);
+    }
+
+    @Put('roles/:id')
+    async updateRole(@Param('id') id: string, @Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.updateRole(id, body);
+    }
+
+    @Delete('roles/:id')
+    async deleteRole(@Param('id') id: string) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        await userManagement.deleteRole(id);
+        return {};
+    }
+
+    // ==========================================
+    // DEBUG ENDPOINTS
+    // ==========================================
+
+    @Get('debug')
+    async debug() {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+        return await userManagement.debugTableContents();
+    }
+}
+
 @Module({
     controllers: [
         HealthController,
@@ -3465,6 +4032,8 @@ class EnterpriseProductsServicesController {
         ProductsController,
         GroupsController,
         EnterpriseProductsServicesController,
+        AccountLicensesController,
+        UserManagementController,
     ],
 })
 class AppModule {}
@@ -3524,14 +4093,19 @@ async function bootstrap() {
         console.log('Initializing services for storage mode:', storageMode);
 
         if (storageMode === 'dynamodb') {
+            accountsDynamoDB = new AccountsDynamoDBService();
             enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
             services = new ServicesDynamoDBService(STORAGE_DIR);
             products = new ProductsDynamoDBService(STORAGE_DIR);
             enterpriseProductsServices =
                 new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
+            accountLicenses = new AccountLicensesDynamoDBService();
+            userManagement = new UserManagementDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
+            console.log('Accounts DynamoDB service initialized');
             console.log('AccessControl DynamoDB service initialized');
+            console.log('UserManagement DynamoDB service initialized');
         } else {
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
@@ -3553,11 +4127,12 @@ async function bootstrap() {
         console.log('Using existing database schema with fnd_ tables...');
 
         const PORT = Number(process.env.PORT || 4000);
+        const HOST = process.env.HOST || 'localhost';
         await app.listen(PORT);
 
         console.log(`🚀 DevOps Automate Backend is running on port ${PORT}`);
-        console.log(`📊 Health check: http://localhost:${PORT}/health`);
-        console.log(`🔧 API endpoints: http://localhost:${PORT}/api`);
+        console.log(`📊 Health check: http://${HOST}:${PORT}/health`);
+        console.log(`🔧 API endpoints: http://${HOST}:${PORT}/api`);
     } catch (error) {
         console.error('Failed to start application:', error);
         process.exit(1);

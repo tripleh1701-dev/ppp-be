@@ -12,9 +12,8 @@ export class ProductsDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default
-        this.tableName =
-            process.env.DYNAMODB_ENTERPRISE_TABLE || 'EnterpriseConfig';
+        // Table name from environment or default to 'systiva'
+        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
     }
 
     async list(): Promise<Product[]> {
@@ -30,7 +29,7 @@ export class ProductsDynamoDBService {
             // Transform DynamoDB items to Product interface
             return items
                 .map((item) => ({
-                    id: item.PK?.replace('PROD#', '') || item.id,
+                    id: item.PK?.replace('SYSTIVA#', '') || item.id,
                     name: item.product_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
@@ -48,8 +47,8 @@ export class ProductsDynamoDBService {
             const now = new Date().toISOString();
 
             const item = {
-                PK: `PROD#${productId}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${productId}`,
+                SK: `PRODUCT#${productId}`,
                 id: productId,
                 product_name: body.name,
                 name: body.name, // Keep both for compatibility
@@ -101,8 +100,8 @@ export class ProductsDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `PROD#${id}`,
-                            SK: 'METADATA',
+                            PK: `SYSTIVA#${id}`,
+                            SK: `PRODUCT#${id}`,
                         },
                         UpdateExpression: updateExpression,
                         ExpressionAttributeValues: expressionAttributeValues,
@@ -135,8 +134,8 @@ export class ProductsDynamoDBService {
     async remove(id: string): Promise<void> {
         try {
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `PROD#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `PRODUCT#${id}`,
             });
         } catch (error) {
             console.error('Error removing product:', error);
@@ -147,8 +146,8 @@ export class ProductsDynamoDBService {
     async get(id: string): Promise<Product | null> {
         try {
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `PROD#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `PRODUCT#${id}`,
             });
 
             if (!item) {

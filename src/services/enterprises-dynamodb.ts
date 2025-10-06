@@ -12,25 +12,24 @@ export class EnterprisesDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default
-        this.tableName =
-            process.env.DYNAMODB_ENTERPRISE_TABLE || 'EnterpriseConfig';
+        // Table name from environment or default to 'systiva'
+        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
     }
 
     async list(): Promise<Enterprise[]> {
         try {
             const items = await DynamoDBOperations.scanItems(this.tableName);
 
-            // Filter and transform only enterprise items (those with ENT# prefix and METADATA sort key)
+            // Filter and transform only enterprise items (those with SYSTIVA# prefix and ENTERPRISE# sort key)
             return items
                 .filter(
                     (item) =>
-                        item.PK?.startsWith('ENT#') &&
-                        item.SK === 'METADATA' &&
+                        item.PK?.startsWith('SYSTIVA#') &&
+                        item.SK?.startsWith('ENTERPRISE#') &&
                         item.entity_type === 'enterprise',
                 )
                 .map((item) => ({
-                    id: item.PK?.replace('ENT#', '') || item.id,
+                    id: item.PK?.replace('SYSTIVA#', '') || item.id,
                     name: item.enterprise_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
@@ -48,8 +47,8 @@ export class EnterprisesDynamoDBService {
             const now = new Date().toISOString();
 
             const item = {
-                PK: `ENT#${enterpriseId}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${enterpriseId}`,
+                SK: `ENTERPRISE#${enterpriseId}`,
                 id: enterpriseId,
                 enterprise_name: body.name,
                 name: body.name, // Keep both for compatibility
@@ -101,8 +100,8 @@ export class EnterprisesDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `ENT#${id}`,
-                            SK: 'METADATA',
+                            PK: `SYSTIVA#${id}`,
+                            SK: `ENTERPRISE#${id}`,
                         },
                         UpdateExpression: updateExpression,
                         ExpressionAttributeValues: expressionAttributeValues,
@@ -135,8 +134,8 @@ export class EnterprisesDynamoDBService {
     async remove(id: string): Promise<void> {
         try {
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `ENT#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `ENTERPRISE#${id}`,
             });
         } catch (error) {
             console.error('Error removing enterprise:', error);
@@ -147,8 +146,8 @@ export class EnterprisesDynamoDBService {
     async get(id: string): Promise<Enterprise | null> {
         try {
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `ENT#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `ENTERPRISE#${id}`,
             });
 
             if (!item) {
@@ -185,7 +184,7 @@ export class EnterprisesDynamoDBService {
 
             const item = items[0];
             return {
-                id: item.id || item.PK?.replace('ENT#', ''),
+                id: item.id || item.PK?.replace('SYSTIVA#', ''),
                 name: item.enterprise_name || item.name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
@@ -210,8 +209,8 @@ export class EnterprisesDynamoDBService {
                 const now = new Date().toISOString();
 
                 const item = {
-                    PK: `ENT#${enterpriseId}`,
-                    SK: 'METADATA',
+                    PK: `SYSTIVA#${enterpriseId}`,
+                    SK: `ENTERPRISE#${enterpriseId}`,
                     id: enterpriseId,
                     enterprise_name: pgEnterprise.name,
                     name: pgEnterprise.name,

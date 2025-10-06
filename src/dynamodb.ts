@@ -112,9 +112,8 @@ export async function testDynamoDBConnection(): Promise<boolean> {
         const docClient = getDynamoDBDocumentClient();
 
         // Try to perform a simple operation - list tables or scan a small table
-        // For enterprise configuration, we'll try to scan with a limit of 1
-        const tableName =
-            process.env.DYNAMODB_ENTERPRISE_TABLE || 'EnterpriseConfig';
+        // For systiva table, we'll try to scan with a limit of 1
+        const tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
 
         await docClient.send(
             new ScanCommand({
@@ -279,17 +278,26 @@ export const DynamoDBOperations = {
         key: any,
         updateExpression: string,
         expressionAttributeValues: any,
+        expressionAttributeNames?: any,
     ): Promise<any> {
         return withDynamoDB(async (client) => {
-            const result = await client.send(
-                new UpdateCommand({
-                    TableName: tableName,
-                    Key: key,
-                    UpdateExpression: updateExpression,
-                    ExpressionAttributeValues: expressionAttributeValues,
-                    ReturnValues: 'ALL_NEW',
-                }),
-            );
+            const updateParams: any = {
+                TableName: tableName,
+                Key: key,
+                UpdateExpression: updateExpression,
+                ExpressionAttributeValues: expressionAttributeValues,
+                ReturnValues: 'ALL_NEW',
+            };
+
+            if (
+                expressionAttributeNames &&
+                Object.keys(expressionAttributeNames).length > 0
+            ) {
+                updateParams.ExpressionAttributeNames =
+                    expressionAttributeNames;
+            }
+
+            const result = await client.send(new UpdateCommand(updateParams));
             return result.Attributes;
         });
     },

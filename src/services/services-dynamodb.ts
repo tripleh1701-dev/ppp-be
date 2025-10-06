@@ -12,9 +12,8 @@ export class ServicesDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default
-        this.tableName =
-            process.env.DYNAMODB_ENTERPRISE_TABLE || 'EnterpriseConfig';
+        // Table name from environment or default to 'systiva'
+        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
     }
 
     async list(): Promise<Service[]> {
@@ -30,7 +29,7 @@ export class ServicesDynamoDBService {
             // Transform DynamoDB items to Service interface
             return items
                 .map((item) => ({
-                    id: item.PK?.replace('SVC#', '') || item.id,
+                    id: item.PK?.replace('SYSTIVA#', '') || item.id,
                     name: item.service_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
@@ -53,8 +52,8 @@ export class ServicesDynamoDBService {
             const now = new Date().toISOString();
 
             const item = {
-                PK: `SVC#${serviceId}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${serviceId}`,
+                SK: `SERVICE#${serviceId}`,
                 id: serviceId,
                 service_name: body.name,
                 name: body.name, // Keep both for compatibility
@@ -111,8 +110,8 @@ export class ServicesDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `SVC#${id}`,
-                            SK: 'METADATA',
+                            PK: `SYSTIVA#${id}`,
+                            SK: `SERVICE#${id}`,
                         },
                         UpdateExpression: updateExpression,
                         ExpressionAttributeValues: expressionAttributeValues,
@@ -145,8 +144,8 @@ export class ServicesDynamoDBService {
     async remove(id: string): Promise<void> {
         try {
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SVC#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `SERVICE#${id}`,
             });
         } catch (error) {
             console.error('Error removing service:', error);
@@ -157,8 +156,8 @@ export class ServicesDynamoDBService {
     async get(id: string): Promise<Service | null> {
         try {
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SVC#${id}`,
-                SK: 'METADATA',
+                PK: `SYSTIVA#${id}`,
+                SK: `SERVICE#${id}`,
             });
 
             if (!item) {
