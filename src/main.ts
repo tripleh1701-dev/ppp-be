@@ -40,6 +40,7 @@ import {AttributesService} from './services/attributes';
 import {AccessControl_DynamoDBService} from './services/AccessControl_DynamoDB';
 import {AccountLicensesDynamoDBService} from './services/accountLicenses-dynamodb';
 import {UserManagementDynamoDBService} from './services/userManagement-dynamodb';
+import {EnvironmentsService} from './services/environments';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 
@@ -85,6 +86,7 @@ const userGroups = new UserGroupsService(STORAGE_DIR);
 const groups = new GroupsService(STORAGE_DIR);
 const roles = new RolesService(STORAGE_DIR);
 const attributes = new AttributesService(STORAGE_DIR);
+const environments = new EnvironmentsService(STORAGE_DIR);
 
 @Controller('health')
 class HealthController {
@@ -3360,6 +3362,46 @@ class PipelineConfigController {
     }
 }
 
+@Controller('api/environments')
+class EnvironmentsController {
+    @Get()
+    async getAll() {
+        return await environments.getAll();
+    }
+
+    @Get(':id')
+    async getById(@Param('id') id: string) {
+        const environment = await environments.getById(id);
+        if (!environment) {
+            return {error: 'Environment not found', status: 404};
+        }
+        return environment;
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        return await environments.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        const updated = await environments.update(id, body);
+        if (!updated) {
+            return {error: 'Environment not found', status: 404};
+        }
+        return updated;
+    }
+
+    @Delete(':id')
+    async delete(@Param('id') id: string) {
+        const deleted = await environments.delete(id);
+        if (!deleted) {
+            return {error: 'Environment not found', status: 404};
+        }
+        return {success: true};
+    }
+}
+
 @Controller('api/enterprise-products-services')
 class EnterpriseProductsServicesController {
     @Get()
@@ -4028,6 +4070,7 @@ class UserManagementController {
         TemplatesController,
         PipelineYamlController,
         PipelineConfigController,
+        EnvironmentsController,
         ServicesController,
         ProductsController,
         GroupsController,
