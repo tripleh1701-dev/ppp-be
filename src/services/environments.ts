@@ -13,6 +13,9 @@ export interface Environment {
     credentialName?: string;
     tags?: string[];
     environmentType?: 'Preproduction' | 'Production';
+    accountId?: string;
+    accountName?: string;
+    enterpriseId?: string;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -40,6 +43,8 @@ export class EnvironmentsService {
                     credential_name text,
                     tags jsonb,
                     environment_type text,
+                    account_id text,
+                    enterprise_id text,
                     created_at timestamp default now(),
                     updated_at timestamp default now()
                 )
@@ -63,6 +68,8 @@ export class EnvironmentsService {
                         credential_name as "credentialName",
                         tags,
                         environment_type as "environmentType",
+                        account_id as "accountId",
+                        enterprise_id as "enterpriseId",
                         created_at as "createdAt",
                         updated_at as "updatedAt"
                      from ${this.schema}.environments
@@ -91,6 +98,8 @@ export class EnvironmentsService {
                         credential_name as "credentialName",
                         tags,
                         environment_type as "environmentType",
+                        account_id as "accountId",
+                        enterprise_id as "enterpriseId",
                         created_at as "createdAt",
                         updated_at as "updatedAt"
                      from ${this.schema}.environments
@@ -121,8 +130,8 @@ export class EnvironmentsService {
                 await c.query(
                     `insert into ${this.schema}.environments (
                         id, environment_name, details, deployment_type, test_connectivity,
-                        status, url, credential_name, tags, environment_type
-                    ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+                        status, url, credential_name, tags, environment_type, account_id, enterprise_id
+                    ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
                     [
                         newEnvironment.id,
                         newEnvironment.environmentName,
@@ -134,6 +143,8 @@ export class EnvironmentsService {
                         newEnvironment.credentialName,
                         JSON.stringify(newEnvironment.tags || []),
                         newEnvironment.environmentType,
+                        newEnvironment.accountId || null,
+                        newEnvironment.enterpriseId || null,
                     ],
                 );
             });
@@ -193,6 +204,14 @@ export class EnvironmentsService {
                     setClauses.push(`environment_type = $${paramIndex++}`);
                     values.push(updates.environmentType);
                 }
+                if (updates.accountId !== undefined) {
+                    setClauses.push(`account_id = $${paramIndex++}`);
+                    values.push(updates.accountId);
+                }
+                if (updates.enterpriseId !== undefined) {
+                    setClauses.push(`enterprise_id = $${paramIndex++}`);
+                    values.push(updates.enterpriseId);
+                }
 
                 setClauses.push(`updated_at = now()`);
                 values.push(id);
@@ -212,6 +231,8 @@ export class EnvironmentsService {
                         credential_name as "credentialName",
                         tags,
                         environment_type as "environmentType",
+                        account_id as "accountId",
+                        enterprise_id as "enterpriseId",
                         created_at as "createdAt",
                         updated_at as "updatedAt"`,
                     values,

@@ -115,7 +115,7 @@ export class UserManagementDynamoDBService {
                 assigned_groups: user.assignedGroups,
                 created_date: now,
                 updated_date: now,
-                entity_type: 'user',
+                entity_type: 'USER',
             };
 
             await DynamoDBOperations.putItem(this.tableName, item);
@@ -177,15 +177,20 @@ export class UserManagementDynamoDBService {
                 assigned_groups: user.assignedGroups,
                 created_date: now,
                 updated_date: now,
-                entity_type: 'user',
+                entity_type: 'USER',
             };
 
-            await DynamoDBOperations.putItem('sys_accounts', item);
+            await DynamoDBOperations.putItem(this.tableName, item);
 
-            // Create user-group assignment lookup records (still in systiva table for global lookups)
+            // Create user-group assignment lookup records
             if (user.assignedGroups && user.assignedGroups.length > 0) {
                 for (const groupId of user.assignedGroups) {
-                    await this.createUserGroupLookup(userId, groupId);
+                    await this.createUserGroupLookupInAccount(
+                        userId,
+                        groupId,
+                        accountId,
+                        accountName,
+                    );
                 }
             }
 
@@ -289,15 +294,16 @@ export class UserManagementDynamoDBService {
 
     async listUsers(): Promise<User[]> {
         try {
-            console.log('📋 Scanning DynamoDB for Systiva users');
+            console.log('📋 Querying DynamoDB for Systiva users');
 
-            // Query for Systiva users only (PK starts with SYSTIVA#)
-            const items = await DynamoDBOperations.scanItems(
+            // Query for Systiva users using correct PK pattern
+            const systivaPK = 'SYSTIVA#systiva#USERS';
+            const items = await DynamoDBOperations.queryItems(
                 this.tableName,
-                'entity_type = :type AND begins_with(PK, :pkPrefix)',
+                'PK = :pk AND begins_with(SK, :sk)',
                 {
-                    ':type': 'user',
-                    ':pkPrefix': 'SYSTIVA#',
+                    ':pk': systivaPK,
+                    ':sk': 'USER#',
                 },
             );
 
@@ -479,9 +485,9 @@ export class UserManagementDynamoDBService {
             const now = new Date().toISOString();
             const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
 
-            // Get existing user from sys_accounts table
+            // Get existing user from systiva table
             const items = await DynamoDBOperations.queryItems(
-                'sys_accounts',
+                this.tableName,
                 'PK = :pk AND SK = :sk',
                 {
                     ':pk': accountPK,
@@ -570,7 +576,7 @@ export class UserManagementDynamoDBService {
                 const {UpdateCommand} = await import('@aws-sdk/lib-dynamodb');
                 const response = await client.send(
                     new UpdateCommand({
-                        TableName: 'sys_accounts',
+                        TableName: this.tableName,
                         Key: {
                             PK: accountPK,
                             SK: `USER#${userId}`,
@@ -642,7 +648,7 @@ export class UserManagementDynamoDBService {
 
             // Get user to find assigned groups for cleanup
             const items = await DynamoDBOperations.queryItems(
-                'sys_accounts',
+                this.tableName,
                 'PK = :pk AND SK = :sk',
                 {
                     ':pk': accountPK,
@@ -660,7 +666,7 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            await DynamoDBOperations.deleteItem('sys_accounts', {
+            await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: accountPK,
                 SK: `USER#${userId}`,
             });
@@ -687,11 +693,13 @@ export class UserManagementDynamoDBService {
             // Determine if this is for a specific account or Systiva
             const isAccountSpecific =
                 groupData.selectedAccountId && groupData.selectedAccountName;
-            const pkPrefix = isAccountSpecific
+
+            // Use correct PK pattern: <ACCOUNT_NAME>#${account_Id}#GROUPS
+            const accountPK = isAccountSpecific
                 ? `${groupData.selectedAccountName!.toUpperCase()}#${
                       groupData.selectedAccountId
-                  }#GROUP`
-                : 'SYSTIVA';
+                  }#GROUPS`
+                : `SYSTIVA#systiva#GROUPS`;
 
             const group: Group = {
                 id: groupId,
@@ -705,9 +713,11 @@ export class UserManagementDynamoDBService {
             };
 
             const item: any = {
-                PK: `${pkPrefix}#${groupId}`,
+                PK: accountPK,
                 SK: `GROUP#${groupId}`,
                 id: groupId,
+                account_id: groupData.selectedAccountId || 'systiva',
+                account_name: groupData.selectedAccountName || 'SYSTIVA',
                 group_name: group.name,
                 description: group.description,
                 entity: group.entity || '',
@@ -715,7 +725,7 @@ export class UserManagementDynamoDBService {
                 assigned_roles: group.assignedRoles,
                 created_date: now,
                 updated_date: now,
-                entity_type: 'group',
+                entity_type: 'GROUP',
             };
 
             // Add account fields if account-specific
@@ -784,37 +794,36 @@ export class UserManagementDynamoDBService {
 
             let items: any[];
             if (isAccountSpecific) {
-                // Query for account-specific groups
-                const pkPrefix = `${accountName.toUpperCase()}#${accountId}#GROUP`;
+                // Query for account-specific groups using correct PK pattern
+                const accountPK = `${accountName.toUpperCase()}#${accountId}#GROUPS`;
                 console.log(
-                    '📋 Querying for account-specific groups with PK prefix:',
-                    pkPrefix,
+                    '📋 Querying for account-specific groups with PK:',
+                    accountPK,
                 );
 
-                items = await DynamoDBOperations.scanItems(
+                items = await DynamoDBOperations.queryItems(
                     this.tableName,
-                    'entity_type = :type AND begins_with(PK, :pkPrefix)',
+                    'PK = :pk AND begins_with(SK, :sk)',
                     {
-                        ':type': 'group',
-                        ':pkPrefix': pkPrefix,
+                        ':pk': accountPK,
+                        ':sk': 'GROUP#',
                     },
                 );
             } else {
-                // Query for Systiva groups
+                // Query for Systiva groups using correct PK pattern
                 console.log('📋 Querying for Systiva groups');
-                items = await DynamoDBOperations.scanItems(
+                const systivaPK = 'SYSTIVA#systiva#GROUPS';
+                items = await DynamoDBOperations.queryItems(
                     this.tableName,
-                    'entity_type = :type AND begins_with(PK, :pkPrefix)',
+                    'PK = :pk AND begins_with(SK, :sk)',
                     {
-                        ':type': 'group',
-                        ':pkPrefix': 'SYSTIVA#',
+                        ':pk': systivaPK,
+                        ':sk': 'GROUP#',
                     },
                 );
             }
 
-            console.log(
-                `📋 Found ${items.length} items with entity_type = group`,
-            );
+            console.log(`📋 Found ${items.length} groups`);
             console.log('📋 Sample items:', items.slice(0, 2));
 
             const groups = items
@@ -980,11 +989,42 @@ export class UserManagementDynamoDBService {
     // ==========================================
 
     async createRole(
-        roleData: Omit<Role, 'id' | 'createdAt' | 'updatedAt'>,
+        roleData: Omit<Role, 'id' | 'createdAt' | 'updatedAt'> & {
+            selectedAccountId?: string;
+            selectedAccountName?: string;
+        },
     ): Promise<Role> {
         try {
             const roleId = uuidv4();
             const now = new Date().toISOString();
+
+            console.log('📋 createRole called with roleData:', {
+                name: roleData.name,
+                selectedAccountId: roleData.selectedAccountId,
+                selectedAccountName: roleData.selectedAccountName,
+                selectedAccountId_type: typeof roleData.selectedAccountId,
+                selectedAccountName_type: typeof roleData.selectedAccountName,
+                fullRoleData: roleData,
+            });
+
+            // Determine if this is for a specific account or Systiva
+            const isAccountSpecific =
+                roleData.selectedAccountId && roleData.selectedAccountName;
+
+            console.log('📋 isAccountSpecific check:', {
+                isAccountSpecific,
+                hasAccountId: !!roleData.selectedAccountId,
+                hasAccountName: !!roleData.selectedAccountName,
+            });
+
+            // Use correct PK pattern: <ACCOUNT_NAME>#${account_Id}#ROLES
+            const accountPK = isAccountSpecific
+                ? `${roleData.selectedAccountName!.toUpperCase()}#${
+                      roleData.selectedAccountId
+                  }#ROLES`
+                : `SYSTIVA#systiva#ROLES`;
+
+            console.log('📋 Using PK:', accountPK);
 
             const role: Role = {
                 id: roleId,
@@ -994,18 +1034,25 @@ export class UserManagementDynamoDBService {
             };
 
             const item = {
-                PK: `SYSTIVA#${roleId}`,
+                PK: accountPK,
                 SK: `ROLE#${roleId}`,
                 id: roleId,
+                account_id: roleData.selectedAccountId || 'systiva',
+                account_name: roleData.selectedAccountName || 'SYSTIVA',
                 role_name: role.name,
                 description: role.description,
                 scope_config: role.scopeConfig,
                 created_date: now,
                 updated_date: now,
-                entity_type: 'role',
+                entity_type: 'ROLE',
             };
 
+            console.log('📋 DynamoDB item to be created:', item);
+
             await DynamoDBOperations.putItem(this.tableName, item);
+
+            console.log(`✅ Role created successfully with PK: ${accountPK}`);
+
             return role;
         } catch (error) {
             console.error('Error creating role:', error);
@@ -1040,15 +1087,16 @@ export class UserManagementDynamoDBService {
 
     async listRoles(): Promise<Role[]> {
         try {
-            console.log('📋 Scanning DynamoDB for Systiva roles');
+            console.log('📋 Querying DynamoDB for Systiva roles');
 
-            // Query for Systiva roles only (PK starts with SYSTIVA#)
-            const items = await DynamoDBOperations.scanItems(
+            // Query for Systiva roles using correct PK pattern
+            const systivaPK = 'SYSTIVA#systiva#ROLES';
+            const items = await DynamoDBOperations.queryItems(
                 this.tableName,
-                'entity_type = :type AND begins_with(PK, :pkPrefix)',
+                'PK = :pk AND begins_with(SK, :sk)',
                 {
-                    ':type': 'role',
-                    ':pkPrefix': 'SYSTIVA#',
+                    ':pk': systivaPK,
+                    ':sk': 'ROLE#',
                 },
             );
 
@@ -1068,13 +1116,14 @@ export class UserManagementDynamoDBService {
             return items
                 .map((item) => ({
                     id: item.id || item.PK?.replace('SYSTIVA#', ''),
-                    name: item.role_name || item.name,
+                    roleName: item.role_name || item.name,
+                    name: item.role_name || item.name, // Keep for backwards compatibility
                     description: item.description,
                     scopeConfig: item.scope_config,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
                 }))
-                .sort((a, b) => a.name.localeCompare(b.name));
+                .sort((a, b) => a.roleName.localeCompare(b.roleName));
         } catch (error) {
             console.error('Error listing roles:', error);
             throw error;
@@ -1121,7 +1170,8 @@ export class UserManagementDynamoDBService {
 
             return items.map((item) => ({
                 id: item.id,
-                name: item.role_name || item.name,
+                roleName: item.role_name || item.name,
+                name: item.role_name || item.name, // Keep for backwards compatibility
                 description: item.description,
                 scopeConfig: item.scope_config,
                 createdAt: item.created_date || item.createdAt,
@@ -1245,6 +1295,42 @@ export class UserManagementDynamoDBService {
         await DynamoDBOperations.putItem(this.tableName, lookupItem);
     }
 
+    // Account-specific user-group relationship lookups
+    private async createUserGroupLookupInAccount(
+        userId: string,
+        groupId: string,
+        accountId: string,
+        accountName: string,
+    ): Promise<void> {
+        const now = new Date().toISOString();
+
+        // User's groups relationship: PK: USER#${accountId}#${userId}#GROUPS, SK: GROUP#${groupId}
+        const userGroupsItem = {
+            PK: `USER#${accountId}#${userId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
+            user_id: userId,
+            group_id: groupId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'GROUP_MEMBERSHIP',
+        };
+        await DynamoDBOperations.putItem(this.tableName, userGroupsItem);
+
+        // Group's members relationship: PK: GROUP#${accountId}#${groupId}#MEMBERS, SK: USER#${userId}
+        const groupMembersItem = {
+            PK: `GROUP#${accountId}#${groupId}#MEMBERS`,
+            SK: `USER#${userId}`,
+            user_id: userId,
+            group_id: groupId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'USER_IN_GROUP',
+        };
+        await DynamoDBOperations.putItem(this.tableName, groupMembersItem);
+    }
+
     private async deleteUserGroupLookup(
         userId: string,
         groupId: string,
@@ -1252,6 +1338,24 @@ export class UserManagementDynamoDBService {
         await DynamoDBOperations.deleteItem(this.tableName, {
             PK: `SYSTIVA#${userId}`,
             SK: `GROUP_ASSIGNMENT#${groupId}`,
+        });
+    }
+
+    private async deleteUserGroupLookupInAccount(
+        userId: string,
+        groupId: string,
+        accountId: string,
+    ): Promise<void> {
+        // Delete user's groups relationship
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `USER#${accountId}#${userId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
+        });
+
+        // Delete group's members relationship
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `GROUP#${accountId}#${groupId}#MEMBERS`,
+            SK: `USER#${userId}`,
         });
     }
 
@@ -1312,6 +1416,42 @@ export class UserManagementDynamoDBService {
         await DynamoDBOperations.putItem(this.tableName, lookupItem);
     }
 
+    // Account-specific group-role relationship lookups
+    private async createGroupRoleLookupInAccount(
+        groupId: string,
+        roleId: string,
+        accountId: string,
+        accountName: string,
+    ): Promise<void> {
+        const now = new Date().toISOString();
+
+        // Group's roles relationship: PK: GROUP#${accountId}#${groupId}#ROLES, SK: ROLE#${roleId}
+        const groupRolesItem = {
+            PK: `GROUP#${accountId}#${groupId}#ROLES`,
+            SK: `ROLE#${roleId}`,
+            group_id: groupId,
+            role_id: roleId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'GROUP_ROLE_ASSIGNMENT',
+        };
+        await DynamoDBOperations.putItem(this.tableName, groupRolesItem);
+
+        // Role's groups relationship: PK: ROLE#${accountId}#${roleId}#GROUPS, SK: GROUP#${groupId}
+        const roleGroupsItem = {
+            PK: `ROLE#${accountId}#${roleId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
+            group_id: groupId,
+            role_id: roleId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'ROLE_GROUP_ASSIGNMENT',
+        };
+        await DynamoDBOperations.putItem(this.tableName, roleGroupsItem);
+    }
+
     private async deleteGroupRoleLookup(
         groupId: string,
         roleId: string,
@@ -1319,6 +1459,24 @@ export class UserManagementDynamoDBService {
         await DynamoDBOperations.deleteItem(this.tableName, {
             PK: `SYSTIVA#${groupId}`,
             SK: `ROLE_ASSIGNMENT#${roleId}`,
+        });
+    }
+
+    private async deleteGroupRoleLookupInAccount(
+        groupId: string,
+        roleId: string,
+        accountId: string,
+    ): Promise<void> {
+        // Delete group's roles relationship
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `GROUP#${accountId}#${groupId}#ROLES`,
+            SK: `ROLE#${roleId}`,
+        });
+
+        // Delete role's groups relationship
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `ROLE#${accountId}#${roleId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
         });
     }
 
@@ -1338,6 +1496,60 @@ export class UserManagementDynamoDBService {
         for (const roleId of rolesToAdd) {
             await this.createGroupRoleLookup(groupId, roleId);
         }
+    }
+
+    // User-Role Lookup Management (for direct user-role assignments)
+    private async createUserRoleLookupInAccount(
+        userId: string,
+        roleId: string,
+        accountId: string,
+        accountName: string,
+    ): Promise<void> {
+        const now = new Date().toISOString();
+
+        // User's direct roles: PK: USER#${accountId}#${userId}#ROLES, SK: ROLE#${roleId}
+        const userRolesItem = {
+            PK: `USER#${accountId}#${userId}#ROLES`,
+            SK: `ROLE#${roleId}`,
+            user_id: userId,
+            role_id: roleId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'USER_ROLE_ASSIGNMENT',
+        };
+        await DynamoDBOperations.putItem(this.tableName, userRolesItem);
+
+        // Role's direct users: PK: ROLE#${accountId}#${roleId}#USERS, SK: USER#${userId}
+        const roleUsersItem = {
+            PK: `ROLE#${accountId}#${roleId}#USERS`,
+            SK: `USER#${userId}`,
+            user_id: userId,
+            role_id: roleId,
+            account_id: accountId,
+            account_name: accountName,
+            assigned_at: now,
+            entity_type: 'USER_ROLE_ASSIGNMENT',
+        };
+        await DynamoDBOperations.putItem(this.tableName, roleUsersItem);
+    }
+
+    private async deleteUserRoleLookupInAccount(
+        userId: string,
+        roleId: string,
+        accountId: string,
+    ): Promise<void> {
+        // Delete user's direct roles
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `USER#${accountId}#${userId}#ROLES`,
+            SK: `ROLE#${roleId}`,
+        });
+
+        // Delete role's direct users
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `ROLE#${accountId}#${roleId}#USERS`,
+            SK: `USER#${userId}`,
+        });
     }
 
     private async deleteAllGroupRoleLookupsForRole(

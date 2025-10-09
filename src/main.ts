@@ -41,6 +41,7 @@ import {AccessControl_DynamoDBService} from './services/AccessControl_DynamoDB';
 import {AccountLicensesDynamoDBService} from './services/accountLicenses-dynamodb';
 import {UserManagementDynamoDBService} from './services/userManagement-dynamodb';
 import {EnvironmentsService} from './services/environments';
+import {EnvironmentsDynamoDBService} from './services/environments-dynamodb';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 
@@ -80,13 +81,13 @@ let enterpriseProductsServices: any;
 let accountLicenses: AccountLicensesDynamoDBService;
 let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
+let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
 const groups = new GroupsService(STORAGE_DIR);
 const roles = new RolesService(STORAGE_DIR);
 const attributes = new AttributesService(STORAGE_DIR);
-const environments = new EnvironmentsService(STORAGE_DIR);
 
 @Controller('health')
 class HealthController {
@@ -146,6 +147,113 @@ class AccountsController {
         }
         await accounts.remove(Number(id)); // Number ID for PostgreSQL
         return {};
+    }
+
+    // Technical User endpoints
+    @Post(':accountId/technical-users')
+    async createTechnicalUser(
+        @Param('accountId') accountId: string,
+        @Body() body: any,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.createTechnicalUser(accountId, body);
+        }
+        return {error: 'Technical users only supported in DynamoDB mode'};
+    }
+
+    @Get(':accountId/technical-users')
+    async getTechnicalUser(@Param('accountId') accountId: string) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.getTechnicalUser(accountId);
+        }
+        return {error: 'Technical users only supported in DynamoDB mode'};
+    }
+
+    @Put(':accountId/technical-users/:techUserId')
+    async updateTechnicalUser(
+        @Param('accountId') accountId: string,
+        @Param('techUserId') techUserId: string,
+        @Body() body: any,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.updateTechnicalUser(
+                accountId,
+                techUserId,
+                body,
+            );
+        }
+        return {error: 'Technical users only supported in DynamoDB mode'};
+    }
+
+    @Delete(':accountId/technical-users/:techUserId')
+    async deleteTechnicalUser(
+        @Param('accountId') accountId: string,
+        @Param('techUserId') techUserId: string,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            await accountsDynamoDB.deleteTechnicalUser(accountId, techUserId);
+            return {};
+        }
+        return {error: 'Technical users only supported in DynamoDB mode'};
+    }
+
+    // License endpoints
+    @Post(':accountId/licenses')
+    async createLicense(
+        @Param('accountId') accountId: string,
+        @Body() body: any,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.createLicense(accountId, body);
+        }
+        return {error: 'Licenses only supported in DynamoDB mode'};
+    }
+
+    @Get(':accountId/licenses')
+    async listLicenses(@Param('accountId') accountId: string) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.listLicenses(accountId);
+        }
+        return {error: 'Licenses only supported in DynamoDB mode'};
+    }
+
+    @Get(':accountId/licenses/:licenseId')
+    async getLicense(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.getLicense(accountId, licenseId);
+        }
+        return {error: 'Licenses only supported in DynamoDB mode'};
+    }
+
+    @Put(':accountId/licenses/:licenseId')
+    async updateLicense(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+        @Body() body: any,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.updateLicense(
+                accountId,
+                licenseId,
+                body,
+            );
+        }
+        return {error: 'Licenses only supported in DynamoDB mode'};
+    }
+
+    @Delete(':accountId/licenses/:licenseId')
+    async deleteLicense(
+        @Param('accountId') accountId: string,
+        @Param('licenseId') licenseId: string,
+    ) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            await accountsDynamoDB.deleteLicense(accountId, licenseId);
+            return {};
+        }
+        return {error: 'Licenses only supported in DynamoDB mode'};
     }
 }
 
@@ -3365,8 +3473,26 @@ class PipelineConfigController {
 @Controller('api/environments')
 class EnvironmentsController {
     @Get()
-    async getAll() {
-        return await environments.getAll();
+    async getAll(
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+    ) {
+        const allEnvironments = await environments.getAll();
+
+        // Filter by accountId and enterpriseId if provided
+        let filtered = allEnvironments;
+        if (accountId) {
+            filtered = filtered.filter(
+                (env: any) => env.accountId === accountId,
+            );
+        }
+        if (enterpriseId) {
+            filtered = filtered.filter(
+                (env: any) => env.enterpriseId === enterpriseId,
+            );
+        }
+
+        return filtered;
     }
 
     @Get(':id')
@@ -4144,11 +4270,13 @@ async function bootstrap() {
                 new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
             accountLicenses = new AccountLicensesDynamoDBService();
             userManagement = new UserManagementDynamoDBService();
+            environments = new EnvironmentsDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
             console.log('Accounts DynamoDB service initialized');
             console.log('AccessControl DynamoDB service initialized');
             console.log('UserManagement DynamoDB service initialized');
+            console.log('Environments DynamoDB service initialized');
         } else {
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
@@ -4156,6 +4284,7 @@ async function bootstrap() {
             enterpriseProductsServices = new EnterpriseProductsServicesService(
                 STORAGE_DIR,
             );
+            environments = new EnvironmentsService(STORAGE_DIR);
             // For non-DynamoDB modes, we'll still use legacy services
             console.log(
                 'Using legacy AccessControl services (PostgreSQL/filesystem)',
