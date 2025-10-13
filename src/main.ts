@@ -42,6 +42,7 @@ import {AccountLicensesDynamoDBService} from './services/accountLicenses-dynamod
 import {UserManagementDynamoDBService} from './services/userManagement-dynamodb';
 import {EnvironmentsService} from './services/environments';
 import {EnvironmentsDynamoDBService} from './services/environments-dynamodb';
+import {GlobalSettingsDynamoDBService} from './services/globalSettings-dynamodb';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 
@@ -82,6 +83,7 @@ let accountLicenses: AccountLicensesDynamoDBService;
 let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
 let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
+let globalSettings: GlobalSettingsDynamoDBService;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -4181,6 +4183,163 @@ class UserManagementController {
     }
 }
 
+@Controller('api/global-settings')
+class GlobalSettingsController {
+    @Get()
+    async getEntities(
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('enterpriseId') enterpriseId: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        if (!accountId || !accountName || !enterpriseId) {
+            return {
+                error: 'accountId, accountName, and enterpriseId are required',
+            };
+        }
+        console.log(
+            `📋 getEntities API called for account: ${accountId}, enterprise: ${enterpriseId}`,
+        );
+        return await globalSettings.getEntitiesByAccountAndEnterprise(
+            accountId,
+            accountName,
+            enterpriseId,
+        );
+    }
+
+    @Get(':entityName')
+    async getEntity(
+        @Param('entityName') entityName: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('enterpriseId') enterpriseId: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        if (!accountId || !accountName || !enterpriseId) {
+            return {
+                error: 'accountId, accountName, and enterpriseId are required',
+            };
+        }
+        console.log(
+            `🔍 getEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
+        );
+        return await globalSettings.getEntity(
+            accountId,
+            accountName,
+            enterpriseId,
+            entityName,
+        );
+    }
+
+    @Post()
+    async createEntity(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        console.log('🆕 createEntity API called with body:', body);
+        return await globalSettings.createEntity(body);
+    }
+
+    @Put(':entityName')
+    async updateEntity(
+        @Param('entityName') entityName: string,
+        @Body() body: any,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        const {accountId, accountName, enterpriseId, configuration} = body;
+        if (!accountId || !accountName || !enterpriseId || !configuration) {
+            return {
+                error: 'accountId, accountName, enterpriseId, and configuration are required',
+            };
+        }
+        console.log(
+            `🔄 updateEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
+        );
+        return await globalSettings.updateEntity(
+            accountId,
+            accountName,
+            enterpriseId,
+            entityName,
+            configuration,
+        );
+    }
+
+    @Delete(':entityName')
+    async deleteEntity(
+        @Param('entityName') entityName: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('enterpriseId') enterpriseId: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        if (!accountId || !accountName || !enterpriseId) {
+            return {
+                error: 'accountId, accountName, and enterpriseId are required',
+            };
+        }
+        console.log(
+            `🗑️ deleteEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
+        );
+        await globalSettings.deleteEntity(
+            accountId,
+            accountName,
+            enterpriseId,
+            entityName,
+        );
+        return {};
+    }
+
+    @Post('batch-save')
+    async batchSave(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'Global settings only available in DynamoDB mode',
+            };
+        }
+        const {accountId, accountName, enterpriseId, enterpriseName, entities} =
+            body;
+        if (
+            !accountId ||
+            !accountName ||
+            !enterpriseId ||
+            !enterpriseName ||
+            !entities
+        ) {
+            return {
+                error: 'accountId, accountName, enterpriseId, enterpriseName, and entities are required',
+            };
+        }
+        console.log(
+            `💾 batchSave API called for account: ${accountId}, enterprise: ${enterpriseId} with ${entities.length} entities`,
+        );
+        return await globalSettings.batchSaveEntities(
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            entities,
+        );
+    }
+}
+
 @Module({
     controllers: [
         HealthController,
@@ -4203,6 +4362,7 @@ class UserManagementController {
         EnterpriseProductsServicesController,
         AccountLicensesController,
         UserManagementController,
+        GlobalSettingsController,
     ],
 })
 class AppModule {}
@@ -4271,12 +4431,14 @@ async function bootstrap() {
             accountLicenses = new AccountLicensesDynamoDBService();
             userManagement = new UserManagementDynamoDBService();
             environments = new EnvironmentsDynamoDBService();
+            globalSettings = new GlobalSettingsDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
             console.log('Accounts DynamoDB service initialized');
             console.log('AccessControl DynamoDB service initialized');
             console.log('UserManagement DynamoDB service initialized');
             console.log('Environments DynamoDB service initialized');
+            console.log('GlobalSettings DynamoDB service initialized');
         } else {
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
