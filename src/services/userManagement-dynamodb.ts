@@ -77,6 +77,77 @@ export class UserManagementDynamoDBService {
         return bcrypt.hash(password, 10);
     }
 
+    private async comparePassword(
+        plainPassword: string,
+        hashedPassword: string,
+    ): Promise<boolean> {
+        return bcrypt.compare(plainPassword, hashedPassword);
+    }
+
+    // ==========================================
+    // AUTHENTICATION
+    // ==========================================
+
+    async authenticateUser(
+        email: string,
+        password: string,
+        accountId: string = '51a0f277-742c-49bd-98b1-8f5001d0ddf7', // Systiva account UUID
+    ): Promise<User | null> {
+        try {
+            // Query users by account using PK format: SYSTIVA#${accountId}#USER
+            // where accountId is the actual account UUID from DynamoDB
+            const items = await DynamoDBOperations.queryItems(
+                this.tableName,
+                'PK = :pk AND begins_with(SK, :sk)',
+                {
+                    ':pk': `SYSTIVA#${accountId}#USER`,
+                    ':sk': 'USER#',
+                },
+            );
+
+            // Find user by email (case-insensitive)
+            const userItem = items.find(
+                (item) =>
+                    item.email_address?.toLowerCase() === email.toLowerCase(),
+            );
+
+            if (!userItem || !userItem.password) {
+                console.log('User not found or no password set');
+                return null;
+            }
+
+            // Verify password
+            const isPasswordValid = await this.comparePassword(
+                password,
+                userItem.password,
+            );
+
+            if (!isPasswordValid) {
+                console.log('Invalid password');
+                return null;
+            }
+
+            // Return user without password
+            return {
+                id: userItem.id,
+                firstName: userItem.first_name,
+                middleName: userItem.middle_name,
+                lastName: userItem.last_name,
+                emailAddress: userItem.email_address,
+                status: userItem.status,
+                startDate: userItem.start_date,
+                endDate: userItem.end_date,
+                technicalUser: userItem.technical_user,
+                assignedGroups: userItem.assigned_groups || [],
+                createdAt: userItem.created_date || userItem.createdAt,
+                updatedAt: userItem.updated_date || userItem.updatedAt,
+            };
+        } catch (error) {
+            console.error('Error authenticating user:', error);
+            return null;
+        }
+    }
+
     // ==========================================
     // USER OPERATIONS
     // ==========================================

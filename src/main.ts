@@ -99,6 +99,101 @@ class HealthController {
     }
 }
 
+@Controller('api/auth')
+class AuthController {
+    @Post('login')
+    async login(@Body() body: any, @Res() res: any) {
+        try {
+            const {email, password} = body;
+
+            if (!email || !password) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Email and password are required',
+                });
+            }
+
+            // Use userManagement service for authentication
+            if (storageMode !== 'dynamodb' || !userManagement) {
+                return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+                    success: false,
+                    error: 'Authentication service not available',
+                });
+            }
+
+            const user = await userManagement.authenticateUser(email, password);
+
+            if (!user) {
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    error: 'Invalid email or password',
+                });
+            }
+
+            // Get user's groups and roles
+            let userRole = 'User'; // Default role
+            try {
+                const userGroups = await userManagement.getUserGroups(user.id);
+                if (userGroups && userGroups.length > 0) {
+                    // Get roles from the first group
+                    const groupRoles = await userManagement.getGroupRoles(
+                        userGroups[0].id,
+                    );
+                    if (groupRoles && groupRoles.length > 0) {
+                        userRole = groupRoles[0].name || 'User';
+                    }
+                }
+            } catch (roleError) {
+                console.error('Error fetching user roles:', roleError);
+                // Continue with default role
+            }
+
+            // Generate a simple token (in production, use JWT)
+            const token = Buffer.from(
+                JSON.stringify({
+                    userId: user.id,
+                    email: user.emailAddress,
+                    name: `${user.firstName} ${user.lastName}`,
+                    role: userRole,
+                    timestamp: Date.now(),
+                }),
+            ).toString('base64');
+
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                data: {
+                    user: {
+                        id: user.id,
+                        firstName: user.firstName,
+                        middleName: user.middleName,
+                        lastName: user.lastName,
+                        emailAddress: user.emailAddress,
+                        status: user.status,
+                        technicalUser: user.technicalUser,
+                        role: userRole,
+                    },
+                    token,
+                },
+            });
+        } catch (error) {
+            console.error('Error during login:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: 'Authentication failed',
+            });
+        }
+    }
+
+    @Post('logout')
+    async logout(@Res() res: any) {
+        // In a real implementation, invalidate the token
+        return res.status(HttpStatus.OK).json({
+            success: true,
+            message: 'Logged out successfully',
+        });
+    }
+}
+
 @Controller('api/accounts')
 class AccountsController {
     @Get()
@@ -4343,6 +4438,7 @@ class GlobalSettingsController {
 @Module({
     controllers: [
         HealthController,
+        AuthController,
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,
