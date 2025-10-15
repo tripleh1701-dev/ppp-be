@@ -4850,7 +4850,14 @@ async function bootstrap() {
 
         console.log('Services initialized successfully!');
 
-        const app = await NestFactory.create(AppModule, {cors: true});
+        //const app = await NestFactory.create(AppModule, {cors: true});
+       const app = await NestFactory.create(AppModule);
+        app.enableCors({
+        origin: 'http://75.101.182.63:3000',
+        credentials: true,
+        });
+
+
 
         // Skip seeding - using existing fnd_ tables
         console.log('Using existing database schema with fnd_ tables...');
