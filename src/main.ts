@@ -45,6 +45,8 @@ import {EnvironmentsDynamoDBService} from './services/environments-dynamodb';
 import {GlobalSettingsDynamoDBService} from './services/globalSettings-dynamodb';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
+import * as pipelineCanvas from './services/pipelineCanvas';
+import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
 
 dotenv.config();
 
@@ -84,6 +86,7 @@ let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
 let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
 let globalSettings: GlobalSettingsDynamoDBService;
+let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -589,6 +592,296 @@ class ProductsController {
             await products.remove(Number(id)); // Number ID for PostgreSQL
         }
         return {};
+    }
+}
+
+@Controller('api/pipelines')
+class PipelinesController {
+    @Get()
+    async list() {
+        // Return pipeline names (reusing enterprises for now as a placeholder)
+        return await enterprises.list();
+    }
+
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            return await enterprises.get(id);
+        } else {
+            return await enterprises.get(Number(id));
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        return await enterprises.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await enterprises.update(id, body);
+        } else {
+            updated = await enterprises.update(Number(id), body);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Put()
+    async updateWithIdInBody(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await enterprises.update(id, rest);
+        } else {
+            updated = await enterprises.update(Number(id), rest);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            await enterprises.remove(id);
+        } else {
+            await enterprises.remove(Number(id));
+        }
+        return {};
+    }
+}
+
+@Controller('api/pipeline-details')
+class PipelineDetailsController {
+    @Get()
+    async list() {
+        // Return pipeline details (reusing products for now as a placeholder)
+        return await products.list();
+    }
+
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            return await products.get(id);
+        } else {
+            return await products.get(Number(id));
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        return await products.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await products.update(id, body);
+        } else {
+            updated = await products.update(Number(id), body);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Put()
+    async updateWithIdInBody(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await products.update(id, rest);
+        } else {
+            updated = await products.update(Number(id), rest);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            await products.remove(id);
+        } else {
+            await products.remove(Number(id));
+        }
+        return {};
+    }
+}
+
+@Controller('api/pipeline-services')
+class PipelineServicesController {
+    @Get()
+    async list() {
+        // Return services
+        return await services.list();
+    }
+
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            return await services.get(id);
+        } else {
+            return await services.get(Number(id));
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        return await services.create(body);
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await services.update(id, body);
+        } else {
+            updated = await services.update(Number(id), body);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Put()
+    async updateWithIdInBody(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
+        let updated;
+        if (storageMode === 'dynamodb') {
+            updated = await services.update(id, rest);
+        } else {
+            updated = await services.update(Number(id), rest);
+        }
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        if (storageMode === 'dynamodb') {
+            await services.remove(id);
+        } else {
+            await services.remove(Number(id));
+        }
+        return {};
+    }
+}
+
+@Controller('api/pipeline-canvas')
+class PipelineCanvasController {
+    @Get()
+    async list(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+    ) {
+        try {
+            // Return pipeline canvas data (separate from enterprise configuration)
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                // If account/enterprise filters provided, use filtered query
+                if (accountId && accountName) {
+                    return await pipelineCanvasDynamoDB.listByAccountEnterprise(
+                        accountId,
+                        accountName,
+                        enterpriseId,
+                    );
+                }
+                return await pipelineCanvasDynamoDB.list();
+            } else {
+                return await pipelineCanvas.list();
+            }
+        } catch (error: any) {
+            console.error('Error listing pipeline canvas:', error);
+            throw error;
+        }
+    }
+
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+            return await pipelineCanvasDynamoDB.get(id);
+        }
+        return await pipelineCanvas.get(id);
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        try {
+            console.log('Creating pipeline canvas with body:', body);
+
+            const data = {
+                pipelineName: body.pipelineName || '',
+                details: body.details || '',
+                service: body.service || '',
+                entity: body.entity || '',
+                status: body.status || 'Active',
+                lastUpdated: new Date().toISOString(),
+                accountId: body.accountId,
+                accountName: body.accountName,
+                enterpriseId: body.enterpriseId,
+                enterpriseName: body.enterpriseName,
+                yamlContent: body.yamlContent,
+                createdBy: body.createdBy,
+            };
+
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                return await pipelineCanvasDynamoDB.create(data);
+            }
+            return await pipelineCanvas.create(data);
+        } catch (error: any) {
+            console.error('Error creating pipeline canvas:', error);
+            throw error;
+        }
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any, @Res() res: any) {
+        try {
+            const data: any = {};
+            if (body.pipelineName !== undefined)
+                data.pipelineName = body.pipelineName;
+            if (body.details !== undefined) data.details = body.details;
+            if (body.service !== undefined) data.service = body.service;
+            if (body.entity !== undefined) data.entity = body.entity;
+            if (body.status !== undefined) data.status = body.status;
+            if (body.yamlContent !== undefined)
+                data.yamlContent = body.yamlContent;
+            data.lastUpdated = new Date().toISOString();
+
+            let result;
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                result = await pipelineCanvasDynamoDB.update(id, data);
+            } else {
+                result = await pipelineCanvas.update(id, data);
+            }
+
+            if (!result) {
+                return res.status(404).json({error: 'Pipeline not found'});
+            }
+
+            return res.json(result);
+        } catch (error: any) {
+            console.error('Error updating pipeline-canvas:', error.message);
+            return res.status(500).json({
+                error: 'Failed to update pipeline',
+                message: error.message,
+            });
+        }
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+            await pipelineCanvasDynamoDB.remove(id);
+        } else {
+            await pipelineCanvas.remove(id);
+        }
+        return {success: true};
     }
 }
 
@@ -4454,6 +4747,10 @@ class GlobalSettingsController {
         EnvironmentsController,
         ServicesController,
         ProductsController,
+        PipelinesController,
+        PipelineDetailsController,
+        PipelineServicesController,
+        PipelineCanvasController,
         GroupsController,
         EnterpriseProductsServicesController,
         AccountLicensesController,
@@ -4528,6 +4825,7 @@ async function bootstrap() {
             userManagement = new UserManagementDynamoDBService();
             environments = new EnvironmentsDynamoDBService();
             globalSettings = new GlobalSettingsDynamoDBService();
+            pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
             console.log('Accounts DynamoDB service initialized');
@@ -4535,6 +4833,7 @@ async function bootstrap() {
             console.log('UserManagement DynamoDB service initialized');
             console.log('Environments DynamoDB service initialized');
             console.log('GlobalSettings DynamoDB service initialized');
+            console.log('PipelineCanvas DynamoDB service initialized');
         } else {
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
