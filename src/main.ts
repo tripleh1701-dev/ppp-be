@@ -47,6 +47,9 @@ import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 import * as pipelineCanvas from './services/pipelineCanvas';
 import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
+import {BuildExecutionsDynamoDBService} from './services/buildExecutions-dynamodb';
+import {JWTService} from './services/jwt';
+import {safeConsoleError} from './utils/sanitizeError';
 
 dotenv.config();
 
@@ -87,6 +90,7 @@ let AccessControl_Service: AccessControl_DynamoDBService;
 let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
 let globalSettings: GlobalSettingsDynamoDBService;
 let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
+let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -147,20 +151,17 @@ class AuthController {
                     }
                 }
             } catch (roleError) {
-                console.error('Error fetching user roles:', roleError);
+                safeConsoleError('Error fetching user roles:', roleError);
                 // Continue with default role
             }
 
-            // Generate a simple token (in production, use JWT)
-            const token = Buffer.from(
-                JSON.stringify({
-                    userId: user.id,
-                    email: user.emailAddress,
-                    name: `${user.firstName} ${user.lastName}`,
-                    role: userRole,
-                    timestamp: Date.now(),
-                }),
-            ).toString('base64');
+            // Generate JWT token (secure)
+            const token = JWTService.generateToken({
+                userId: user.id,
+                email: user.emailAddress,
+                name: `${user.firstName} ${user.lastName}`,
+                role: userRole,
+            });
 
             return res.status(HttpStatus.OK).json({
                 success: true,
@@ -179,7 +180,8 @@ class AuthController {
                 },
             });
         } catch (error) {
-            console.error('Error during login:', error);
+            // SECURITY: Use sanitized error logging to prevent password leaks
+            safeConsoleError('Error during login', error);
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
                 error: 'Authentication failed',
@@ -3795,6 +3797,201 @@ class GeoController {
     }
 }
 
+@Controller('api/build-executions')
+class BuildExecutionsController {
+    @Get()
+    async listByBuildId(
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('buildId') buildId: string,
+    ) {
+        try {
+            if (!accountId || !accountName || !buildId) {
+                throw new Error(
+                    'accountId, accountName, and buildId are required',
+                );
+            }
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                return await buildExecutionsDynamoDB.listByBuildId(
+                    accountId,
+                    accountName,
+                    buildId,
+                );
+            }
+
+            return [];
+        } catch (error: any) {
+            console.error('Error listing build executions:', error);
+            throw error;
+        }
+    }
+
+    @Get('latest')
+    async getLatest(
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('buildId') buildId: string,
+    ) {
+        try {
+            if (!accountId || !accountName || !buildId) {
+                throw new Error(
+                    'accountId, accountName, and buildId are required',
+                );
+            }
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                return await buildExecutionsDynamoDB.getLatest(
+                    accountId,
+                    accountName,
+                    buildId,
+                );
+            }
+
+            return null;
+        } catch (error: any) {
+            console.error('Error getting latest build execution:', error);
+            throw error;
+        }
+    }
+
+    @Get(':executionId')
+    async get(
+        @Param('executionId') executionId: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('buildId') buildId: string,
+    ) {
+        try {
+            if (!accountId || !accountName || !buildId) {
+                throw new Error(
+                    'accountId, accountName, and buildId are required',
+                );
+            }
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                return await buildExecutionsDynamoDB.get(
+                    accountId,
+                    accountName,
+                    buildId,
+                    executionId,
+                );
+            }
+
+            return null;
+        } catch (error: any) {
+            console.error('Error getting build execution:', error);
+            throw error;
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        try {
+            console.log('Creating build execution with body:', body);
+
+            if (!body.accountId || !body.accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (!body.buildId) {
+                throw new Error('buildId is required');
+            }
+
+            const executionData = {
+                buildId: body.buildId,
+                buildName: body.buildName || '',
+                accountId: body.accountId,
+                accountName: body.accountName,
+                enterpriseId: body.enterpriseId,
+                enterpriseName: body.enterpriseName,
+                buildNumber: body.buildNumber || '1',
+                branch: body.branch || 'main',
+                commit: body.commit || '',
+                duration: body.duration || '',
+                status: body.status || 'pending',
+                triggeredBy: body.triggeredBy || 'System',
+                startTime: body.startTime || new Date().toISOString(),
+                endTime: body.endTime,
+                environmentVariables: body.environmentVariables || {},
+                buildConfiguration: body.buildConfiguration || null,
+                artifacts: body.artifacts || [],
+                stages: body.stages || [],
+                metrics: body.metrics || {},
+                testResults: body.testResults || {},
+            };
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                return await buildExecutionsDynamoDB.create(executionData);
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error creating build execution:', error);
+            throw error;
+        }
+    }
+
+    @Patch(':executionId')
+    async update(@Param('executionId') executionId: string, @Body() body: any) {
+        try {
+            console.log(`Updating build execution ${executionId}:`, body);
+
+            if (!body.accountId || !body.accountName || !body.buildId) {
+                throw new Error(
+                    'accountId, accountName, and buildId are required',
+                );
+            }
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                return await buildExecutionsDynamoDB.update(
+                    body.accountId,
+                    body.accountName,
+                    body.buildId,
+                    executionId,
+                    body.updates || body,
+                );
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error updating build execution:', error);
+            throw error;
+        }
+    }
+
+    @Delete(':executionId')
+    async delete(
+        @Param('executionId') executionId: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('buildId') buildId: string,
+    ) {
+        try {
+            if (!accountId || !accountName || !buildId) {
+                throw new Error(
+                    'accountId, accountName, and buildId are required',
+                );
+            }
+
+            if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
+                await buildExecutionsDynamoDB.delete(
+                    accountId,
+                    accountName,
+                    buildId,
+                    executionId,
+                );
+                return {message: 'Build execution deleted successfully'};
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error deleting build execution:', error);
+            throw error;
+        }
+    }
+}
+
 @Controller('api/templates')
 class TemplatesController {
     @Get()
@@ -4751,6 +4948,7 @@ class GlobalSettingsController {
         PipelineDetailsController,
         PipelineServicesController,
         PipelineCanvasController,
+        BuildExecutionsController,
         GroupsController,
         EnterpriseProductsServicesController,
         AccountLicensesController,
@@ -4826,6 +5024,7 @@ async function bootstrap() {
             environments = new EnvironmentsDynamoDBService();
             globalSettings = new GlobalSettingsDynamoDBService();
             pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
+            buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
             console.log('Accounts DynamoDB service initialized');
@@ -4850,14 +5049,54 @@ async function bootstrap() {
 
         console.log('Services initialized successfully!');
 
-        //const app = await NestFactory.create(AppModule, {cors: true});
-       const app = await NestFactory.create(AppModule);
+        // Create the NestJS application
+        const app = await NestFactory.create(AppModule);
+
+        // SECURITY: Apply rate limiting middleware
+        const helmet = require('helmet');
+        const {
+            loginRateLimiter,
+            apiRateLimiter,
+        } = require('./middleware/rateLimiter.middleware');
+
+        // SECURITY: Add security headers with helmet
+        app.use(
+            helmet({
+                contentSecurityPolicy: process.env.NODE_ENV === 'production',
+                hsts: {
+                    maxAge: 31536000,
+                    includeSubDomains: true,
+                    preload: true,
+                },
+            }),
+        );
+
+        // SECURITY: Apply rate limiting to login endpoint
+        app.use('/api/auth/login', loginRateLimiter);
+
+        // SECURITY: Apply general rate limiting to all API routes
+        app.use('/api', apiRateLimiter);
+
+        // SECURITY: Configure CORS properly
+        const allowedOrigins = process.env.ALLOWED_ORIGINS
+            ? process.env.ALLOWED_ORIGINS.split(',')
+            : ['http://localhost:3000', 'http://75.101.182.63:3000'];
+
         app.enableCors({
-        origin: 'http://75.101.182.63:3000',
-        credentials: true,
+            origin: (origin, callback) => {
+                // Allow requests with no origin (like mobile apps or curl requests)
+                if (!origin) return callback(null, true);
+
+                if (allowedOrigins.includes(origin)) {
+                    callback(null, true);
+                } else {
+                    callback(new Error('Not allowed by CORS'));
+                }
+            },
+            credentials: true,
+            methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+            allowedHeaders: ['Content-Type', 'Authorization'],
         });
-
-
 
         // Skip seeding - using existing fnd_ tables
         console.log('Using existing database schema with fnd_ tables...');
@@ -4869,6 +5108,19 @@ async function bootstrap() {
         console.log(`🚀 DevOps Automate Backend is running on port ${PORT}`);
         console.log(`📊 Health check: http://${HOST}:${PORT}/health`);
         console.log(`🔧 API endpoints: http://${HOST}:${PORT}/api`);
+        console.log(
+            `🔒 Security features enabled: JWT auth, rate limiting, helmet headers`,
+        );
+
+        // SECURITY: Warn if using HTTP in production
+        if (process.env.NODE_ENV === 'production' && !process.env.FORCE_HTTPS) {
+            console.warn(
+                '⚠️  WARNING: Running in production without HTTPS enforcement!',
+            );
+            console.warn(
+                '   Set FORCE_HTTPS=true and configure SSL/TLS for production.',
+            );
+        }
     } catch (error) {
         console.error('Failed to start application:', error);
         process.exit(1);
