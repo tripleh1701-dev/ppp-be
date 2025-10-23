@@ -5072,12 +5072,7 @@ async function bootstrap() {
         );
 
         // SECURITY: Apply rate limiting to login endpoint
-        app.use('/api/auth/login', loginRateLimiter);
-
-        // SECURITY: Apply general rate limiting to all API routes
-        app.use('/api', apiRateLimiter);
-
-        // SECURITY: Configure CORS properly
+        // SECURITY: Configure CORS properly - MUST be before rate limiting
         const allowedOrigins = process.env.ALLOWED_ORIGINS
             ? process.env.ALLOWED_ORIGINS.split(',')
             : ['http://localhost:3000', 'http://75.101.182.63:3000'];
@@ -5097,6 +5092,11 @@ async function bootstrap() {
             methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
             allowedHeaders: ['Content-Type', 'Authorization'],
         });
+
+        app.use('/api/auth/login', loginRateLimiter);
+
+        // SECURITY: Apply general rate limiting to all API routes
+        app.use('/api', apiRateLimiter);
 
         // Skip seeding - using existing fnd_ tables
         console.log('Using existing database schema with fnd_ tables...');

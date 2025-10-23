@@ -1133,23 +1133,17 @@ export class UserManagementDynamoDBService {
 
     async getRole(roleId: string): Promise<Role | null> {
         try {
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${roleId}`,
-                SK: `ROLE#${roleId}`,
-            });
+            // First, try to find the role by querying with the roleId in SK
+            // We need to query listRoles and filter by ID since we don't know the account
+            const allRoles = await this.listRoles();
+            const role = allRoles.find((r) => r.id === roleId);
 
-            if (!item) {
+            if (!role) {
+                console.log(`⚠️ Role not found with ID: ${roleId}`);
                 return null;
             }
 
-            return {
-                id: item.id || roleId,
-                name: item.role_name || item.name,
-                description: item.description,
-                scopeConfig: item.scope_config,
-                createdAt: item.created_date || item.createdAt,
-                updatedAt: item.updated_date || item.updatedAt,
-            };
+            return role;
         } catch (error) {
             console.error('Error getting role:', error);
             throw error;
@@ -1261,6 +1255,41 @@ export class UserManagementDynamoDBService {
         try {
             const now = new Date().toISOString();
 
+            // First, get the existing role to find its correct PK
+            const existingRole = await this.getRole(roleId);
+            if (!existingRole) {
+                console.log(
+                    `⚠️ Cannot update role - role not found: ${roleId}`,
+                );
+                return null;
+            }
+
+            // Find the PK by querying the database
+            const allRolesRaw = await withDynamoDB(async (client) => {
+                const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
+
+                // Query Systiva roles
+                const systivaResponse = await client.send(
+                    new QueryCommand({
+                        TableName: this.tableName,
+                        KeyConditionExpression:
+                            'PK = :pk AND begins_with(SK, :skPrefix)',
+                        ExpressionAttributeValues: {
+                            ':pk': 'SYSTIVA#systiva#ROLES',
+                            ':skPrefix': 'ROLE#',
+                        },
+                    }),
+                );
+
+                return systivaResponse.Items || [];
+            });
+
+            const roleRecord = allRolesRaw.find((r) => r.id === roleId);
+            if (!roleRecord) {
+                console.log(`⚠️ Cannot find role record in DB: ${roleId}`);
+                return null;
+            }
+
             const updateFields: string[] = [];
             const expressionAttributeValues: any = {
                 ':updated': now,
@@ -1297,8 +1326,8 @@ export class UserManagementDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `SYSTIVA#${roleId}`,
-                            SK: `ROLE#${roleId}`,
+                            PK: roleRecord.PK,
+                            SK: roleRecord.SK,
                         },
                         UpdateExpression: updateExpression,
                         ExpressionAttributeValues: expressionAttributeValues,
@@ -1335,10 +1364,32 @@ export class UserManagementDynamoDBService {
             // Delete all group-role lookups for this role
             await this.deleteAllGroupRoleLookupsForRole(roleId);
 
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${roleId}`,
-                SK: `ROLE#${roleId}`,
+            // Find the correct PK for this role
+            const allRolesRaw = await withDynamoDB(async (client) => {
+                const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
+
+                const systivaResponse = await client.send(
+                    new QueryCommand({
+                        TableName: this.tableName,
+                        KeyConditionExpression:
+                            'PK = :pk AND begins_with(SK, :skPrefix)',
+                        ExpressionAttributeValues: {
+                            ':pk': 'SYSTIVA#systiva#ROLES',
+                            ':skPrefix': 'ROLE#',
+                        },
+                    }),
+                );
+
+                return systivaResponse.Items || [];
             });
+
+            const roleRecord = allRolesRaw.find((r) => r.id === roleId);
+            if (roleRecord) {
+                await DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: roleRecord.PK,
+                    SK: roleRecord.SK,
+                });
+            }
         } catch (error) {
             console.error('Error deleting role:', error);
             throw error;

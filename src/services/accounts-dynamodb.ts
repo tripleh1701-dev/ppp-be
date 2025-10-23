@@ -21,6 +21,7 @@ export interface Account {
     pincode?: string;
     technicalUsername?: string;
     technicalUserId?: string;
+    technicalUsers?: any[];
     enterpriseName?: string;
     enterpriseId?: string;
     platform?: string;
@@ -44,6 +45,16 @@ export interface TechnicalUser {
     updatedAt?: string;
 }
 
+export interface Contact {
+    id: string;
+    name: string;
+    email: string;
+    phone: string;
+    department: string;
+    designation: string;
+    company: string;
+}
+
 export interface License {
     id: string;
     accountId: string;
@@ -55,7 +66,7 @@ export interface License {
     users?: string | number;
     renewalNotice?: boolean;
     noticePeriod?: number;
-    contacts?: string[];
+    contactDetails?: Contact;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -115,6 +126,13 @@ export class AccountsDynamoDBService {
                         technicalUser = null;
                     }
 
+                    console.log(`📊 DynamoDB item for ${item.account_name}:`, {
+                        addresses: item.addresses,
+                        address: item.address,
+                        addressLine1: item.address_line1,
+                        allKeys: Object.keys(item),
+                    });
+
                     return {
                         id: item.id || item.SK?.replace('ACCOUNT#', ''),
                         accountName:
@@ -127,6 +145,7 @@ export class AccountsDynamoDBService {
                         addressLine1:
                             item.address_line1 || item.addressLine1 || '',
                         addresses: item.addresses || [],
+                        // Note: technicalUsers are fetched separately via user management API with technical_user=true filter
                         technicalUsername:
                             item.technical_username ||
                             technicalUser?.username ||
@@ -196,6 +215,7 @@ export class AccountsDynamoDBService {
                 country: item.country || '',
                 addressLine1: item.address_line1 || item.addressLine1 || '',
                 addresses: item.addresses || [],
+                // Note: technicalUsers are fetched separately via user management API with technical_user=true filter
                 technicalUsername:
                     item.technical_username || technicalUser?.username || '',
                 technicalUserId:
@@ -375,6 +395,9 @@ export class AccountsDynamoDBService {
                 updateFields.push('addresses = :addresses');
                 expressionAttributeValues[':addresses'] = updates.addresses;
             }
+
+            // Note: Technical users are stored as separate user entities with technical_user=true flag
+            // They are not stored as an array on the account object
 
             // Handle licenses separately - update/create/delete as separate entities
             if (
@@ -674,7 +697,7 @@ export class AccountsDynamoDBService {
                 users: licenseData.users || '',
                 renewal_notice: licenseData.renewalNotice || false,
                 notice_period: licenseData.noticePeriod || 0,
-                contacts: licenseData.contacts || [],
+                contact_details: licenseData.contactDetails || null,
                 created_date: now,
                 updated_date: now,
                 entity_type: 'LICENSE',
@@ -695,7 +718,7 @@ export class AccountsDynamoDBService {
                 users: licenseData.users,
                 renewalNotice: licenseData.renewalNotice,
                 noticePeriod: licenseData.noticePeriod,
-                contacts: licenseData.contacts,
+                contactDetails: licenseData.contactDetails,
                 createdAt: now,
                 updatedAt: now,
             };
@@ -728,7 +751,8 @@ export class AccountsDynamoDBService {
                 renewalNotice:
                     item.renewal_notice || item.renewalNotice || false,
                 noticePeriod: item.notice_period || item.noticePeriod || 0,
-                contacts: item.contacts || [],
+                contactDetails:
+                    item.contact_details || item.contactDetails || null,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
             }));
@@ -764,7 +788,8 @@ export class AccountsDynamoDBService {
                 renewalNotice:
                     item.renewal_notice || item.renewalNotice || false,
                 noticePeriod: item.notice_period || item.noticePeriod || 0,
-                contacts: item.contacts || [],
+                contactDetails:
+                    item.contact_details || item.contactDetails || null,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
             };
@@ -825,9 +850,10 @@ export class AccountsDynamoDBService {
                 expressionAttributeValues[':noticePeriod'] =
                     updates.noticePeriod;
             }
-            if (updates.contacts !== undefined) {
-                updateFields.push('contacts = :contacts');
-                expressionAttributeValues[':contacts'] = updates.contacts;
+            if (updates.contactDetails !== undefined) {
+                updateFields.push('contact_details = :contactDetails');
+                expressionAttributeValues[':contactDetails'] =
+                    updates.contactDetails;
             }
 
             if (updateFields.length === 0) {
