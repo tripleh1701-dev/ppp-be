@@ -91,30 +91,50 @@ export class UserManagementDynamoDBService {
     async authenticateUser(
         email: string,
         password: string,
-        accountId: string = '51a0f277-742c-49bd-98b1-8f5001d0ddf7', // Systiva account UUID
     ): Promise<User | null> {
         try {
-            // Query users by account using PK format: SYSTIVA#${accountId}#USER
-            // where accountId is the actual account UUID from DynamoDB
-            const items = await DynamoDBOperations.queryItems(
+            console.log(`🔐 Authenticating user: ${email}`);
+
+            // First, try to find user in Systiva table (PK: SYSTIVA#systiva#USERS)
+            const systivaItems = await DynamoDBOperations.queryItems(
                 this.tableName,
                 'PK = :pk AND begins_with(SK, :sk)',
                 {
-                    ':pk': `SYSTIVA#${accountId}#USER`,
+                    ':pk': 'SYSTIVA#systiva#USERS',
                     ':sk': 'USER#',
                 },
             );
 
+            console.log(`Found ${systivaItems.length} users in Systiva table`);
+
             // Find user by email (case-insensitive)
-            const userItem = items.find(
+            let userItem = systivaItems.find(
                 (item) =>
                     item.email_address?.toLowerCase() === email.toLowerCase(),
             );
 
+            // If not found in Systiva table, search in account-specific tables
+            if (!userItem) {
+                console.log(
+                    'User not found in Systiva table, searching account tables...',
+                );
+                // Get all accounts and search their user tables
+                const allUsers = await this.listAllUsers();
+                userItem = allUsers.find(
+                    (item: any) =>
+                        item.email_address?.toLowerCase() ===
+                        email.toLowerCase(),
+                );
+            }
+
             if (!userItem || !userItem.password) {
-                console.log('User not found or no password set');
+                console.log('❌ User not found or no password set');
                 return null;
             }
+
+            console.log(
+                `✅ Found user: ${userItem.first_name} ${userItem.last_name}`,
+            );
 
             // Verify password
             const isPasswordValid = await this.comparePassword(
@@ -123,9 +143,11 @@ export class UserManagementDynamoDBService {
             );
 
             if (!isPasswordValid) {
-                console.log('Invalid password');
+                console.log('❌ Invalid password');
                 return null;
             }
+
+            console.log('✅ Password verified');
 
             // Return user without password
             return {
@@ -145,6 +167,36 @@ export class UserManagementDynamoDBService {
         } catch (error) {
             console.error('Error authenticating user:', error);
             return null;
+        }
+    }
+
+    // Helper method to search all user tables
+    private async listAllUsers(): Promise<any[]> {
+        try {
+            // Scan for all USER records across all partitions
+            const allItems = await withDynamoDB(async (client) => {
+                const {ScanCommand} = await import('@aws-sdk/lib-dynamodb');
+                const response = await client.send(
+                    new ScanCommand({
+                        TableName: this.tableName,
+                        FilterExpression:
+                            'begins_with(SK, :sk) AND entity_type = :type',
+                        ExpressionAttributeValues: {
+                            ':sk': 'USER#',
+                            ':type': 'USER',
+                        },
+                    }),
+                );
+                return response.Items || [];
+            });
+
+            console.log(
+                `📋 Found ${allItems.length} total users across all tables`,
+            );
+            return allItems;
+        } catch (error) {
+            console.error('Error listing all users:', error);
+            return [];
         }
     }
 
@@ -171,9 +223,11 @@ export class UserManagementDynamoDBService {
             };
 
             const item = {
-                PK: `SYSTIVA#${userId}`,
+                PK: 'SYSTIVA#systiva#USERS',
                 SK: `USER#${userId}`,
                 id: userId,
+                account_id: 'systiva',
+                account_name: 'SYSTIVA',
                 first_name: user.firstName,
                 middle_name: user.middleName,
                 last_name: user.lastName,
