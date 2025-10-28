@@ -48,6 +48,7 @@ import {testDynamoDBConnection, getStorageMode} from './dynamodb';
 import * as pipelineCanvas from './services/pipelineCanvas';
 import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
 import {BuildExecutionsDynamoDBService} from './services/buildExecutions-dynamodb';
+import {BuildsDynamoDBService} from './services/builds-dynamodb';
 import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 
@@ -91,6 +92,7 @@ let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBSer
 let globalSettings: GlobalSettingsDynamoDBService;
 let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
 let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
+let buildsDynamoDB: BuildsDynamoDBService | null = null;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -3797,6 +3799,148 @@ class GeoController {
     }
 }
 
+@Controller('api/builds/integrations')
+class BuildsController {
+    @Get()
+    async list(
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+        @Query('enterpriseId') enterpriseId?: string,
+    ) {
+        try {
+            if (!accountId || !accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (storageMode === 'dynamodb' && buildsDynamoDB) {
+                return await buildsDynamoDB.list(
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                );
+            }
+
+            return [];
+        } catch (error: any) {
+            console.error('Error listing builds:', error);
+            throw error;
+        }
+    }
+
+    @Get(':buildId')
+    async get(
+        @Param('buildId') buildId: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+    ) {
+        try {
+            if (!accountId || !accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (storageMode === 'dynamodb' && buildsDynamoDB) {
+                return await buildsDynamoDB.get(
+                    accountId,
+                    accountName,
+                    buildId,
+                );
+            }
+
+            return null;
+        } catch (error: any) {
+            console.error('Error getting build:', error);
+            throw error;
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        try {
+            console.log('Creating build with body:', body);
+
+            if (!body.accountId || !body.accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (!body.buildName) {
+                throw new Error('buildName is required');
+            }
+
+            const buildData = {
+                buildName: body.buildName,
+                description: body.description || '',
+                entity: body.entity || '',
+                pipeline: body.pipeline || '',
+                status: body.status || '',
+                artifact: body.artifact || '',
+                build: body.build || '',
+                accountId: body.accountId,
+                accountName: body.accountName,
+                enterpriseId: body.enterpriseId,
+                enterpriseName: body.enterpriseName,
+                stages: body.stages || [],
+            };
+
+            if (storageMode === 'dynamodb' && buildsDynamoDB) {
+                return await buildsDynamoDB.create(buildData);
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error creating build:', error);
+            throw error;
+        }
+    }
+
+    @Put(':buildId')
+    async update(@Param('buildId') buildId: string, @Body() body: any) {
+        try {
+            console.log(`Updating build ${buildId}:`, body);
+
+            if (!body.accountId || !body.accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (storageMode === 'dynamodb' && buildsDynamoDB) {
+                return await buildsDynamoDB.update(
+                    body.accountId,
+                    body.accountName,
+                    buildId,
+                    body,
+                );
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error updating build:', error);
+            throw error;
+        }
+    }
+
+    @Delete(':buildId')
+    async delete(
+        @Param('buildId') buildId: string,
+        @Query('accountId') accountId: string,
+        @Query('accountName') accountName: string,
+    ) {
+        try {
+            if (!accountId || !accountName) {
+                throw new Error('accountId and accountName are required');
+            }
+
+            if (storageMode === 'dynamodb' && buildsDynamoDB) {
+                await buildsDynamoDB.delete(accountId, accountName, buildId);
+                return {message: 'Build deleted successfully'};
+            }
+
+            throw new Error('DynamoDB storage not available');
+        } catch (error: any) {
+            console.error('Error deleting build:', error);
+            throw error;
+        }
+    }
+}
+
 @Controller('api/build-executions')
 class BuildExecutionsController {
     @Get()
@@ -4948,6 +5092,7 @@ class GlobalSettingsController {
         PipelineDetailsController,
         PipelineServicesController,
         PipelineCanvasController,
+        BuildsController,
         BuildExecutionsController,
         GroupsController,
         EnterpriseProductsServicesController,
@@ -5025,6 +5170,7 @@ async function bootstrap() {
             globalSettings = new GlobalSettingsDynamoDBService();
             pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
             buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
+            buildsDynamoDB = new BuildsDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
             console.log('Accounts DynamoDB service initialized');
