@@ -1,6 +1,13 @@
 import {DynamoDBOperations, withDynamoDB} from '../dynamodb';
 import {v4 as uuidv4} from 'uuid';
 import bcrypt from 'bcrypt';
+import {
+    encryptPassword,
+    decryptPassword,
+    isValidEncryptedPassword,
+    logPasswordOperation,
+    EncryptedPassword
+} from '../utils/passwordEncryption';
 
 // ==========================================
 // INTERFACE DEFINITIONS
@@ -27,6 +34,7 @@ export interface Group {
     name: string;
     description?: string;
     entity?: string; // Business entity/department
+    product?: string; // Product name/identifier
     service?: string; // Service name
     assignedRoles?: string[]; // Role IDs
     createdAt: string;
@@ -211,12 +219,22 @@ export class UserManagementDynamoDBService {
             const userId = uuidv4();
             const now = new Date().toISOString();
 
+            // Handle password encryption
+            let encryptedPasswordData: EncryptedPassword | undefined;
+            if (userData.password) {
+                try {
+                    encryptedPasswordData = encryptPassword(userData.password);
+                    logPasswordOperation('encrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    logPasswordOperation('encrypt', userId, false);
+                    throw new Error('Failed to encrypt password');
+                }
+            }
+
             const user: User = {
                 id: userId,
                 ...userData,
-                password: userData.password
-                    ? await this.hashPassword(userData.password)
-                    : undefined,
                 assignedGroups: userData.assignedGroups || [],
                 createdAt: now,
                 updatedAt: now,
@@ -235,7 +253,7 @@ export class UserManagementDynamoDBService {
                 status: user.status,
                 start_date: user.startDate,
                 end_date: user.endDate,
-                password: user.password,
+                password_encrypted: encryptedPasswordData, // Store encrypted password
                 technical_user: user.technicalUser,
                 assigned_groups: user.assignedGroups,
                 created_date: now,
@@ -252,9 +270,8 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            // Remove password from response
-            const {password, ...userWithoutPassword} = user;
-            return userWithoutPassword as User;
+            // Return user with decrypted password for frontend
+            return user;
         } catch (error) {
             console.error('Error creating user:', error);
             throw error;
@@ -388,13 +405,28 @@ export class UserManagementDynamoDBService {
 
     async getUser(userId: string): Promise<User | null> {
         try {
+            // Fixed: Use correct PK pattern that matches creation and listing
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${userId}`,
+                PK: 'SYSTIVA#systiva#USERS',
                 SK: `USER#${userId}`,
             });
 
             if (!item) {
                 return null;
+            }
+
+            // Handle password decryption
+            let decryptedPassword: string | undefined;
+            if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                try {
+                    const decrypted = decryptPassword(item.password_encrypted);
+                    decryptedPassword = decrypted.password;
+                    logPasswordOperation('decrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                    logPasswordOperation('decrypt', userId, false);
+                    decryptedPassword = undefined;
+                }
             }
 
             return {
@@ -406,6 +438,7 @@ export class UserManagementDynamoDBService {
                 status: item.status,
                 startDate: item.start_date,
                 endDate: item.end_date,
+                password: decryptedPassword,
                 technicalUser: item.technical_user,
                 assignedGroups: item.assigned_groups || [],
                 createdAt: item.created_date || item.createdAt,
@@ -446,20 +479,40 @@ export class UserManagementDynamoDBService {
             }
 
             return items
-                .map((item) => ({
-                    id: item.id || item.PK?.replace('SYSTIVA#', ''),
-                    firstName: item.first_name,
-                    middleName: item.middle_name,
-                    lastName: item.last_name,
-                    emailAddress: item.email_address,
-                    status: item.status,
-                    startDate: item.start_date,
-                    endDate: item.end_date,
-                    technicalUser: item.technical_user,
-                    assignedGroups: item.assigned_groups || [],
-                    createdAt: item.created_date || item.createdAt,
-                    updatedAt: item.updated_date || item.updatedAt,
-                }))
+                .map((item) => {
+                    // Handle password decryption
+                    let decryptedPassword: string | undefined;
+                    if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                        try {
+                            const decrypted = decryptPassword(item.password_encrypted);
+                            decryptedPassword = decrypted.password;
+                            logPasswordOperation('decrypt', item.id || 'unknown', true);
+                        } catch (error) {
+                            console.error(`❌ Failed to decrypt password for user ${item.id}:`, error);
+                            logPasswordOperation('decrypt', item.id || 'unknown', false);
+                            decryptedPassword = undefined; // Don't expose broken encrypted data
+                        }
+                    } else if (item.password) {
+                        // Legacy bcrypt password - keep as is for now
+                        decryptedPassword = undefined; // Don't expose bcrypt hashes
+                    }
+
+                    return {
+                        id: item.id || item.PK?.replace('SYSTIVA#', ''),
+                        firstName: item.first_name,
+                        middleName: item.middle_name,
+                        lastName: item.last_name,
+                        emailAddress: item.email_address,
+                        status: item.status,
+                        startDate: item.start_date,
+                        endDate: item.end_date,
+                        password: decryptedPassword,
+                        technicalUser: item.technical_user,
+                        assignedGroups: item.assigned_groups || [],
+                        createdAt: item.created_date || item.createdAt,
+                        updatedAt: item.updated_date || item.updatedAt,
+                    };
+                })
                 .sort((a, b) =>
                     (a.lastName + a.firstName).localeCompare(
                         b.lastName + b.firstName,
@@ -538,12 +591,23 @@ export class UserManagementDynamoDBService {
                 );
             }
             if (updates.password !== undefined) {
-                const hashedPassword = await this.hashPassword(
-                    updates.password,
-                );
-                updateFields.push('#password = :password');
-                expressionAttributeNames['#password'] = 'password';
-                expressionAttributeValues[':password'] = hashedPassword;
+                // Handle password encryption
+                let encryptedPasswordData: EncryptedPassword | undefined;
+                try {
+                    encryptedPasswordData = encryptPassword(updates.password);
+                    logPasswordOperation('encrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    logPasswordOperation('encrypt', userId, false);
+                    throw new Error('Failed to encrypt password');
+                }
+                
+                updateFields.push('password_encrypted = :passwordEncrypted');
+                expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
+                
+                // Remove old bcrypt password field if it exists
+                updateFields.push('password = :passwordRemove');
+                expressionAttributeValues[':passwordRemove'] = null;
             }
 
             // Always ensure entity_type is set (for legacy records that might be missing it)
@@ -561,7 +625,7 @@ export class UserManagementDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `SYSTIVA#${userId}`,
+                            PK: 'SYSTIVA#systiva#USERS',
                             SK: `USER#${userId}`,
                         },
                         UpdateExpression: updateExpression,
@@ -580,6 +644,20 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
+            // Handle password decryption for response
+            let decryptedPassword: string | undefined;
+            if (result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                try {
+                    const decrypted = decryptPassword(result.password_encrypted);
+                    decryptedPassword = decrypted.password;
+                    logPasswordOperation('decrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                    logPasswordOperation('decrypt', userId, false);
+                    decryptedPassword = undefined;
+                }
+            }
+
             return {
                 id: result.id || userId,
                 firstName: result.first_name,
@@ -589,6 +667,7 @@ export class UserManagementDynamoDBService {
                 status: result.status,
                 startDate: result.start_date,
                 endDate: result.end_date,
+                password: decryptedPassword,
                 technicalUser: result.technical_user,
                 assignedGroups: result.assigned_groups || [],
                 createdAt: result.created_date || result.createdAt,
@@ -753,10 +832,13 @@ export class UserManagementDynamoDBService {
                 }
             }
 
+            // Fixed: Use correct PK pattern that matches creation and listing
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${userId}`,
+                PK: 'SYSTIVA#systiva#USERS',
                 SK: `USER#${userId}`,
             });
+            
+            console.log(`✅ User ${userId} deleted successfully from DynamoDB`);
         } catch (error) {
             console.error('Error deleting user:', error);
             throw error;
@@ -809,10 +891,11 @@ export class UserManagementDynamoDBService {
         groupData: Omit<Group, 'id' | 'createdAt' | 'updatedAt'> & {
             selectedAccountId?: string;
             selectedAccountName?: string;
+            id?: string;
         },
     ): Promise<Group> {
         try {
-            const groupId = uuidv4();
+            const groupId = groupData.id || uuidv4();
             const now = new Date().toISOString();
 
             // Determine if this is for a specific account or Systiva
@@ -831,6 +914,7 @@ export class UserManagementDynamoDBService {
                 name: groupData.name,
                 description: groupData.description,
                 entity: groupData.entity || '',
+                product: groupData.product || '',
                 service: groupData.service || '',
                 assignedRoles: groupData.assignedRoles || [],
                 createdAt: now,
@@ -846,6 +930,7 @@ export class UserManagementDynamoDBService {
                 group_name: group.name,
                 description: group.description,
                 entity: group.entity || '',
+                product: group.product || '',
                 service: group.service || '',
                 assigned_roles: group.assignedRoles,
                 created_date: now,
@@ -880,7 +965,7 @@ export class UserManagementDynamoDBService {
     async getGroup(groupId: string): Promise<Group | null> {
         try {
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${groupId}`,
+                PK: `SYSTIVA#systiva#GROUPS`,
                 SK: `GROUP#${groupId}`,
             });
 
@@ -893,6 +978,7 @@ export class UserManagementDynamoDBService {
                 name: item.group_name || item.name,
                 description: item.description,
                 entity: item.entity || '',
+                product: item.product || '',
                 service: item.service || '',
                 assignedRoles: item.assigned_roles || [],
                 createdAt: item.created_date || item.createdAt,
@@ -957,6 +1043,7 @@ export class UserManagementDynamoDBService {
                     name: item.group_name || item.name,
                     description: item.description,
                     entity: item.entity || '',
+                    product: item.product || '',
                     service: item.service || '',
                     assignedRoles: item.assigned_roles || [],
                     createdAt: item.created_date || item.createdAt,
@@ -988,8 +1075,8 @@ export class UserManagementDynamoDBService {
             const pkPrefix = isAccountSpecific
                 ? `${updates.selectedAccountName!.toUpperCase()}#${
                       updates.selectedAccountId
-                  }#GROUP`
-                : 'SYSTIVA';
+                  }#GROUPS`
+                : 'SYSTIVA#systiva#GROUPS';
 
             // Get existing group to track role changes
             const existingGroup = await this.getGroup(groupId);
@@ -1016,6 +1103,10 @@ export class UserManagementDynamoDBService {
             if (updates.entity !== undefined) {
                 updateFields.push('entity = :entity');
                 expressionAttributeValues[':entity'] = updates.entity;
+            }
+            if (updates.product !== undefined) {
+                updateFields.push('product = :product');
+                expressionAttributeValues[':product'] = updates.product;
             }
             if (updates.service !== undefined) {
                 updateFields.push('#service = :service');
@@ -1050,7 +1141,7 @@ export class UserManagementDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `${pkPrefix}#${groupId}`,
+                            PK: pkPrefix,
                             SK: `GROUP#${groupId}`,
                         },
                         UpdateExpression: updateExpression,
@@ -1074,6 +1165,7 @@ export class UserManagementDynamoDBService {
                 name: result.group_name || result.name,
                 description: result.description,
                 entity: result.entity || '',
+                product: result.product || '',
                 service: result.service || '',
                 assignedRoles: result.assigned_roles || [],
                 createdAt: result.created_date || result.createdAt,
@@ -1087,10 +1179,17 @@ export class UserManagementDynamoDBService {
 
     async deleteGroup(groupId: string): Promise<void> {
         try {
-            // Get group to find assigned roles for cleanup
+            console.log(`🗑️  Deleting group ${groupId}...`);
+            
+            // Get group to find assigned roles for cleanup and determine PK
             const group = await this.getGroup(groupId);
-            if (group && group.assignedRoles) {
-                // Delete all group-role lookup records
+            if (!group) {
+                console.log(`⚠️  Group ${groupId} not found`);
+                return; // Group doesn't exist, nothing to delete
+            }
+
+            // Delete all group-role lookup records
+            if (group.assignedRoles) {
                 for (const roleId of group.assignedRoles) {
                     await this.deleteGroupRoleLookup(groupId, roleId);
                 }
@@ -1099,10 +1198,13 @@ export class UserManagementDynamoDBService {
             // Delete all user-group lookups for this group
             await this.deleteAllUserGroupLookupsForGroup(groupId);
 
+            // Use the correct PK pattern: SYSTIVA#systiva#GROUPS (not SYSTIVA#groupId)
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${groupId}`,
+                PK: `SYSTIVA#systiva#GROUPS`,
                 SK: `GROUP#${groupId}`,
             });
+            
+            console.log(`✅ Successfully deleted group ${groupId}`);
         } catch (error) {
             console.error('Error deleting group:', error);
             throw error;

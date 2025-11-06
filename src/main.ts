@@ -45,6 +45,7 @@ import {EnvironmentsDynamoDBService} from './services/environments-dynamodb';
 import {GlobalSettingsDynamoDBService} from './services/globalSettings-dynamodb';
 import {testConnection, withPg} from './db';
 import {testDynamoDBConnection, getStorageMode} from './dynamodb';
+import {validatePasswordEncryptionConfig} from './utils/passwordEncryption';
 import * as pipelineCanvas from './services/pipelineCanvas';
 import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
 import {BuildExecutionsDynamoDBService} from './services/buildExecutions-dynamodb';
@@ -2325,7 +2326,7 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            console.log(`🔗 Assigning group to user ${id}, body:`, body);
+            console.log(`🔗 Assigning group to user ${id}, body:`, JSON.stringify(body, null, 2));
 
             // Check if this is a single group assignment {groupId: "..."} or bulk assignment {groupIds: [...]}
             if (body.groupId) {
@@ -2367,47 +2368,216 @@ class UsersController {
                     });
                 }
             } else if (body.groupIds && Array.isArray(body.groupIds)) {
-                // Bulk group assignment (existing format)
-                const user = await users.getById(id);
-                if (!user) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
-                        success: false,
-                        error: 'User not found',
+                // Bulk group assignment (existing format - array of IDs)
+                if (storageMode === 'dynamodb' && userManagement) {
+                    const user = await userManagement.getUser(id);
+                    if (!user) {
+                        return res.status(HttpStatus.NOT_FOUND).json({
+                            success: false,
+                            error: 'User not found',
+                        });
+                    }
+
+                    await userManagement.updateUser(id, {
+                        assignedGroups: body.groupIds,
+                    });
+
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        message: 'Groups assigned successfully',
+                        data: {
+                            assignedGroups: body.groupIds.map((groupId: string) => ({
+                                id: groupId,
+                            })),
+                        },
+                    });
+                } else {
+                    const user = await users.getById(id);
+                    if (!user) {
+                        return res.status(HttpStatus.NOT_FOUND).json({
+                            success: false,
+                            error: 'User not found',
+                        });
+                    }
+
+                    const updatedUser = await users.updateUser(id, {
+                        assignedUserGroups: body.groupIds,
+                    });
+
+                    if (!updatedUser) {
+                        return res.status(HttpStatus.NOT_FOUND).json({
+                            success: false,
+                            error: 'User not found',
+                        });
+                    }
+
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        message: 'Groups assigned successfully',
+                        data: {
+                            assignedGroups: body.groupIds.map((id: number) => ({
+                                id,
+                                name: `Group ${id}`,
+                            })),
+                        },
                     });
                 }
+            } else if (body.groups && Array.isArray(body.groups)) {
+                // New format: array of complete group objects (create-and-assign)
+                if (storageMode === 'dynamodb' && userManagement) {
+                    console.log(`📦 Processing ${body.groups.length} group(s) for create-and-assign`);
+                    console.log(`📦 Groups received:`, JSON.stringify(body.groups, null, 2));
+                    
+                    const user = await userManagement.getUser(id);
+                    if (!user) {
+                        return res.status(HttpStatus.NOT_FOUND).json({
+                            success: false,
+                            error: 'User not found',
+                        });
+                    }
 
-                const updatedUser = await users.updateUser(id, {
-                    assignedUserGroups: body.groupIds,
-                });
+                    let groupIds: string[] = [];
+                    
+                    // Get all existing groups to match by name
+                    const allExistingGroups = await userManagement.listGroups();
+                    console.log(`📋 Found ${allExistingGroups.length} existing groups in database`);
+                    
+                    // Process each group
+                    const seenGroupIds = new Set<string>(); // Track unique group IDs
+                    for (const groupData of body.groups) {
+                        const groupName = groupData.groupName || groupData.name;
+                        console.log(`🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`);
+                        
+                        // Try to find group by NAME (not by frontend-generated ID)
+                        let existingGroup = allExistingGroups.find(g => g.name === groupName);
+                        
+                        if (existingGroup) {
+                            console.log(`✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`);
+                            
+                            // Skip if we've already processed this group ID (deduplication)
+                            if (seenGroupIds.has(existingGroup.id)) {
+                                console.log(`⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`);
+                                continue;
+                            }
+                            seenGroupIds.add(existingGroup.id);
+                            
+                            // Get current group data from database to preserve correct values
+                            const currentGroup = await userManagement.getGroup(existingGroup.id);
+                            if (!currentGroup) {
+                                console.log(`⚠️  Could not fetch current group data, skipping update`);
+                                groupIds.push(existingGroup.id);
+                                continue;
+                            }
+                            
+                            // Only update fields that actually changed and are provided
+                            const updates: any = {};
+                            if (groupData.name && groupData.name !== currentGroup.name) {
+                                updates.name = groupData.name;
+                            }
+                            // Only update description if it's different and not empty
+                            // Protect against overwriting with incorrect/stale data from frontend
+                            if (groupData.description !== undefined && 
+                                groupData.description !== null &&
+                                groupData.description.trim() !== '' &&
+                                groupData.description !== currentGroup.description) {
+                                console.log(`📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`);
+                                updates.description = groupData.description;
+                            } else if (groupData.description !== undefined && 
+                                      groupData.description !== currentGroup.description) {
+                                console.log(`⚠️  Skipping description update - empty or matches current value`);
+                            }
+                            if (groupData.entity !== undefined && groupData.entity !== currentGroup.entity) {
+                                updates.entity = groupData.entity;
+                            }
+                            if (groupData.product !== undefined && groupData.product !== currentGroup.product) {
+                                updates.product = groupData.product;
+                            }
+                            if (groupData.service !== undefined && groupData.service !== currentGroup.service) {
+                                updates.service = groupData.service;
+                            }
+                            if (groupData.assignedRoles !== undefined) {
+                                updates.assignedRoles = groupData.assignedRoles || [];
+                            }
+                            
+                            // Only update if there are actual changes
+                            if (Object.keys(updates).length > 0) {
+                                console.log(`🔄 Updating group with changes:`, JSON.stringify(updates, null, 2));
+                                await userManagement.updateGroup(existingGroup.id, updates);
+                            } else {
+                                console.log(`ℹ️  No changes detected, skipping update`);
+                            }
+                            
+                            groupIds.push(existingGroup.id);
+                        } else {
+                            console.log(`🆕 Creating new group: "${groupName}"`);
+                            // Create new group (let it generate its own ID)
+                            const newGroup = await userManagement.createGroup({
+                                name: groupName,
+                                description: groupData.description || '',
+                                entity: groupData.entity || '',
+                                product: groupData.product || '',
+                                service: groupData.service || '',
+                                assignedRoles: groupData.assignedRoles || [],
+                            });
+                            console.log(`✅ Created new group with ID: ${newGroup.id}`);
+                            
+                            // Skip if duplicate
+                            if (seenGroupIds.has(newGroup.id)) {
+                                console.log(`⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`);
+                                continue;
+                            }
+                            seenGroupIds.add(newGroup.id);
+                            groupIds.push(newGroup.id);
+                        }
+                    }
 
-                if (!updatedUser) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
+                    // Deduplicate final group IDs array
+                    const uniqueGroupIds = Array.from(new Set(groupIds));
+                    if (uniqueGroupIds.length !== groupIds.length) {
+                        console.log(`⚠️  Removed ${groupIds.length - uniqueGroupIds.length} duplicate group ID(s)`);
+                        console.log(`   Before: ${JSON.stringify(groupIds)}`);
+                        console.log(`   After:  ${JSON.stringify(uniqueGroupIds)}`);
+                    }
+                    groupIds = uniqueGroupIds;
+
+                    console.log(`📋 Final group IDs to assign: ${JSON.stringify(groupIds)}`);
+
+                    // Assign all groups to user
+                    await userManagement.updateUser(id, {
+                        assignedGroups: groupIds,
+                    });
+
+                    console.log(`✅ Assigned ${groupIds.length} unique group(s) to user ${id}`);
+
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        message: 'Groups assigned successfully',
+                        data: {
+                            assignedGroups: groupIds.map((groupId: string) => ({
+                                id: groupId,
+                            })),
+                        },
+                    });
+                } else {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
                         success: false,
-                        error: 'User not found',
+                        error: 'Create-and-assign only supported in DynamoDB mode',
                     });
                 }
-
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    message: 'Groups assigned successfully',
-                    data: {
-                        assignedGroups: body.groupIds.map((id: number) => ({
-                            id,
-                            name: `Group ${id}`,
-                        })),
-                    },
-                });
             } else {
+                console.error('❌ Invalid request body format:', body);
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
-                    error: 'Either groupId (string) or groupIds (array) is required',
+                    error: 'Either groupId (string), groupIds (array), or groups (array of objects) is required',
                 });
             }
         } catch (error: any) {
             console.error('Error assigning group(s) to user:', error);
+            console.error('Error stack:', error.stack);
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
                 error: 'Failed to assign group(s) to user',
+                details: error.message,
             });
         }
     }
@@ -3726,6 +3896,10 @@ class GroupsController {
             const created = await userManagement.createGroup({
                 name: body?.name,
                 description: body?.description,
+                entity: body?.entity,
+                product: body?.product,
+                service: body?.service,
+                assignedRoles: body?.assignedRoles,
             });
             return res.status(HttpStatus.CREATED).json(created);
         } else {
@@ -5048,6 +5222,13 @@ async function bootstrap() {
         }
 
         console.log('Services initialized successfully!');
+
+        // Validate password encryption configuration
+        console.log('🔐 Validating password encryption configuration...');
+        if (!validatePasswordEncryptionConfig()) {
+            console.error('❌ Password encryption configuration is invalid!');
+            process.exit(1);
+        }
 
         // Create the NestJS application
         const app = await NestFactory.create(AppModule);
