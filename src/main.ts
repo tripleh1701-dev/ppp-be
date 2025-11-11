@@ -143,6 +143,7 @@ class AuthController {
             // Get user's groups and roles
             let userRole = 'User'; // Default role
             try {
+                // Note: For auth, we don't have account context, so only works for Systiva users
                 const userGroups = await userManagement.getUserGroups(user.id);
                 if (userGroups && userGroups.length > 0) {
                     // Get roles from the first group
@@ -923,7 +924,13 @@ class UsersController {
                     usersFromDB.map(async (user) => {
                         try {
                             const assignedGroups =
-                                await userManagement.getUserGroups(user.id);
+                                await userManagement.getUserGroups(
+                                    user.id,
+                                    accountId,      // Pass account context
+                                    accountName,    // Pass account context
+                                    undefined,      // enterpriseId (not available in /api/users)
+                                    undefined       // enterpriseName (not available in /api/users)
+                                );
                             return {
                                 ...user,
                                 assignedUserGroups: assignedGroups,
@@ -2659,6 +2666,8 @@ class UsersController {
                     });
                 }
 
+                // Note: This is in /api/users/:id/groups (not /api/user-management/users/:id/groups)
+                // For backward compatibility, only check Systiva table
                 const groups = await userManagement.getUserGroups(id);
                 return res.status(HttpStatus.OK).json({
                     success: true,
@@ -4838,13 +4847,88 @@ class UserManagementController {
     // ==========================================
 
     @Get('users')
-    async listUsers() {
+    async listUsers(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.listUsers();
+
+        console.log('📋 GET /api/user-management/users called with query params:', {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+        
+        if (hasAccountContext) {
+            console.log(`✅ Listing users for account: ${accountName} (${accountId})`);
+            if (enterpriseId && enterpriseName) {
+                console.log(`   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
+            }
+            
+            const users = await userManagement.listUsersByAccount(
+                accountId, 
+                accountName,
+                enterpriseId,  // Pass enterprise filter
+                enterpriseName  // Pass enterprise filter
+            );
+            
+            // Fetch assigned groups for each user
+            const usersWithGroups = await Promise.all(
+                users.map(async (user: any) => {
+                    try {
+                        // IMPORTANT: Use the account/enterprise from the user record itself
+                        // Not from the query parameters, as they might differ
+                        const userAccountId = user.accountId || accountId;
+                        const userAccountName = user.accountName || accountName;
+                        const userEnterpriseId = user.enterpriseId || enterpriseId;
+                        const userEnterpriseName = user.enterpriseName || enterpriseName;
+                        
+                        console.log(`🔍 Fetching groups for user ${user.id}:`, {
+                            userAccountId,
+                            userAccountName,
+                            userEnterpriseId,
+                            userEnterpriseName,
+                        });
+                        
+                        const assignedGroups = await userManagement.getUserGroups(
+                            user.id,
+                            userAccountId,      // Use user's account context
+                            userAccountName,    // Use user's account context
+                            userEnterpriseId,   // Use user's enterprise context
+                            userEnterpriseName  // Use user's enterprise context
+                        );
+                        
+                        console.log(`✅ Got ${assignedGroups.length} group(s) for user ${user.id}`);
+                        
+                        return {
+                            ...user,
+                            assignedUserGroups: assignedGroups,
+                        };
+                    } catch (error) {
+                        console.error(`❌ Failed to get groups for user ${user.id}:`, error);
+                        return {
+                            ...user,
+                            assignedUserGroups: [],
+                        };
+                    }
+                }),
+            );
+            
+            return usersWithGroups;
+        } else {
+            console.log('✅ Listing Systiva users (no account context)');
+            return await userManagement.listUsers();
+        }
     }
 
     @Get('users/:id')
@@ -4874,7 +4958,51 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.createUser(body);
+
+        console.log('💾 POST /api/user-management/users called with body:', {
+            accountId: body.accountId,
+            accountName: body.accountName,
+            enterpriseId: body.enterpriseId,
+            enterpriseName: body.enterpriseName,
+            firstName: body.firstName,
+            lastName: body.lastName,
+            emailAddress: body.emailAddress,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = body.accountId && body.accountName;
+        
+        if (hasAccountContext) {
+            console.log(`✅ Creating user in account table: ${body.accountName} (${body.accountId})`);
+            console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
+            
+            // Prepare user data for account-specific creation (include enterprise context)
+            const userPayload = {
+                firstName: body.firstName,
+                middleName: body.middleName,
+                lastName: body.lastName,
+                emailAddress: body.emailAddress,
+                password: body.password,
+                status: body.status || 'ACTIVE',
+                startDate: body.startDate || new Date().toISOString().split('T')[0],
+                endDate: body.endDate,
+                technicalUser: body.technicalUser === true || body.technicalUser === 'true',
+                assignedGroups: body.assignedUserGroups
+                    ? body.assignedUserGroups.map((group: any) => group.id || group)
+                    : [],
+                enterpriseId: body.enterpriseId,  // Pass enterprise context
+                enterpriseName: body.enterpriseName,  // Pass enterprise context
+            };
+
+            return await userManagement.createUserInAccountTable(
+                userPayload,
+                body.accountId,
+                body.accountName,
+            );
+        } else {
+            console.log('✅ Creating user in Systiva table (no account context)');
+            return await userManagement.createUser(body);
+        }
     }
 
     @Put('users/:id')
@@ -4884,18 +5012,460 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.updateUser(id, body);
+
+        console.log('🔄 PUT /api/user-management/users/:id called with body:', {
+            userId: id,
+            accountId: body.accountId,
+            accountName: body.accountName,
+            firstName: body.firstName,
+            lastName: body.lastName,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = body.accountId && body.accountName;
+        
+        if (hasAccountContext) {
+            console.log(`✅ Updating user in account table: ${body.accountName} (${body.accountId})`);
+            if (body.enterpriseId && body.enterpriseName) {
+                console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
+            }
+            
+            const updatePayload: any = {
+                firstName: body.firstName,
+                middleName: body.middleName,
+                lastName: body.lastName,
+                emailAddress: body.emailAddress,
+                status: body.status,
+                startDate: body.startDate,
+                endDate: body.endDate,
+                technicalUser: body.technicalUser,
+                enterpriseId: body.enterpriseId,  // Pass enterprise context
+                enterpriseName: body.enterpriseName,  // Pass enterprise context
+            };
+
+            // ⚠️  DO NOT update assignedUserGroups via PUT endpoint
+            // Group assignments should ONLY be updated via POST /users/:id/groups endpoint
+            // This prevents frontend temporary IDs from being saved to database
+            console.log('⚠️  Ignoring assignedUserGroups in PUT request (use POST /users/:id/groups instead)');
+
+            // Handle password if provided
+            if (body.password) {
+                updatePayload.password = body.password;
+            }
+
+            return await userManagement.updateUserInAccountTable(
+                id,
+                updatePayload,
+                body.accountId,
+                body.accountName,
+            );
+        } else {
+            console.log('✅ Updating user in Systiva table (no account context)');
+            return await userManagement.updateUser(id, body);
+        }
     }
 
     @Delete('users/:id')
-    async deleteUser(@Param('id') id: string) {
+    async deleteUser(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        await userManagement.deleteUser(id);
+
+        console.log('🗑️  DELETE /api/user-management/users/:id called:', {
+            userId: id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+        
+        if (hasAccountContext) {
+            console.log(`✅ Deleting user from account table: ${accountName} (${accountId})`);
+            if (enterpriseId && enterpriseName) {
+                console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
+            }
+            await userManagement.deleteUserFromAccountTable(id, accountId, accountName);
+        } else {
+            console.log('✅ Deleting user from Systiva table (no account context)');
+            await userManagement.deleteUser(id);
+        }
+        
         return {};
+    }
+
+    // ==========================================
+    // USER-GROUP ASSIGNMENT ENDPOINTS
+    // ==========================================
+
+    @Post('users/:id/groups')
+    async assignGroupsToUser(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        console.log('🔗 POST /api/user-management/users/:id/groups called:', {
+            userId: id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            body,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+
+        try {
+            // Get the user from the correct table
+            let user;
+            if (hasAccountContext) {
+                console.log(`✅ Looking for user in account table: ${accountName} (${accountId})`);
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
+            } else {
+                console.log('✅ Looking for user in Systiva table');
+                user = await userManagement.getUser(id);
+            }
+
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                };
+            }
+
+            console.log(`✅ User found: ${user.firstName} ${user.lastName}`);
+
+            // Handle different body formats
+            let requestedGroupIds: string[] = [];
+
+            if (body.groupId) {
+                // Single group assignment
+                console.log('📋 Single group assignment:', body.groupId);
+                const currentGroups = user.assignedGroups || [];
+                if (!currentGroups.includes(body.groupId)) {
+                    requestedGroupIds = [...currentGroups, body.groupId];
+                } else {
+                    requestedGroupIds = currentGroups;
+                }
+            } else if (body.groupIds && Array.isArray(body.groupIds)) {
+                // Bulk assignment (replace all)
+                console.log('📋 Bulk group assignment:', body.groupIds);
+                requestedGroupIds = body.groupIds;
+            } else if (body.assignedUserGroups && Array.isArray(body.assignedUserGroups)) {
+                // Frontend format
+                console.log('📋 assignedUserGroups format:', body.assignedUserGroups);
+                requestedGroupIds = body.assignedUserGroups.map((g: any) => g.id || g);
+            } else {
+                return {
+                    success: false,
+                    error: 'Invalid request body. Provide groupId, groupIds, or assignedUserGroups',
+                };
+            }
+
+            // ✅ VALIDATE AND PRIORITIZE ACCOUNT-SPECIFIC GROUPS
+            console.log(`\n🔍 Validating ${requestedGroupIds.length} requested group(s)...`);
+            const validatedGroupIds: string[] = [];
+            const warnings: string[] = [];
+            const replacements: Array<{original: string, replacement: string, groupName: string}> = [];
+
+            for (const groupId of requestedGroupIds) {
+                const validation = await userManagement.validateGroupScope(
+                    groupId,
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                );
+
+                if (validation.isValid) {
+                    console.log(`✅ Group ${groupId} is valid for this scope`);
+                    validatedGroupIds.push(groupId);
+                } else {
+                    console.warn(`⚠️  Group ${groupId} validation failed: ${validation.warning}`);
+                    warnings.push(validation.warning || 'Validation failed');
+
+                    // If it's a Systiva group in account context, try to find account-specific alternative
+                    if (validation.scopeType === 'systiva' && validation.group && hasAccountContext) {
+                        console.log(`🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`);
+                        
+                        const alternative = await userManagement.findAccountSpecificGroupByName(
+                            validation.group.name,
+                            accountId!,
+                            accountName!,
+                            enterpriseId,
+                            enterpriseName,
+                        );
+
+                        if (alternative) {
+                            console.log(`✅ Found account-specific alternative: ${alternative.name} (${alternative.id})`);
+                            validatedGroupIds.push(alternative.id);
+                            replacements.push({
+                                original: groupId,
+                                replacement: alternative.id,
+                                groupName: alternative.name,
+                            });
+                            warnings.push(`Replaced Systiva group "${validation.group.name}" with account-specific version (${alternative.id})`);
+                        } else {
+                            console.error(`❌ No account-specific alternative found for "${validation.group.name}"`);
+                            warnings.push(`Group "${validation.group.name}" (${groupId}) is Systiva-level with no account-specific alternative. Skipped.`);
+                        }
+                    } else {
+                        console.error(`❌ Group ${groupId} cannot be assigned: ${validation.warning}`);
+                    }
+                }
+            }
+
+            if (validatedGroupIds.length === 0 && requestedGroupIds.length > 0) {
+                console.error('❌ No valid groups to assign after validation');
+                return {
+                    success: false,
+                    error: 'No valid groups to assign',
+                    warnings,
+                    details: 'All requested groups failed validation. Ensure groups belong to the correct account and enterprise.',
+                };
+            }
+
+            console.log(`\n📊 Validation Summary:`);
+            console.log(`   Requested: ${requestedGroupIds.length} groups`);
+            console.log(`   Validated: ${validatedGroupIds.length} groups`);
+            console.log(`   Replacements: ${replacements.length}`);
+            if (replacements.length > 0) {
+                replacements.forEach(r => {
+                    console.log(`      - ${r.groupName}: ${r.original} → ${r.replacement}`);
+                });
+            }
+            console.log('');
+
+            // Update user with validated group assignments
+            if (hasAccountContext) {
+                console.log(`✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`);
+                await userManagement.updateUserInAccountTable(
+                    id,
+                    { 
+                        assignedGroups: validatedGroupIds,
+                        enterpriseId,
+                        enterpriseName,
+                    },
+                    accountId,
+                    accountName,
+                );
+            } else {
+                console.log(`✅ Updating user in Systiva table with ${validatedGroupIds.length} validated group(s)`);
+                await userManagement.updateUser(id, {
+                    assignedGroups: validatedGroupIds,
+                });
+            }
+
+            console.log(`✅ Successfully assigned ${validatedGroupIds.length} group(s) to user ${id}`);
+
+            const response: any = {
+                success: true,
+                message: 'Groups assigned successfully',
+                data: {
+                    userId: id,
+                    assignedGroups: validatedGroupIds.map(gId => ({ id: gId })),
+                    validatedCount: validatedGroupIds.length,
+                    requestedCount: requestedGroupIds.length,
+                },
+            };
+
+            if (warnings.length > 0) {
+                response.warnings = warnings;
+                response.replacements = replacements;
+            }
+
+            return response;
+        } catch (error: any) {
+            console.error('❌ Error assigning groups to user:', error);
+            return {
+                success: false,
+                error: 'Failed to assign groups to user',
+                details: error.message,
+            };
+        }
+    }
+
+    @Delete('users/:id/groups')
+    async removeGroupsFromUser(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        console.log('🗑️  DELETE /api/user-management/users/:id/groups called:', {
+            userId: id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            groupIds: body.groupIds,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+
+        try {
+            // Get the user from the correct table
+            let user;
+            if (hasAccountContext) {
+                console.log(`✅ Looking for user in account table: ${accountName}`);
+                if (enterpriseId && enterpriseName) {
+                    console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
+                }
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
+            } else {
+                console.log('✅ Looking for user in Systiva table');
+                user = await userManagement.getUser(id);
+            }
+
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                };
+            }
+
+            if (!body.groupIds || !Array.isArray(body.groupIds)) {
+                return {
+                    success: false,
+                    error: 'groupIds array is required',
+                };
+            }
+
+            // Remove specified groups
+            const currentGroups = user.assignedGroups || [];
+            const updatedGroups = currentGroups.filter(
+                (groupId) => !body.groupIds.includes(groupId),
+            );
+
+            console.log(`📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`);
+
+            // Update user
+            if (hasAccountContext) {
+                await userManagement.updateUserInAccountTable(
+                    id,
+                    { 
+                        assignedGroups: updatedGroups,
+                        enterpriseId,      // Preserve enterprise context
+                        enterpriseName     // Preserve enterprise context
+                    },
+                    accountId,
+                    accountName,
+                );
+            } else {
+                await userManagement.updateUser(id, {
+                    assignedGroups: updatedGroups,
+                });
+            }
+
+            console.log(`✅ Removed ${body.groupIds.length} group(s) from user ${id}`);
+
+            return {
+                success: true,
+                message: 'Groups removed successfully',
+            };
+        } catch (error: any) {
+            console.error('❌ Error removing groups from user:', error);
+            return {
+                success: false,
+                error: 'Failed to remove groups from user',
+                details: error.message,
+            };
+        }
+    }
+
+    @Get('users/:id/groups')
+    async getUserGroups(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        console.log('📋 GET /api/user-management/users/:id/groups called:', {
+            userId: id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
+
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+
+        try {
+            // Get the user from the correct table
+            let user;
+            if (hasAccountContext) {
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
+            } else {
+                user = await userManagement.getUser(id);
+            }
+
+            if (!user) {
+                return {
+                    success: false,
+                    error: 'User not found',
+                };
+            }
+
+            const groups = await userManagement.getUserGroups(
+                id, 
+                accountId, 
+                accountName,
+                enterpriseId,      // Pass enterprise context
+                enterpriseName     // Pass enterprise context
+            );
+
+            return {
+                success: true,
+                data: { groups },
+            };
+        } catch (error: any) {
+            console.error('❌ Error getting user groups:', error);
+            return {
+                success: false,
+                error: 'Failed to get user groups',
+                details: error.message,
+            };
+        }
     }
 
     // ==========================================
@@ -4906,29 +5476,39 @@ class UserManagementController {
     async listGroups(
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        console.log('📋 listGroups API called with account context:', {
+        console.log('📋 listGroups API called with full context:', {
             accountId,
             accountName,
+            enterpriseId,
+            enterpriseName,
         });
-        const groups = await userManagement.listGroups(accountId, accountName);
+        const groups = await userManagement.listGroups(accountId, accountName, enterpriseId, enterpriseName);
         console.log(`📋 listGroups returning ${groups.length} groups`);
         return groups;
     }
 
     @Get('groups/:id')
-    async getGroup(@Param('id') id: string) {
+    async getGroup(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroup(id);
+        return await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
     }
 
     @Get('groups/:id/roles')
@@ -4949,7 +5529,19 @@ class UserManagementController {
             };
         }
         console.log('🆕 createGroup API called with body:', body);
-        const result = await userManagement.createGroup(body);
+        
+        // Map frontend field names to backend expected names
+        const groupData = {
+            ...body,
+            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
+            selectedAccountId: body.accountId,
+            selectedAccountName: body.accountName,
+            selectedEnterpriseId: body.enterpriseId,
+            selectedEnterpriseName: body.enterpriseName,
+        };
+        
+        console.log('🆕 createGroup mapped data:', groupData);
+        const result = await userManagement.createGroup(groupData);
         console.log('🆕 createGroup created group:', result);
         return result;
     }
@@ -4962,20 +5554,68 @@ class UserManagementController {
             };
         }
         console.log(`🔄 updateGroup API called for id: ${id} with body:`, body);
-        const result = await userManagement.updateGroup(id, body);
+        
+        // Map frontend field names to backend expected names
+        const updateData = {
+            ...body,
+            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
+            selectedAccountId: body.accountId || body.selectedAccountId,
+            selectedAccountName: body.accountName || body.selectedAccountName,
+            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
+        };
+        
+        console.log(`🔄 updateGroup mapped data:`, updateData);
+        const result = await userManagement.updateGroup(id, updateData);
         console.log(`🔄 updateGroup result:`, result);
         return result;
     }
 
     @Delete('groups/:id')
-    async deleteGroup(@Param('id') id: string) {
+    async deleteGroup(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        await userManagement.deleteGroup(id);
+        console.log(`🗑️  deleteGroup API called for id: ${id} with context:`, {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
+        await userManagement.deleteGroup(id, accountId, accountName, enterpriseId, enterpriseName);
         return {};
+    }
+
+    @Get('groups/debug/all')
+    async debugAllGroups() {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Only available in DynamoDB mode'};
+        }
+        return await userManagement.debugListAllGroups();
+    }
+
+    @Delete('groups/debug/delete-all')
+    async debugDeleteAllGroups() {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Only available in DynamoDB mode'};
+        }
+        return await userManagement.debugDeleteAllGroups();
+    }
+
+    @Delete('users/debug/clear-all-group-assignments')
+    async debugClearAllUserGroupAssignments() {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Only available in DynamoDB mode'};
+        }
+        return await userManagement.debugClearAllUserGroupAssignments();
     }
 
     // ==========================================

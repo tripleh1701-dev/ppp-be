@@ -37,6 +37,8 @@ export interface Group {
     product?: string; // Product name/identifier
     service?: string; // Service name
     assignedRoles?: string[]; // Role IDs
+    enterpriseId?: string; // Enterprise ID for account-specific groups
+    enterpriseName?: string; // Enterprise name for account-specific groups
     createdAt: string;
     updatedAt: string;
 }
@@ -279,7 +281,10 @@ export class UserManagementDynamoDBService {
     }
 
     async createUserInAccountTable(
-        userData: Omit<User, 'id' | 'createdAt' | 'updatedAt'>,
+        userData: Omit<User, 'id' | 'createdAt' | 'updatedAt'> & {
+            enterpriseId?: string;
+            enterpriseName?: string;
+        },
         accountId: string,
         accountName: string,
     ): Promise<User> {
@@ -287,12 +292,22 @@ export class UserManagementDynamoDBService {
             const userId = uuidv4();
             const now = new Date().toISOString();
 
+            // Handle password encryption using AES (same as Systiva users)
+            let encryptedPasswordData: EncryptedPassword | undefined;
+            if (userData.password) {
+                try {
+                    encryptedPasswordData = encryptPassword(userData.password);
+                    logPasswordOperation('encrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    logPasswordOperation('encrypt', userId, false);
+                    throw new Error('Failed to encrypt password');
+                }
+            }
+
             const user: User = {
                 id: userId,
                 ...userData,
-                password: userData.password
-                    ? await this.hashPassword(userData.password)
-                    : undefined,
                 assignedGroups: userData.assignedGroups || [],
                 createdAt: now,
                 updatedAt: now,
@@ -301,12 +316,14 @@ export class UserManagementDynamoDBService {
             // Use account-specific PK format: <ACCOUNT_NAME>#<account_id>#USERS
             const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
 
-            const item = {
+            const item: any = {
                 PK: accountPK,
                 SK: `USER#${userId}`,
                 id: userId,
                 account_id: accountId,
                 account_name: accountName,
+                enterprise_id: userData.enterpriseId || 'systiva',  // Store enterprise context
+                enterprise_name: userData.enterpriseName || 'SYSTIVA',  // Store enterprise context
                 first_name: user.firstName,
                 middle_name: user.middleName,
                 last_name: user.lastName,
@@ -314,13 +331,20 @@ export class UserManagementDynamoDBService {
                 status: user.status,
                 start_date: user.startDate,
                 end_date: user.endDate,
-                password: user.password,
+                password_encrypted: encryptedPasswordData, // Store encrypted password (AES)
                 technical_user: user.technicalUser,
                 assigned_groups: user.assignedGroups,
                 created_date: now,
                 updated_date: now,
                 entity_type: 'USER',
             };
+
+            console.log('💾 Creating user with enterprise context:', {
+                account_id: accountId,
+                account_name: accountName,
+                enterprise_id: item.enterprise_id,
+                enterprise_name: item.enterprise_name,
+            });
 
             await DynamoDBOperations.putItem(this.tableName, item);
 
@@ -336,9 +360,8 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            // Remove password from response
-            const {password, ...userWithoutPassword} = user;
-            return userWithoutPassword as User;
+            // Return user with decrypted password for frontend
+            return user;
         } catch (error) {
             console.error('Error creating user in account table:', error);
             throw error;
@@ -348,6 +371,8 @@ export class UserManagementDynamoDBService {
     async listUsersByAccount(
         accountId: string,
         accountName: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
     ): Promise<User[]> {
         try {
             const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
@@ -355,6 +380,8 @@ export class UserManagementDynamoDBService {
             console.log('📋 Querying DynamoDB for account-specific users:', {
                 accountId,
                 accountName,
+                enterpriseId,
+                enterpriseName,
                 pkPrefix: accountPK,
             });
 
@@ -379,24 +406,64 @@ export class UserManagementDynamoDBService {
                         SK: item.SK,
                         name: `${item.first_name} ${item.last_name}`,
                         account_name: item.account_name,
+                        enterprise_name: item.enterprise_name,
                     })),
                 );
             }
 
-            return items.map((item) => ({
-                id: item.id,
-                firstName: item.first_name,
-                middleName: item.middle_name,
-                lastName: item.last_name,
-                emailAddress: item.email_address,
-                status: item.status,
-                startDate: item.start_date,
-                endDate: item.end_date,
-                technicalUser: item.technical_user,
-                assignedGroups: item.assigned_groups || [],
-                createdAt: item.created_date || item.createdAt,
-                updatedAt: item.updated_date || item.updatedAt,
-            }));
+            // Filter by enterprise if specified (same logic as groups)
+            let filteredItems = items;
+            if (enterpriseId && enterpriseName) {
+                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
+                filteredItems = items.filter(item => {
+                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                    if (!matchesEnterprise) {
+                        console.log(`📋 ❌ Filtered out user ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                    }
+                    return matchesEnterprise;
+                });
+                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} users`);
+            }
+
+            return filteredItems.map((item) => {
+                // Handle password decryption
+                let decryptedPassword: string | undefined;
+                if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(item.password_encrypted);
+                        decryptedPassword = decrypted.password;
+                        logPasswordOperation('decrypt', item.id || 'unknown', true);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt password for user ${item.id}:`, error);
+                        logPasswordOperation('decrypt', item.id || 'unknown', false);
+                        decryptedPassword = undefined; // Don't expose broken encrypted data
+                    }
+                } else if (item.password) {
+                    // Legacy bcrypt password - keep as undefined (cannot decrypt bcrypt)
+                    decryptedPassword = undefined;
+                }
+
+                return {
+                    id: item.id,
+                    firstName: item.first_name,
+                    middleName: item.middle_name,
+                    lastName: item.last_name,
+                    emailAddress: item.email_address,
+                    status: item.status,
+                    startDate: item.start_date,
+                    endDate: item.end_date,
+                    password: decryptedPassword,
+                    technicalUser: item.technical_user,
+                    assignedGroups: item.assigned_groups || [],
+                    // Include account and enterprise context in response
+                    accountId: item.account_id,
+                    accountName: item.account_name,
+                    enterpriseId: item.enterprise_id,
+                    enterpriseName: item.enterprise_name,
+                    createdAt: item.created_date || item.createdAt,
+                    updatedAt: item.updated_date || item.updatedAt,
+                };
+            });
         } catch (error) {
             console.error('Error listing users by account:', error);
             throw error;
@@ -509,6 +576,11 @@ export class UserManagementDynamoDBService {
                         password: decryptedPassword,
                         technicalUser: item.technical_user,
                         assignedGroups: item.assigned_groups || [],
+                        // Include account and enterprise context in response
+                        accountId: item.account_id,
+                        accountName: item.account_name,
+                        enterpriseId: item.enterprise_id,
+                        enterpriseName: item.enterprise_name,
                         createdAt: item.created_date || item.createdAt,
                         updatedAt: item.updated_date || item.updatedAt,
                     };
@@ -681,7 +753,10 @@ export class UserManagementDynamoDBService {
 
     async updateUserInAccountTable(
         userId: string,
-        updates: Partial<User>,
+        updates: Partial<User> & {
+            enterpriseId?: string;
+            enterpriseName?: string;
+        },
         accountId: string,
         accountName: string,
     ): Promise<User | null> {
@@ -759,12 +834,34 @@ export class UserManagementDynamoDBService {
                 );
             }
             if (updates.password !== undefined) {
-                const hashedPassword = await this.hashPassword(
-                    updates.password,
-                );
-                updateFields.push('#password = :password');
+                // Handle password encryption using AES (same as Systiva users)
+                let encryptedPasswordData: EncryptedPassword | undefined;
+                try {
+                    encryptedPasswordData = encryptPassword(updates.password);
+                    logPasswordOperation('encrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    logPasswordOperation('encrypt', userId, false);
+                    throw new Error('Failed to encrypt password');
+                }
+                
+                updateFields.push('password_encrypted = :passwordEncrypted');
+                expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
+                
+                // Remove old bcrypt password field if it exists
+                updateFields.push('#password = :passwordRemove');
                 expressionAttributeNames['#password'] = 'password';
-                expressionAttributeValues[':password'] = hashedPassword;
+                expressionAttributeValues[':passwordRemove'] = null;
+            }
+            
+            // Update enterprise fields if provided
+            if (updates.enterpriseId !== undefined) {
+                updateFields.push('enterprise_id = :enterpriseId');
+                expressionAttributeValues[':enterpriseId'] = updates.enterpriseId;
+            }
+            if (updates.enterpriseName !== undefined) {
+                updateFields.push('enterprise_name = :enterpriseName');
+                expressionAttributeValues[':enterpriseName'] = updates.enterpriseName;
             }
 
             // Always ensure entity_type is set
@@ -801,6 +898,20 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
+            // Handle password decryption for response
+            let decryptedPassword: string | undefined;
+            if (result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                try {
+                    const decrypted = decryptPassword(result.password_encrypted);
+                    decryptedPassword = decrypted.password;
+                    logPasswordOperation('decrypt', userId, true);
+                } catch (error) {
+                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                    logPasswordOperation('decrypt', userId, false);
+                    decryptedPassword = undefined;
+                }
+            }
+
             return {
                 id: result.id || userId,
                 firstName: result.first_name,
@@ -810,6 +921,7 @@ export class UserManagementDynamoDBService {
                 status: result.status,
                 startDate: result.start_date,
                 endDate: result.end_date,
+                password: decryptedPassword,
                 technicalUser: result.technical_user,
                 assignedGroups: result.assigned_groups || [],
                 createdAt: result.created_date || result.createdAt,
@@ -891,6 +1003,8 @@ export class UserManagementDynamoDBService {
         groupData: Omit<Group, 'id' | 'createdAt' | 'updatedAt'> & {
             selectedAccountId?: string;
             selectedAccountName?: string;
+            selectedEnterpriseId?: string;
+            selectedEnterpriseName?: string;
             id?: string;
         },
     ): Promise<Group> {
@@ -927,6 +1041,8 @@ export class UserManagementDynamoDBService {
                 id: groupId,
                 account_id: groupData.selectedAccountId || 'systiva',
                 account_name: groupData.selectedAccountName || 'SYSTIVA',
+                enterprise_id: groupData.selectedEnterpriseId || 'systiva',
+                enterprise_name: groupData.selectedEnterpriseName || 'SYSTIVA',
                 group_name: group.name,
                 description: group.description,
                 entity: group.entity || '',
@@ -938,10 +1054,12 @@ export class UserManagementDynamoDBService {
                 entity_type: 'GROUP',
             };
 
-            // Add account fields if account-specific
+            // Add account and enterprise fields if account-specific
             if (isAccountSpecific) {
                 item.account_id = groupData.selectedAccountId;
                 item.account_name = groupData.selectedAccountName;
+                item.enterprise_id = groupData.selectedEnterpriseId || 'systiva';
+                item.enterprise_name = groupData.selectedEnterpriseName || 'SYSTIVA';
             }
 
             console.log('🆕 Creating group in DynamoDB:', item);
@@ -962,14 +1080,29 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async getGroup(groupId: string): Promise<Group | null> {
+    async getGroup(
+        groupId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Group | null> {
         try {
+            // Determine PK based on account context
+            const isAccountSpecific = accountId && accountName;
+            const pkPrefix = isAccountSpecific
+                ? `${accountName.toUpperCase()}#${accountId}#GROUPS`
+                : 'SYSTIVA#systiva#GROUPS';
+
+            console.log(`🔍 Getting group ${groupId} from partition: ${pkPrefix}`);
+
             const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#systiva#GROUPS`,
+                PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
             });
 
             if (!item) {
+                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
                 return null;
             }
 
@@ -981,6 +1114,8 @@ export class UserManagementDynamoDBService {
                 product: item.product || '',
                 service: item.service || '',
                 assignedRoles: item.assigned_roles || [],
+                enterpriseId: item.enterprise_id,
+                enterpriseName: item.enterprise_name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
             };
@@ -990,14 +1125,135 @@ export class UserManagementDynamoDBService {
         }
     }
 
+    async debugListAllGroups(): Promise<any> {
+        try {
+            const allItems = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :type',
+                {':type': 'GROUP'},
+            );
+            return {
+                total: allItems.length,
+                groups: allItems.map(item => ({
+                    PK: item.PK,
+                    SK: item.SK,
+                    id: item.id,
+                    group_name: item.group_name,
+                    account_id: item.account_id,
+                    account_name: item.account_name,
+                    enterprise_id: item.enterprise_id,
+                    enterprise_name: item.enterprise_name,
+                })),
+            };
+        } catch (error) {
+            console.error('Error in debugListAllGroups:', error);
+            throw error;
+        }
+    }
+
+    async debugDeleteAllGroups(): Promise<any> {
+        try {
+            const allItems = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :type',
+                {':type': 'GROUP'},
+            );
+            
+            console.log(`🗑️  Deleting all ${allItems.length} groups from database...`);
+            
+            for (const item of allItems) {
+                console.log(`🗑️  Deleting group: ${item.id} (${item.group_name || 'unnamed'}) from ${item.PK}`);
+                await DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: item.PK,
+                    SK: item.SK,
+                });
+            }
+            
+            console.log(`✅ Successfully deleted ${allItems.length} groups`);
+            return {
+                success: true,
+                deletedCount: allItems.length,
+                message: `Deleted ${allItems.length} groups from database`,
+            };
+        } catch (error) {
+            console.error('Error in debugDeleteAllGroups:', error);
+            throw error;
+        }
+    }
+
+    async debugClearAllUserGroupAssignments(): Promise<any> {
+        try {
+            // Delete all user-group assignment lookup records
+            const assignmentItems = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :type',
+                {':type': 'user_group_assignment'},
+            );
+            
+            console.log(`🗑️  Deleting ${assignmentItems.length} user-group assignment records...`);
+            
+            for (const item of assignmentItems) {
+                await DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: item.PK,
+                    SK: item.SK,
+                });
+            }
+            
+            // Clear assigned_groups field from all users
+            const allUsers = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :type',
+                {':type': 'USER'},
+            );
+            
+            console.log(`🔄 Found ${allUsers.length} users in database`);
+            let clearedCount = 0;
+            
+            for (const user of allUsers) {
+                console.log(`👤 User ${user.id} (${user.first_name} ${user.last_name}):`, {
+                    PK: user.PK,
+                    SK: user.SK,
+                    assigned_groups: user.assigned_groups,
+                    hasGroups: !!(user.assigned_groups && user.assigned_groups.length > 0),
+                });
+                
+                if (user.assigned_groups && user.assigned_groups.length > 0) {
+                    console.log(`🔄 Clearing ${user.assigned_groups.length} groups from user ${user.id}`);
+                    await DynamoDBOperations.updateItem(
+                        this.tableName,
+                        {PK: user.PK, SK: user.SK},
+                        'SET assigned_groups = :empty',
+                        {':empty': []},
+                    );
+                    clearedCount++;
+                    console.log(`✅ Cleared groups from user ${user.id}`);
+                }
+            }
+            
+            console.log(`✅ Successfully cleared all user-group assignments`);
+            return {
+                success: true,
+                deletedAssignments: assignmentItems.length,
+                clearedUsers: clearedCount,
+                totalUsers: allUsers.length,
+                message: `Deleted ${assignmentItems.length} assignment records and cleared assignments from ${clearedCount} users`,
+            };
+        } catch (error) {
+            console.error('Error in debugClearAllUserGroupAssignments:', error);
+            throw error;
+        }
+    }
+
     async listGroups(
         accountId?: string,
         accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
     ): Promise<Group[]> {
         try {
             console.log(
-                '📋 Scanning DynamoDB for groups with entity_type = group',
-                {accountId, accountName},
+                '📋 Scanning DynamoDB for groups with full context',
+                {accountId, accountName, enterpriseId, enterpriseName},
             );
 
             // Determine if we need to filter by account
@@ -1007,10 +1263,17 @@ export class UserManagementDynamoDBService {
             if (isAccountSpecific) {
                 // Query for account-specific groups using correct PK pattern
                 const accountPK = `${accountName.toUpperCase()}#${accountId}#GROUPS`;
-                console.log(
-                    '📋 Querying for account-specific groups with PK:',
-                    accountPK,
-                );
+                console.log('📋 ================================');
+                console.log('📋 Querying for account-specific groups');
+                console.log('📋 Input Parameters:', {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                });
+                console.log('📋 Constructed PK:', accountPK);
+                console.log('📋 SK prefix:', 'GROUP#');
+                console.log('📋 ================================');
 
                 items = await DynamoDBOperations.queryItems(
                     this.tableName,
@@ -1020,6 +1283,35 @@ export class UserManagementDynamoDBService {
                         ':sk': 'GROUP#',
                     },
                 );
+                
+                console.log(`📋 ⚡ Query returned ${items.length} items from DynamoDB`);
+                if (items.length > 0) {
+                    console.log('📋 ✅ First item structure:', {
+                        PK: items[0].PK,
+                        SK: items[0].SK,
+                        id: items[0].id,
+                        group_name: items[0].group_name,
+                        account_id: items[0].account_id,
+                        account_name: items[0].account_name,
+                    });
+                } else {
+                    console.log('📋 ❌ No items found - checking if data exists...');
+                    // Do a broader scan to see what's actually in the table
+                    const allItems = await DynamoDBOperations.scanItems(
+                        this.tableName,
+                        'entity_type = :type',
+                        {':type': 'GROUP'},
+                    );
+                    console.log(`📋 📊 Total groups in entire table: ${allItems.length}`);
+                    if (allItems.length > 0) {
+                        console.log('📋 Sample PKs in table:', allItems.slice(0, 5).map(i => ({
+                            PK: i.PK,
+                            SK: i.SK,
+                            account_name: i.account_name,
+                            account_id: i.account_id,
+                        })));
+                    }
+                }
             } else {
                 // Query for Systiva groups using correct PK pattern
                 console.log('📋 Querying for Systiva groups');
@@ -1034,10 +1326,24 @@ export class UserManagementDynamoDBService {
                 );
             }
 
-            console.log(`📋 Found ${items.length} groups`);
+            console.log(`📋 Found ${items.length} groups before filtering`);
             console.log('📋 Sample items:', items.slice(0, 2));
 
-            const groups = items
+            // Filter by enterprise if specified
+            let filteredItems = items;
+            if (enterpriseId && enterpriseName) {
+                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
+                filteredItems = items.filter(item => {
+                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                    if (!matchesEnterprise) {
+                        console.log(`📋 ❌ Filtered out group ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                    }
+                    return matchesEnterprise;
+                });
+                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} groups`);
+            }
+
+            const groups = filteredItems
                 .map((item) => ({
                     id: item.id || item.PK?.split('#').pop(),
                     name: item.group_name || item.name,
@@ -1046,6 +1352,8 @@ export class UserManagementDynamoDBService {
                     product: item.product || '',
                     service: item.service || '',
                     assignedRoles: item.assigned_roles || [],
+                    enterpriseId: item.enterprise_id,
+                    enterpriseName: item.enterprise_name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
                 }))
@@ -1064,6 +1372,8 @@ export class UserManagementDynamoDBService {
         updates: Partial<Group> & {
             selectedAccountId?: string;
             selectedAccountName?: string;
+            selectedEnterpriseId?: string;
+            selectedEnterpriseName?: string;
         },
     ): Promise<Group | null> {
         try {
@@ -1078,11 +1388,23 @@ export class UserManagementDynamoDBService {
                   }#GROUPS`
                 : 'SYSTIVA#systiva#GROUPS';
 
-            // Get existing group to track role changes
-            const existingGroup = await this.getGroup(groupId);
+            console.log(`🔄 updateGroup: Updating group ${groupId} in partition ${pkPrefix}`);
+            console.log(`🔄 Update data:`, updates);
+
+            // Get existing group with account context to find it in correct partition
+            const existingGroup = await this.getGroup(
+                groupId,
+                updates.selectedAccountId,
+                updates.selectedAccountName,
+                updates.selectedEnterpriseId,
+                updates.selectedEnterpriseName,
+            );
             if (!existingGroup) {
+                console.log(`❌ Group ${groupId} not found in partition ${pkPrefix}`);
                 return null;
             }
+            
+            console.log(`✅ Found existing group:`, existingGroup);
 
             const updateFields: string[] = [];
             const expressionAttributeValues: any = {
@@ -1125,10 +1447,20 @@ export class UserManagementDynamoDBService {
                     updates.assignedRoles,
                 );
             }
+            
+            // Update enterprise fields if provided
+            if (updates.selectedEnterpriseId !== undefined) {
+                updateFields.push('enterprise_id = :enterpriseId');
+                expressionAttributeValues[':enterpriseId'] = updates.selectedEnterpriseId;
+            }
+            if (updates.selectedEnterpriseName !== undefined) {
+                updateFields.push('enterprise_name = :enterpriseName');
+                expressionAttributeValues[':enterpriseName'] = updates.selectedEnterpriseName;
+            }
 
             // Always ensure entity_type is set (for legacy records that might be missing it)
             updateFields.push('entity_type = :entityType');
-            expressionAttributeValues[':entityType'] = 'group';
+            expressionAttributeValues[':entityType'] = 'GROUP';
 
             updateFields.push('updated_date = :updated');
             updateFields.push('updatedAt = :updated');
@@ -1177,14 +1509,33 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async deleteGroup(groupId: string): Promise<void> {
+    async deleteGroup(
+        groupId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<void> {
         try {
-            console.log(`🗑️  Deleting group ${groupId}...`);
+            console.log(`🗑️  Deleting group ${groupId} with context:`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            // Determine PK based on account context
+            const isAccountSpecific = accountId && accountName;
+            const pkPrefix = isAccountSpecific
+                ? `${accountName.toUpperCase()}#${accountId}#GROUPS`
+                : 'SYSTIVA#systiva#GROUPS';
+
+            console.log(`🗑️  Deleting from partition: ${pkPrefix}`);
             
-            // Get group to find assigned roles for cleanup and determine PK
-            const group = await this.getGroup(groupId);
+            // Get group to find assigned roles for cleanup
+            const group = await this.getGroup(groupId, accountId, accountName, enterpriseId, enterpriseName);
             if (!group) {
-                console.log(`⚠️  Group ${groupId} not found`);
+                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
                 return; // Group doesn't exist, nothing to delete
             }
 
@@ -1198,13 +1549,13 @@ export class UserManagementDynamoDBService {
             // Delete all user-group lookups for this group
             await this.deleteAllUserGroupLookupsForGroup(groupId);
 
-            // Use the correct PK pattern: SYSTIVA#systiva#GROUPS (not SYSTIVA#groupId)
+            // Delete the group from the correct partition
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#systiva#GROUPS`,
+                PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
             });
             
-            console.log(`✅ Successfully deleted group ${groupId}`);
+            console.log(`✅ Successfully deleted group ${groupId} from ${pkPrefix}`);
         } catch (error) {
             console.error('Error deleting group:', error);
             throw error;
@@ -1856,21 +2207,73 @@ export class UserManagementDynamoDBService {
     // QUERY HELPERS
     // ==========================================
 
-    async getUserGroups(userId: string): Promise<Group[]> {
+    async getUserGroups(
+        userId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Group[]> {
         try {
-            const user = await this.getUser(userId);
+            console.log('🔍 getUserGroups called:', { 
+                userId, 
+                accountId, 
+                accountName,
+                enterpriseId,
+                enterpriseName 
+            });
+
+            // Get user from correct table based on account context
+            let user;
+            if (accountId && accountName) {
+                console.log('📋 Looking for user in account table:', accountName);
+                const users = await this.listUsersByAccount(
+                    accountId, 
+                    accountName,
+                    enterpriseId,      // ✅ Pass enterprise params
+                    enterpriseName     // ✅ Pass enterprise params
+                );
+                user = users.find(u => u.id === userId);
+                console.log(`📋 User found in account table:`, user ? 'YES' : 'NO');
+            } else {
+                console.log('📋 Looking for user in Systiva table');
+                user = await this.getUser(userId);
+            }
+
             if (!user || !user.assignedGroups) {
+                console.log('⚠️  User not found or has no assigned groups');
                 return [];
             }
 
+            console.log(`📋 User has ${user.assignedGroups.length} assigned group(s):`, user.assignedGroups);
+
             const groups: Group[] = [];
             for (const groupId of user.assignedGroups) {
-                const group = await this.getGroup(groupId);
+                console.log(`🔍 Looking up group: ${groupId}`);
+                
+                // Try to find group with full context (account + enterprise)
+                let group = await this.getGroup(
+                    groupId,
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName
+                );
+                
+                // If not found with account context, try Systiva table
+                if (!group) {
+                    group = await this.getGroup(groupId);
+                }
+                
                 if (group) {
+                    console.log(`  ✅ Found group: ${group.name}`);
                     groups.push(group);
+                } else {
+                    console.log(`  ⚠️  Group ${groupId} not found in database`);
                 }
             }
 
+            console.log(`📋 Returning ${groups.length} group(s)`);
             return groups;
         } catch (error) {
             console.error('Error getting user groups:', error);
@@ -1950,6 +2353,157 @@ export class UserManagementDynamoDBService {
                 tableName: this.tableName,
                 error: error instanceof Error ? error.message : 'Unknown error',
             };
+        }
+    }
+
+    /**
+     * Validate if a group belongs to the correct scope (account-specific vs Systiva)
+     * This prevents assigning Systiva groups in account context
+     */
+    async validateGroupScope(
+        groupId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<{
+        isValid: boolean;
+        group: Group | null;
+        warning?: string;
+        scopeType?: 'account' | 'systiva' | 'not_found';
+    }> {
+        try {
+            console.log(`🔍 Validating group scope for ${groupId}:`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            // If account context is provided, prioritize account-specific groups
+            if (accountId && accountName) {
+                // First, try to find group in account-specific partition
+                const accountGroup = await this.getGroup(
+                    groupId,
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                );
+
+                if (accountGroup) {
+                    console.log(`✅ Group found in account scope: ${accountGroup.name}`);
+                    
+                    // Validate enterprise match if specified
+                    // Note: getGroup already filters by enterprise, but double-check here
+                    if (enterpriseId && accountGroup.enterpriseId && accountGroup.enterpriseId !== enterpriseId) {
+                        return {
+                            isValid: false,
+                            group: accountGroup,
+                            warning: `Group belongs to different enterprise: ${accountGroup.enterpriseName} (${accountGroup.enterpriseId}), expected ${enterpriseName} (${enterpriseId})`,
+                            scopeType: 'account',
+                        };
+                    }
+
+                    return {
+                        isValid: true,
+                        group: accountGroup,
+                        scopeType: 'account',
+                    };
+                }
+
+                // Group not found in account scope - check if it's a Systiva group
+                console.log(`⚠️  Group not found in account scope, checking Systiva...`);
+                const systivaGroup = await this.getGroup(groupId);
+
+                if (systivaGroup) {
+                    console.log(`❌ Group found in SYSTIVA scope: ${systivaGroup.name}`);
+                    return {
+                        isValid: false,
+                        group: systivaGroup,
+                        warning: `Attempting to assign Systiva-level group "${systivaGroup.name}" in account context. Use account-specific groups instead to maintain data isolation.`,
+                        scopeType: 'systiva',
+                    };
+                }
+
+                // Group not found anywhere
+                return {
+                    isValid: false,
+                    group: null,
+                    warning: `Group ${groupId} not found in database`,
+                    scopeType: 'not_found',
+                };
+            } else {
+                // No account context - only Systiva groups are valid
+                console.log(`📋 No account context - validating as Systiva group`);
+                const systivaGroup = await this.getGroup(groupId);
+
+                if (systivaGroup) {
+                    return {
+                        isValid: true,
+                        group: systivaGroup,
+                        scopeType: 'systiva',
+                    };
+                }
+
+                return {
+                    isValid: false,
+                    group: null,
+                    warning: `Group ${groupId} not found in Systiva scope`,
+                    scopeType: 'not_found',
+                };
+            }
+        } catch (error) {
+            console.error('Error validating group scope:', error);
+            return {
+                isValid: false,
+                group: null,
+                warning: `Error validating group: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                scopeType: 'not_found',
+            };
+        }
+    }
+
+    /**
+     * Find an account-specific group by name
+     * Used to replace Systiva groups with account-specific alternatives
+     */
+    async findAccountSpecificGroupByName(
+        groupName: string,
+        accountId: string,
+        accountName: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Group | null> {
+        try {
+            console.log(`🔍 Looking for account-specific group named "${groupName}"`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            const groups = await this.listGroups(
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            );
+
+            const matchingGroup = groups.find(
+                (g) => g.name === groupName || g.name.toLowerCase() === groupName.toLowerCase(),
+            );
+
+            if (matchingGroup) {
+                console.log(`✅ Found account-specific alternative: ${matchingGroup.name} (${matchingGroup.id})`);
+            } else {
+                console.log(`❌ No account-specific group found with name "${groupName}"`);
+            }
+
+            return matchingGroup || null;
+        } catch (error) {
+            console.error('Error finding account-specific group by name:', error);
+            return null;
         }
     }
 }
