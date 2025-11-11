@@ -1,1 +1,52 @@
-[]
+[
+    {
+        "id": "8bcab965-1fd6-4f43-a7e5-12388d2f8a0e",
+        "name": "Finance Team",
+        "description": "Finance department group for Systiva Enterprise Business Suite"
+    },
+    {
+        "id": "b218e54d-c1de-4fa2-a83a-972b5f5c6770",
+        "name": "IT Operations",
+        "description": "IT operations team for enterprise systems"
+    },
+    {
+        "id": "e344b93a-658b-4611-8b4d-e52452537462",
+        "name": "Human Resources",
+        "description": "HR department group for employee management"
+    },
+    {
+        "id": "442a1d29-833a-4723-b3af-d6215f60099a",
+        "name": "Sales Department",
+        "description": "Sales team group for customer management"
+    },
+    {
+        "id": "798f8401-4d65-460b-a7c3-6f059f671b50",
+        "name": "Engineering Team",
+        "description": "Software engineering team for development projects"
+    },
+    {
+        "id": "95a43394-e0f6-43f6-a93f-c802d92795c5",
+        "name": "Quality Assurance",
+        "description": "QA team for testing and quality control"
+    },
+    {
+        "id": "b3b1fd92-c1df-4300-bb42-8b8e14d2590c",
+        "name": "Project Management",
+        "description": "Project managers group for project coordination"
+    },
+    {
+        "id": "850f00df-427d-4674-b05b-93a7703d7797",
+        "name": "Business Analysts",
+        "description": "Business analysis team for requirements gathering"
+    },
+    {
+        "id": "bb677528-9fc2-417d-8164-5d3f74994802",
+        "name": "Data Analytics",
+        "description": "Data analytics team for business intelligence"
+    },
+    {
+        "id": "b9f34aab-edbe-4751-9282-19a466d3b96d",
+        "name": "Customer Support",
+        "description": "Customer support team for client assistance"
+    }
+]
