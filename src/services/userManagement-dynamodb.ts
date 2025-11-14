@@ -46,7 +46,13 @@ export interface Group {
 export interface Role {
     id: string;
     name: string;
+    roleName?: string; // legacy UI field
     description?: string;
+    entity?: string;
+    product?: string;
+    service?: string;
+    enterpriseId?: string;
+    enterpriseName?: string;
     scopeConfig?: ScopeConfiguration;
     createdAt: string;
     updatedAt: string;
@@ -1570,6 +1576,8 @@ export class UserManagementDynamoDBService {
         roleData: Omit<Role, 'id' | 'createdAt' | 'updatedAt'> & {
             selectedAccountId?: string;
             selectedAccountName?: string;
+            selectedEnterpriseId?: string;
+            selectedEnterpriseName?: string;
         },
     ): Promise<Role> {
         try {
@@ -1580,8 +1588,8 @@ export class UserManagementDynamoDBService {
                 name: roleData.name,
                 selectedAccountId: roleData.selectedAccountId,
                 selectedAccountName: roleData.selectedAccountName,
-                selectedAccountId_type: typeof roleData.selectedAccountId,
-                selectedAccountName_type: typeof roleData.selectedAccountName,
+                selectedEnterpriseId: roleData.selectedEnterpriseId,
+                selectedEnterpriseName: roleData.selectedEnterpriseName,
                 fullRoleData: roleData,
             });
 
@@ -1593,6 +1601,8 @@ export class UserManagementDynamoDBService {
                 isAccountSpecific,
                 hasAccountId: !!roleData.selectedAccountId,
                 hasAccountName: !!roleData.selectedAccountName,
+                hasEnterpriseId: !!roleData.selectedEnterpriseId,
+                hasEnterpriseName: !!roleData.selectedEnterpriseName,
             });
 
             // Use correct PK pattern: <ACCOUNT_NAME>#${account_Id}#ROLES
@@ -1617,8 +1627,13 @@ export class UserManagementDynamoDBService {
                 id: roleId,
                 account_id: roleData.selectedAccountId || 'systiva',
                 account_name: roleData.selectedAccountName || 'SYSTIVA',
+                enterprise_id: roleData.selectedEnterpriseId || '',
+                enterprise_name: roleData.selectedEnterpriseName || '',
                 role_name: role.name,
                 description: role.description,
+                entity: roleData.entity || '',
+                product: roleData.product || '',
+                service: roleData.service || '',
                 scope_config: role.scopeConfig,
                 created_date: now,
                 updated_date: now,
@@ -1629,7 +1644,7 @@ export class UserManagementDynamoDBService {
 
             await DynamoDBOperations.putItem(this.tableName, item);
 
-            console.log(`✅ Role created successfully with PK: ${accountPK}`);
+            console.log(`✅ Role created successfully with PK: ${accountPK}, Enterprise: ${roleData.selectedEnterpriseName}`);
 
             return role;
         } catch (error) {
@@ -1638,11 +1653,16 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async getRole(roleId: string): Promise<Role | null> {
+    async getRole(
+        roleId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Role | null> {
         try {
-            // First, try to find the role by querying with the roleId in SK
-            // We need to query listRoles and filter by ID since we don't know the account
-            const allRoles = await this.listRoles();
+            // Query listRoles with account/enterprise context and filter by ID
+            const allRoles = await this.listRoles(accountId, accountName, enterpriseId, enterpriseName);
             const role = allRoles.find((r) => r.id === roleId);
 
             if (!role) {
@@ -1657,45 +1677,96 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async listRoles(): Promise<Role[]> {
+    async listRoles(
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Role[]> {
         try {
-            console.log('📋 Querying DynamoDB for Systiva roles');
-
-            // Query for Systiva roles using correct PK pattern
-            const systivaPK = 'SYSTIVA#systiva#ROLES';
-            const items = await DynamoDBOperations.queryItems(
-                this.tableName,
-                'PK = :pk AND begins_with(SK, :sk)',
-                {
-                    ':pk': systivaPK,
-                    ':sk': 'ROLE#',
-                },
+            console.log(
+                '📋 Scanning DynamoDB for roles with full context',
+                {accountId, accountName, enterpriseId, enterpriseName},
             );
 
-            console.log(`📋 Found ${items.length} Systiva roles`);
-            if (items.length > 0) {
-                console.log(
-                    '📋 Systiva roles PKs:',
-                    items.map((item) => ({
-                        PK: item.PK,
-                        SK: item.SK,
-                        name: item.role_name || item.name,
-                        account_name: item.account_name,
-                    })),
+            // Determine if we need to filter by account
+            const isAccountSpecific = accountId && accountName;
+
+            let items: any[];
+            if (isAccountSpecific) {
+                // Query for account-specific roles using correct PK pattern
+                const accountPK = `${accountName.toUpperCase()}#${accountId}#ROLES`;
+                console.log('📋 ================================');
+                console.log('📋 Querying for account-specific roles');
+                console.log('📋 Input Parameters:', {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                });
+                console.log('📋 Constructed PK:', accountPK);
+                console.log('📋 SK prefix:', 'ROLE#');
+                console.log('📋 ================================');
+
+                items = await DynamoDBOperations.queryItems(
+                    this.tableName,
+                    'PK = :pk AND begins_with(SK, :sk)',
+                    {
+                        ':pk': accountPK,
+                        ':sk': 'ROLE#',
+                    },
+                );
+                
+                console.log(`📋 ⚡ Query returned ${items.length} items from DynamoDB`);
+            } else {
+                // Query for Systiva roles using correct PK pattern
+                console.log('📋 Querying for Systiva roles');
+                const systivaPK = 'SYSTIVA#systiva#ROLES';
+                items = await DynamoDBOperations.queryItems(
+                    this.tableName,
+                    'PK = :pk AND begins_with(SK, :sk)',
+                    {
+                        ':pk': systivaPK,
+                        ':sk': 'ROLE#',
+                    },
                 );
             }
 
-            return items
+            console.log(`📋 Found ${items.length} roles before filtering`);
+
+            // Filter by enterprise if specified
+            let filteredItems = items;
+            if (enterpriseId && enterpriseName) {
+                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
+                filteredItems = items.filter(item => {
+                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                    if (!matchesEnterprise) {
+                        console.log(`📋 ❌ Filtered out role ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                    }
+                    return matchesEnterprise;
+                });
+                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} roles`);
+            }
+
+            const roles = filteredItems
                 .map((item) => ({
-                    id: item.id || item.PK?.replace('SYSTIVA#', ''),
+                    id: item.id || item.PK?.split('#').pop(),
                     roleName: item.role_name || item.name,
                     name: item.role_name || item.name, // Keep for backwards compatibility
                     description: item.description,
+                    entity: item.entity || '',
+                    product: item.product || '',
+                    service: item.service || '',
                     scopeConfig: item.scope_config,
+                    enterpriseId: item.enterprise_id,
+                    enterpriseName: item.enterprise_name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
                 }))
                 .sort((a, b) => a.roleName.localeCompare(b.roleName));
+
+            console.log(`📋 Returning ${roles.length} transformed roles`);
+            return roles;
         } catch (error) {
             console.error('Error listing roles:', error);
             throw error;
@@ -1745,7 +1816,12 @@ export class UserManagementDynamoDBService {
                 roleName: item.role_name || item.name,
                 name: item.role_name || item.name, // Keep for backwards compatibility
                 description: item.description,
+                entity: item.entity || '',
+                product: item.product || '',
+                service: item.service || '',
                 scopeConfig: item.scope_config,
+                enterpriseId: item.enterprise_id,
+                enterpriseName: item.enterprise_name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
             }));
@@ -1757,38 +1833,62 @@ export class UserManagementDynamoDBService {
 
     async updateRole(
         roleId: string,
-        updates: Partial<Role>,
+        updates: Partial<Role> & {
+            selectedAccountId?: string;
+            selectedAccountName?: string;
+            selectedEnterpriseId?: string;
+            selectedEnterpriseName?: string;
+        },
     ): Promise<Role | null> {
         try {
             const now = new Date().toISOString();
 
-            // First, get the existing role to find its correct PK
-            const existingRole = await this.getRole(roleId);
+            console.log(`🔄 updateRole: Updating role ${roleId}`);
+            console.log(`🔄 Update data:`, updates);
+
+            // Determine PK based on account context
+            const isAccountSpecific =
+                updates.selectedAccountId && updates.selectedAccountName;
+            const pkPrefix = isAccountSpecific
+                ? `${updates.selectedAccountName!.toUpperCase()}#${
+                      updates.selectedAccountId
+                  }#ROLES`
+                : 'SYSTIVA#systiva#ROLES';
+
+            console.log(`🔄 Using PK: ${pkPrefix}`);
+
+            // Get existing role with account context to find it in correct partition
+            const existingRole = await this.getRole(
+                roleId,
+                updates.selectedAccountId,
+                updates.selectedAccountName,
+                updates.selectedEnterpriseId,
+                updates.selectedEnterpriseName,
+            );
             if (!existingRole) {
-                console.log(
-                    `⚠️ Cannot update role - role not found: ${roleId}`,
-                );
+                console.log(`❌ Role ${roleId} not found in partition ${pkPrefix}`);
                 return null;
             }
+            
+            console.log(`✅ Found existing role:`, existingRole);
 
-            // Find the PK by querying the database
+            // Find the PK by querying the database with correct partition
             const allRolesRaw = await withDynamoDB(async (client) => {
                 const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
 
-                // Query Systiva roles
-                const systivaResponse = await client.send(
+                const response = await client.send(
                     new QueryCommand({
                         TableName: this.tableName,
                         KeyConditionExpression:
                             'PK = :pk AND begins_with(SK, :skPrefix)',
                         ExpressionAttributeValues: {
-                            ':pk': 'SYSTIVA#systiva#ROLES',
+                            ':pk': pkPrefix,
                             ':skPrefix': 'ROLE#',
                         },
                     }),
                 );
 
-                return systivaResponse.Items || [];
+                return response.Items || [];
             });
 
             const roleRecord = allRolesRaw.find((r) => r.id === roleId);
@@ -1813,19 +1913,42 @@ export class UserManagementDynamoDBService {
                 updateFields.push('description = :description');
                 expressionAttributeValues[':description'] = updates.description;
             }
+            if (updates.entity !== undefined) {
+                updateFields.push('entity = :entity');
+                expressionAttributeValues[':entity'] = updates.entity;
+            }
+            if (updates.product !== undefined) {
+                updateFields.push('product = :product');
+                expressionAttributeValues[':product'] = updates.product;
+            }
+            if (updates.service !== undefined) {
+                updateFields.push('#service = :service');
+                expressionAttributeNames['#service'] = 'service';
+                expressionAttributeValues[':service'] = updates.service;
+            }
             if (updates.scopeConfig !== undefined) {
                 updateFields.push('scope_config = :scopeConfig');
                 expressionAttributeValues[':scopeConfig'] = updates.scopeConfig;
             }
+            if (updates.selectedEnterpriseId !== undefined) {
+                updateFields.push('enterprise_id = :enterpriseId');
+                expressionAttributeValues[':enterpriseId'] = updates.selectedEnterpriseId;
+            }
+            if (updates.selectedEnterpriseName !== undefined) {
+                updateFields.push('enterprise_name = :enterpriseName');
+                expressionAttributeValues[':enterpriseName'] = updates.selectedEnterpriseName;
+            }
 
             // Always ensure entity_type is set (for legacy records that might be missing it)
             updateFields.push('entity_type = :entityType');
-            expressionAttributeValues[':entityType'] = 'role';
+            expressionAttributeValues[':entityType'] = 'ROLE';
 
             updateFields.push('updated_date = :updated');
             updateFields.push('updatedAt = :updated');
 
             const updateExpression = `SET ${updateFields.join(', ')}`;
+
+            console.log('🔄 Update expression:', updateExpression);
 
             const result = await withDynamoDB(async (client) => {
                 const {UpdateCommand} = await import('@aws-sdk/lib-dynamodb');
@@ -1852,11 +1975,19 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
+            console.log('✅ Role updated successfully:', result);
+
             return {
                 id: result.id || roleId,
                 name: result.role_name || result.name,
+                roleName: result.role_name || result.name,
                 description: result.description,
+                entity: result.entity,
+                product: result.product,
+                service: result.service,
                 scopeConfig: result.scope_config,
+                enterpriseId: result.enterprise_id,
+                enterpriseName: result.enterprise_name,
                 createdAt: result.created_date || result.createdAt,
                 updatedAt: result.updated_date || result.updatedAt,
             };
@@ -1866,32 +1997,52 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async deleteRole(roleId: string): Promise<void> {
+    async deleteRole(
+        roleId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<void> {
         try {
+            console.log(`🗑️  deleteRole called for ${roleId} with context:`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
             // Delete all group-role lookups for this role
             await this.deleteAllGroupRoleLookupsForRole(roleId);
+
+            // Determine the correct PK based on account context
+            const isAccountSpecific = accountId && accountName;
+            const pkPrefix = isAccountSpecific
+                ? `${accountName.toUpperCase()}#${accountId}#ROLES`
+                : 'SYSTIVA#systiva#ROLES';
 
             // Find the correct PK for this role
             const allRolesRaw = await withDynamoDB(async (client) => {
                 const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
 
-                const systivaResponse = await client.send(
+                const response = await client.send(
                     new QueryCommand({
                         TableName: this.tableName,
                         KeyConditionExpression:
                             'PK = :pk AND begins_with(SK, :skPrefix)',
                         ExpressionAttributeValues: {
-                            ':pk': 'SYSTIVA#systiva#ROLES',
+                            ':pk': pkPrefix,
                             ':skPrefix': 'ROLE#',
                         },
                     }),
                 );
 
-                return systivaResponse.Items || [];
+                return response.Items || [];
             });
 
             const roleRecord = allRolesRaw.find((r) => r.id === roleId);
             if (roleRecord) {
+                console.log(`✅ Found role to delete with PK: ${roleRecord.PK}, SK: ${roleRecord.SK}`);
                 await DynamoDBOperations.deleteItem(this.tableName, {
                     PK: roleRecord.PK,
                     SK: roleRecord.SK,
@@ -2281,21 +2432,40 @@ export class UserManagementDynamoDBService {
         }
     }
 
-    async getGroupRoles(groupId: string): Promise<Role[]> {
+    async getGroupRoles(
+        groupId: string,
+        accountId?: string,
+        accountName?: string,
+        enterpriseId?: string,
+        enterpriseName?: string,
+    ): Promise<Role[]> {
         try {
-            const group = await this.getGroup(groupId);
+            console.log(`📋 getGroupRoles called for ${groupId} with context:`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            const group = await this.getGroup(groupId, accountId, accountName, enterpriseId, enterpriseName);
             if (!group || !group.assignedRoles) {
+                console.log(`⚠️ Group not found or has no assigned roles`);
                 return [];
             }
 
+            console.log(`✅ Found group with ${group.assignedRoles.length} assigned role(s)`);
+
             const roles: Role[] = [];
             for (const roleId of group.assignedRoles) {
-                const role = await this.getRole(roleId);
+                const role = await this.getRole(roleId, accountId, accountName, enterpriseId, enterpriseName);
                 if (role) {
                     roles.push(role);
+                } else {
+                    console.warn(`⚠️ Role ${roleId} not found in context`);
                 }
             }
 
+            console.log(`✅ Returning ${roles.length} role(s) for group ${groupId}`);
             return roles;
         } catch (error) {
             console.error('Error getting group roles:', error);

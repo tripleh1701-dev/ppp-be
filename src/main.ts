@@ -3712,6 +3712,188 @@ class RolesController {
         }
     }
 
+    @Get('search')
+    async searchRoles(
+        @Query('q') searchTerm: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+    ) {
+        if (!searchTerm) {
+            return await this.list(undefined, accountId, accountName);
+        }
+        
+        if (storageMode === 'dynamodb' && userManagement) {
+            const allRoles = accountId && accountName 
+                ? await userManagement.listRolesByAccount(accountId, accountName)
+                : await userManagement.listRoles();
+            
+            const filtered = allRoles.filter((role: any) => 
+                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+            return filtered;
+        } else {
+            const allRoles = await roles.list();
+            const filtered = allRoles.filter((role: any) => 
+                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            );
+            return filtered;
+        }
+    }
+
+    @Get(':roleId/groups')
+    async getRoleGroups(@Param('roleId') roleId: string, @Res() res: any) {
+        try {
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Get all groups and filter by assigned roles
+                const allGroups = await userManagement.listGroups();
+                const roleGroups = allGroups.filter(
+                    (group) =>
+                        group.assignedRoles &&
+                        group.assignedRoles.includes(roleId),
+                );
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    data: {groups: roleGroups},
+                });
+            } else {
+                // Legacy implementation would need to be added here
+                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
+                    error: 'Role groups listing not implemented for this storage mode',
+                });
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .json({error: error.message});
+        }
+    }
+
+    @Get(':roleId/users')
+    async getRoleUsers(@Param('roleId') roleId: string, @Res() res: any) {
+        try {
+            if (storageMode === 'dynamodb' && userManagement) {
+                // Get all users and filter by roles through their assigned groups
+                const allUsers = await userManagement.listUsers();
+                const allGroups = await userManagement.listGroups();
+                
+                // Find groups that have this role
+                const groupsWithRole = allGroups.filter(
+                    (group) =>
+                        group.assignedRoles &&
+                        group.assignedRoles.includes(roleId),
+                );
+                const groupIds = groupsWithRole.map((g) => g.id);
+                
+                // Find users that belong to those groups
+                const roleUsers = allUsers.filter(
+                    (user) =>
+                        user.assignedGroups &&
+                        user.assignedGroups.some((gId: string) => groupIds.includes(gId)),
+                );
+                
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    data: {users: roleUsers},
+                });
+            } else {
+                // Legacy implementation
+                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
+                    error: 'Role users listing not implemented for this storage mode',
+                });
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                .json({error: error.message});
+        }
+    }
+
+    @Post(':roleId/groups')
+    async assignGroupToRole(
+        @Param('roleId') roleId: string,
+        @Body() body: {groupId: string; groupName?: string},
+        @Res() res: any,
+    ) {
+        try {
+            if (storageMode === 'dynamodb' && userManagement) {
+                const role = await userManagement.getRole(roleId);
+                if (!role) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'Role not found',
+                    });
+                }
+
+                const group = await userManagement.getGroup(body.groupId);
+                if (!group) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'Group not found',
+                    });
+                }
+
+                const currentRoles = group.assignedRoles || [];
+                if (!currentRoles.includes(roleId)) {
+                    await userManagement.updateGroup(body.groupId, {
+                        assignedRoles: [...currentRoles, roleId],
+                    });
+                }
+
+                return res.status(HttpStatus.CREATED).json({
+                    success: true,
+                    message: 'Group assigned to role successfully',
+                });
+            } else {
+                const assignment = await roles.assignRoleToGroup(
+                    body.groupId,
+                    roleId,
+                    body.groupName || '',
+                );
+                return res.status(HttpStatus.CREATED).json(assignment);
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: error.message});
+        }
+    }
+
+    @Delete(':roleId/groups/:groupId')
+    async removeGroupFromRole(
+        @Param('roleId') roleId: string,
+        @Param('groupId') groupId: string,
+        @Res() res: any,
+    ) {
+        try {
+            if (storageMode === 'dynamodb' && userManagement) {
+                const group = await userManagement.getGroup(groupId);
+                if (!group) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        error: 'Group not found',
+                    });
+                }
+
+                const currentRoles = group.assignedRoles || [];
+                const updatedRoles = currentRoles.filter((r) => r !== roleId);
+                await userManagement.updateGroup(groupId, {
+                    assignedRoles: updatedRoles,
+                });
+                
+                return res.status(HttpStatus.NO_CONTENT).send();
+            } else {
+                await roles.removeRoleFromGroup(groupId, roleId);
+                return res.status(HttpStatus.NO_CONTENT).send();
+            }
+        } catch (error: any) {
+            return res
+                .status(HttpStatus.BAD_REQUEST)
+                .json({error: error.message});
+        }
+    }
+
     // Scope Configuration endpoints
     @Get(':id/scope')
     async getRoleScope(@Param('id') id: string, @Res() res: any) {
@@ -5512,13 +5694,167 @@ class UserManagementController {
     }
 
     @Get('groups/:id/roles')
-    async getGroupRoles(@Param('id') id: string) {
+    async getGroupRoles(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroupRoles(id);
+        return await userManagement.getGroupRoles(id, accountId, accountName, enterpriseId, enterpriseName);
+    }
+
+    @Post('groups/:id/roles')
+    async assignRoleToGroup(
+        @Param('id') id: string,
+        @Body() body: {roleId?: string; roleIds?: string[]; roleName?: string; groupId?: string},
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        try {
+            console.log(`🔗 Assigning role(s) to group ${id}:`, {
+                roleId: body.roleId,
+                roleIds: body.roleIds,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+            if (!group) {
+                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
+                return {
+                    success: false,
+                    error: 'Group not found',
+                };
+            }
+
+            console.log(`✅ Found group: ${group.name}`);
+
+            const currentRoles = group.assignedRoles || [];
+            let rolesToAdd: string[] = [];
+
+            // Support both single role (roleId) and bulk roles (roleIds)
+            if (body.roleIds && Array.isArray(body.roleIds)) {
+                rolesToAdd = body.roleIds;
+            } else if (body.roleId) {
+                rolesToAdd = [body.roleId];
+            } else {
+                return {
+                    success: false,
+                    error: 'Either roleId or roleIds is required',
+                };
+            }
+
+            // Add only new roles (avoid duplicates)
+            const newRoles = rolesToAdd.filter(roleId => !currentRoles.includes(roleId));
+            const updatedRoles = [...currentRoles, ...newRoles];
+
+            await userManagement.updateGroup(id, {
+                assignedRoles: updatedRoles,
+                selectedAccountId: accountId,
+                selectedAccountName: accountName,
+                selectedEnterpriseId: enterpriseId,
+                selectedEnterpriseName: enterpriseName,
+            });
+
+            console.log(`✅ Assigned ${newRoles.length} new role(s) to group ${id}. Total roles: ${updatedRoles.length}`);
+
+            return {
+                success: true,
+                message: 'Role(s) assigned to group successfully',
+                data: {
+                    groupId: id,
+                    addedRoles: newRoles.length,
+                    totalRoles: updatedRoles.length,
+                },
+            };
+        } catch (error: any) {
+            console.error(`❌ Error assigning role to group:`, error);
+            return {
+                success: false,
+                error: error.message,
+            };
+        }
+    }
+
+    @Delete('groups/:id/roles/:roleId')
+    async removeRoleFromGroup(
+        @Param('id') id: string,
+        @Param('roleId') roleId: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {
+                error: 'User management in systiva table only available in DynamoDB mode',
+            };
+        }
+
+        try {
+            console.log(`🗑️  Removing role ${roleId} from group ${id} with context:`, {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+
+            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+            if (!group) {
+                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
+                return {
+                    success: false,
+                    error: 'Group not found',
+                };
+            }
+
+            console.log(`✅ Found group: ${group.name}`);
+
+            const currentRoles = group.assignedRoles || [];
+            const updatedRoles = currentRoles.filter((r) => r !== roleId);
+            
+            await userManagement.updateGroup(id, {
+                assignedRoles: updatedRoles,
+                selectedAccountId: accountId,
+                selectedAccountName: accountName,
+                selectedEnterpriseId: enterpriseId,
+                selectedEnterpriseName: enterpriseName,
+            });
+
+            console.log(`✅ Role ${roleId} removed from group ${id}. Remaining roles: ${updatedRoles.length}`);
+
+            return {
+                success: true,
+                message: 'Role removed from group successfully',
+                data: {
+                    groupId: id,
+                    roleId: roleId,
+                    remainingRoles: updatedRoles.length,
+                },
+            };
+        } catch (error: any) {
+            console.error(`❌ Error removing role from group:`, error);
+            return {
+                success: false,
+                error: error.message,
+            };
+        }
     }
 
     @Post('groups')
@@ -5626,58 +5962,39 @@ class UserManagementController {
     async listRoles(
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
-        console.log('📋 listRoles API called with:', {
-            accountId,
-            accountName,
-            accountIdType: typeof accountId,
-            accountNameType: typeof accountName,
-        });
-
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-
-        const isSystivaAccount =
-            !accountId ||
-            accountId === '' ||
-            !accountName ||
-            accountName === '' ||
-            accountName.toLowerCase() === 'systiva';
-
-        console.log('📋 isSystivaAccount check:', {
-            isSystivaAccount,
-            checks: {
-                noAccountId: !accountId,
-                emptyAccountId: accountId === '',
-                noAccountName: !accountName,
-                emptyAccountName: accountName === '',
-                isSystivaName: accountName?.toLowerCase() === 'systiva',
-            },
+        console.log('📋 listRoles API called with full context:', {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
         });
-
-        if (isSystivaAccount) {
-            console.log('📋 Calling listRoles() for Systiva');
-            return await userManagement.listRoles();
-        } else {
-            console.log(`📋 Calling listRolesByAccount() for ${accountName}`);
-            return await userManagement.listRolesByAccount(
-                accountId,
-                accountName,
-            );
-        }
+        const roles = await userManagement.listRoles(accountId, accountName, enterpriseId, enterpriseName);
+        console.log(`📋 listRoles returning ${roles.length} roles`);
+        return roles;
     }
 
     @Get('roles/:id')
-    async getRole(@Param('id') id: string) {
+    async getRole(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getRole(id);
+        return await userManagement.getRole(id, accountId, accountName, enterpriseId, enterpriseName);
     }
 
     @Post('roles')
@@ -5687,7 +6004,22 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.createRole(body);
+        console.log('🆕 createRole API called with body:', body);
+        
+        // Map frontend field names to backend expected names (similar to createGroup)
+        const roleData = {
+            ...body,
+            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
+            selectedAccountId: body.accountId,
+            selectedAccountName: body.accountName,
+            selectedEnterpriseId: body.enterpriseId,
+            selectedEnterpriseName: body.enterpriseName,
+        };
+        
+        console.log('🆕 createRole mapped data:', roleData);
+        const result = await userManagement.createRole(roleData);
+        console.log('🆕 createRole created role:', result);
+        return result;
     }
 
     @Put('roles/:id')
@@ -5697,17 +6029,44 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.updateRole(id, body);
+        console.log(`🔄 updateRole API called for id: ${id} with body:`, body);
+        
+        // Map frontend field names to backend expected names (similar to updateGroup)
+        const updateData = {
+            ...body,
+            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
+            selectedAccountId: body.accountId || body.selectedAccountId,
+            selectedAccountName: body.accountName || body.selectedAccountName,
+            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
+        };
+        
+        console.log(`🔄 updateRole mapped data:`, updateData);
+        const result = await userManagement.updateRole(id, updateData);
+        console.log(`🔄 updateRole result:`, result);
+        return result;
     }
 
     @Delete('roles/:id')
-    async deleteRole(@Param('id') id: string) {
+    async deleteRole(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        await userManagement.deleteRole(id);
+        console.log(`🗑️  deleteRole API called for id: ${id} with context:`, {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
+        await userManagement.deleteRole(id, accountId, accountName, enterpriseId, enterpriseName);
         return {};
     }
 
