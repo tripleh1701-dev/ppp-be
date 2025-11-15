@@ -6401,7 +6401,7 @@ async function bootstrap() {
         // SECURITY: Configure CORS properly - MUST be before rate limiting
         const allowedOrigins = process.env.ALLOWED_ORIGINS
             ? process.env.ALLOWED_ORIGINS.split(',')
-            : ['http://localhost:3000', 'http://75.101.182.63:3000'];
+            : ['http://localhost:3000', 'http://44.200.152.246:3000'];
 
         app.enableCors({
             origin: (origin, callback) => {
