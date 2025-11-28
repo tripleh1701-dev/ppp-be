@@ -143,8 +143,8 @@ export class UserManagementDynamoDBService {
                 );
             }
 
-            if (!userItem || !userItem.password) {
-                console.log('❌ User not found or no password set');
+            if (!userItem) {
+                console.log('❌ User not found');
                 return null;
             }
 
@@ -152,11 +152,87 @@ export class UserManagementDynamoDBService {
                 `✅ Found user: ${userItem.first_name} ${userItem.last_name}`,
             );
 
+            // Handle password verification
+            let passwordHash: string | null = null;
+            let isPlainTextPassword = false;
+
+            // Check for encrypted password (new format)
+            if (userItem.password_encrypted && isValidEncryptedPassword(userItem.password_encrypted)) {
+                try {
+                    const decrypted = decryptPassword(userItem.password_encrypted);
+                    const decryptedPassword = decrypted.password;
+                    
+                    // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedPassword);
+                    
+                    if (isBcryptHash) {
+                        // New format: encrypted bcrypt hash
+                        passwordHash = decryptedPassword;
+                    } else {
+                        // Legacy format: encrypted plain text password
+                        // We'll do direct comparison and then upgrade to bcrypt hash
+                        isPlainTextPassword = true;
+                        passwordHash = decryptedPassword;
+                    }
+                    logPasswordOperation('decrypt', userItem.id, true);
+                } catch (error) {
+                    console.error(`❌ Failed to decrypt password for user ${userItem.id}:`, error);
+                    logPasswordOperation('decrypt', userItem.id, false);
+                    return null;
+                }
+            } else if (userItem.password) {
+                // Legacy bcrypt password (directly stored, not encrypted)
+                passwordHash = userItem.password;
+            } else {
+                console.log('❌ No password set for user');
+                return null;
+            }
+
+            if (!passwordHash) {
+                console.log('❌ No password hash available');
+                return null;
+            }
+
             // Verify password
-            const isPasswordValid = await this.comparePassword(
-                password,
-                userItem.password,
-            );
+            let isPasswordValid = false;
+            
+            if (isPlainTextPassword) {
+                // Legacy format: direct string comparison
+                isPasswordValid = password === passwordHash;
+                
+                // If password is valid, upgrade to bcrypt hash for future logins
+                if (isPasswordValid) {
+                    console.log('⚠️  Legacy password format detected. Upgrading to bcrypt hash...');
+                    try {
+                        const bcryptHash = await this.hashPassword(password);
+                        const encryptedBcryptHash = encryptPassword(bcryptHash);
+                        
+                        // Determine the PK and SK from the user item
+                        const userPK = userItem.PK || (userItem.account_name && userItem.account_id 
+                            ? `${userItem.account_name.toUpperCase()}#${userItem.account_id}#USERS`
+                            : `SYSTIVA#systiva#USERS`);
+                        const userSK = userItem.SK || `USER#${userItem.id}`;
+                        
+                        // Update the user's password to the new format
+                        await DynamoDBOperations.updateItem(
+                            this.tableName,
+                            {PK: userPK, SK: userSK},
+                            'SET password_encrypted = :passwordEncrypted REMOVE password',
+                            {':passwordEncrypted': encryptedBcryptHash}
+                        );
+                        console.log('✅ Password upgraded to bcrypt hash format');
+                    } catch (upgradeError) {
+                        console.error('⚠️  Failed to upgrade password format:', upgradeError);
+                        // Continue anyway since authentication succeeded
+                    }
+                }
+            } else {
+                // New format: use bcrypt comparison
+                isPasswordValid = await this.comparePassword(
+                    password,
+                    passwordHash,
+                );
+            }
 
             if (!isPasswordValid) {
                 console.log('❌ Invalid password');
@@ -228,10 +304,14 @@ export class UserManagementDynamoDBService {
             const now = new Date().toISOString();
 
             // Handle password encryption
+            // First hash with bcrypt, then encrypt the bcrypt hash
             let encryptedPasswordData: EncryptedPassword | undefined;
             if (userData.password) {
                 try {
-                    encryptedPasswordData = encryptPassword(userData.password);
+                    // Hash password with bcrypt first
+                    const bcryptHash = await this.hashPassword(userData.password);
+                    // Then encrypt the bcrypt hash
+                    encryptedPasswordData = encryptPassword(bcryptHash);
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -299,10 +379,14 @@ export class UserManagementDynamoDBService {
             const now = new Date().toISOString();
 
             // Handle password encryption using AES (same as Systiva users)
+            // First hash with bcrypt, then encrypt the bcrypt hash
             let encryptedPasswordData: EncryptedPassword | undefined;
             if (userData.password) {
                 try {
-                    encryptedPasswordData = encryptPassword(userData.password);
+                    // Hash password with bcrypt first
+                    const bcryptHash = await this.hashPassword(userData.password);
+                    // Then encrypt the bcrypt hash
+                    encryptedPasswordData = encryptPassword(bcryptHash);
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -670,9 +754,13 @@ export class UserManagementDynamoDBService {
             }
             if (updates.password !== undefined) {
                 // Handle password encryption
+                // First hash with bcrypt, then encrypt the bcrypt hash
                 let encryptedPasswordData: EncryptedPassword | undefined;
                 try {
-                    encryptedPasswordData = encryptPassword(updates.password);
+                    // Hash password with bcrypt first
+                    const bcryptHash = await this.hashPassword(updates.password);
+                    // Then encrypt the bcrypt hash
+                    encryptedPasswordData = encryptPassword(bcryptHash);
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -841,9 +929,13 @@ export class UserManagementDynamoDBService {
             }
             if (updates.password !== undefined) {
                 // Handle password encryption using AES (same as Systiva users)
+                // First hash with bcrypt, then encrypt the bcrypt hash
                 let encryptedPasswordData: EncryptedPassword | undefined;
                 try {
-                    encryptedPasswordData = encryptPassword(updates.password);
+                    // Hash password with bcrypt first
+                    const bcryptHash = await this.hashPassword(updates.password);
+                    // Then encrypt the bcrypt hash
+                    encryptedPasswordData = encryptPassword(bcryptHash);
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
