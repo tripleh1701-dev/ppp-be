@@ -304,14 +304,20 @@ export class UserManagementDynamoDBService {
             const now = new Date().toISOString();
 
             // Handle password encryption
-            // First hash with bcrypt, then encrypt the bcrypt hash
+            // First hash with bcrypt, then encrypt the bcrypt hash (for authentication)
+            // Also store plain text password encrypted with AES (for display purposes)
             let encryptedPasswordData: EncryptedPassword | undefined;
+            let encryptedDisplayPassword: EncryptedPassword | undefined;
             if (userData.password) {
                 try {
-                    // Hash password with bcrypt first
+                    // Hash password with bcrypt first (for authentication)
                     const bcryptHash = await this.hashPassword(userData.password);
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
+                    
+                    // Also encrypt the plain text password for display purposes (reversible)
+                    encryptedDisplayPassword = encryptPassword(userData.password);
+                    
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -341,7 +347,8 @@ export class UserManagementDynamoDBService {
                 status: user.status,
                 start_date: user.startDate,
                 end_date: user.endDate,
-                password_encrypted: encryptedPasswordData, // Store encrypted password
+                password_encrypted: encryptedPasswordData, // Store encrypted password (for authentication)
+                password_display_encrypted: encryptedDisplayPassword, // Store display password (for display)
                 technical_user: user.technicalUser,
                 assigned_groups: user.assignedGroups,
                 created_date: now,
@@ -379,14 +386,20 @@ export class UserManagementDynamoDBService {
             const now = new Date().toISOString();
 
             // Handle password encryption using AES (same as Systiva users)
-            // First hash with bcrypt, then encrypt the bcrypt hash
+            // First hash with bcrypt, then encrypt the bcrypt hash (for authentication)
+            // Also store plain text password encrypted with AES (for display purposes)
             let encryptedPasswordData: EncryptedPassword | undefined;
+            let encryptedDisplayPassword: EncryptedPassword | undefined;
             if (userData.password) {
                 try {
-                    // Hash password with bcrypt first
+                    // Hash password with bcrypt first (for authentication)
                     const bcryptHash = await this.hashPassword(userData.password);
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
+                    
+                    // Also encrypt the plain text password for display purposes (reversible)
+                    encryptedDisplayPassword = encryptPassword(userData.password);
+                    
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -421,7 +434,8 @@ export class UserManagementDynamoDBService {
                 status: user.status,
                 start_date: user.startDate,
                 end_date: user.endDate,
-                password_encrypted: encryptedPasswordData, // Store encrypted password (AES)
+                password_encrypted: encryptedPasswordData, // Store encrypted password (for authentication)
+                password_display_encrypted: encryptedDisplayPassword, // Store display password (for display)
                 technical_user: user.technicalUser,
                 assigned_groups: user.assignedGroups,
                 created_date: now,
@@ -516,12 +530,38 @@ export class UserManagementDynamoDBService {
             }
 
             return filteredItems.map((item) => {
-                // Handle password decryption
+                // Handle password decryption - prioritize display password (reversible)
                 let decryptedPassword: string | undefined;
-                if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                
+                // First, try to decrypt display password (plain text encrypted with AES)
+                if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(item.password_display_encrypted);
+                        decryptedPassword = decrypted.password;
+                        console.log(`✅ Decrypted display password for user ${item.id}`);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt display password for user ${item.id}:`, error);
+                    }
+                }
+                
+                // If display password not available, try legacy password_encrypted
+                if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
                     try {
                         const decrypted = decryptPassword(item.password_encrypted);
-                        decryptedPassword = decrypted.password;
+                        const decryptedValue = decrypted.password;
+                        
+                        // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
+                        
+                        if (isBcryptHash) {
+                            // New format: encrypted bcrypt hash - cannot decrypt to plain text
+                            // Return undefined as we cannot show plain text from bcrypt hash
+                            decryptedPassword = undefined;
+                            console.log(`⚠️  Password for user ${item.id} is stored as bcrypt hash - cannot display plain text`);
+                        } else {
+                            // Legacy format: encrypted plain text password - return the plain text
+                            decryptedPassword = decryptedValue;
+                        }
                         logPasswordOperation('decrypt', item.id || 'unknown', true);
                     } catch (error) {
                         console.error(`❌ Failed to decrypt password for user ${item.id}:`, error);
@@ -529,7 +569,7 @@ export class UserManagementDynamoDBService {
                         decryptedPassword = undefined; // Don't expose broken encrypted data
                     }
                 } else if (item.password) {
-                    // Legacy bcrypt password - keep as undefined (cannot decrypt bcrypt)
+                    // Legacy bcrypt password stored directly - cannot decrypt bcrypt
                     decryptedPassword = undefined;
                 }
 
@@ -572,12 +612,38 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
-            // Handle password decryption
+            // Handle password decryption - prioritize display password (reversible)
             let decryptedPassword: string | undefined;
-            if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+            
+            // First, try to decrypt display password (plain text encrypted with AES)
+            if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+                try {
+                    const decrypted = decryptPassword(item.password_display_encrypted);
+                    decryptedPassword = decrypted.password;
+                    console.log(`✅ Decrypted display password for user ${userId}`);
+                } catch (error) {
+                    console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                }
+            }
+            
+            // If display password not available, try legacy password_encrypted
+            if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
                 try {
                     const decrypted = decryptPassword(item.password_encrypted);
-                    decryptedPassword = decrypted.password;
+                    const decryptedValue = decrypted.password;
+                    
+                    // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
+                    
+                    if (isBcryptHash) {
+                        // New format: encrypted bcrypt hash - cannot decrypt to plain text
+                        // Return undefined as we cannot show plain text from bcrypt hash
+                        decryptedPassword = undefined;
+                        console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                    } else {
+                        // Legacy format: encrypted plain text password - return the plain text
+                        decryptedPassword = decryptedValue;
+                    }
                     logPasswordOperation('decrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
@@ -637,21 +703,47 @@ export class UserManagementDynamoDBService {
 
             return items
                 .map((item) => {
-                    // Handle password decryption
+                    // Handle password decryption - prioritize display password (reversible)
                     let decryptedPassword: string | undefined;
-                    if (item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                    
+                    // First, try to decrypt display password (plain text encrypted with AES)
+                    if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+                        try {
+                            const decrypted = decryptPassword(item.password_display_encrypted);
+                            decryptedPassword = decrypted.password;
+                            console.log(`✅ Decrypted display password for user ${item.id || 'unknown'}`);
+                        } catch (error) {
+                            console.error(`❌ Failed to decrypt display password for user ${item.id || 'unknown'}:`, error);
+                        }
+                    }
+                    
+                    // If display password not available, try legacy password_encrypted
+                    if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
                         try {
                             const decrypted = decryptPassword(item.password_encrypted);
-                            decryptedPassword = decrypted.password;
+                            const decryptedValue = decrypted.password;
+                            
+                            // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                            const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
+                            
+                            if (isBcryptHash) {
+                                // New format: encrypted bcrypt hash - cannot decrypt to plain text
+                                // Return undefined as we cannot show plain text from bcrypt hash
+                                decryptedPassword = undefined;
+                                console.log(`⚠️  Password for user ${item.id || 'unknown'} is stored as bcrypt hash - cannot display plain text`);
+                            } else {
+                                // Legacy format: encrypted plain text password - return the plain text
+                                decryptedPassword = decryptedValue;
+                            }
                             logPasswordOperation('decrypt', item.id || 'unknown', true);
                         } catch (error) {
-                            console.error(`❌ Failed to decrypt password for user ${item.id}:`, error);
+                            console.error(`❌ Failed to decrypt password for user ${item.id || 'unknown'}:`, error);
                             logPasswordOperation('decrypt', item.id || 'unknown', false);
                             decryptedPassword = undefined; // Don't expose broken encrypted data
                         }
                     } else if (item.password) {
-                        // Legacy bcrypt password - keep as is for now
-                        decryptedPassword = undefined; // Don't expose bcrypt hashes
+                        // Legacy bcrypt password stored directly - cannot decrypt bcrypt
+                        decryptedPassword = undefined;
                     }
 
                     return {
@@ -754,13 +846,19 @@ export class UserManagementDynamoDBService {
             }
             if (updates.password !== undefined) {
                 // Handle password encryption
-                // First hash with bcrypt, then encrypt the bcrypt hash
+                // First hash with bcrypt, then encrypt the bcrypt hash (for authentication)
                 let encryptedPasswordData: EncryptedPassword | undefined;
+                // Also store plain text password encrypted with AES (for display purposes)
+                let encryptedDisplayPassword: EncryptedPassword | undefined;
                 try {
-                    // Hash password with bcrypt first
+                    // Hash password with bcrypt first (for authentication)
                     const bcryptHash = await this.hashPassword(updates.password);
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
+                    
+                    // Also encrypt the plain text password for display purposes (reversible)
+                    encryptedDisplayPassword = encryptPassword(updates.password);
+                    
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -770,6 +868,10 @@ export class UserManagementDynamoDBService {
                 
                 updateFields.push('password_encrypted = :passwordEncrypted');
                 expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
+                
+                // Store display password (plain text encrypted with AES, reversible)
+                updateFields.push('password_display_encrypted = :passwordDisplayEncrypted');
+                expressionAttributeValues[':passwordDisplayEncrypted'] = encryptedDisplayPassword;
                 
                 // Remove old bcrypt password field if it exists
                 updateFields.push('password = :passwordRemove');
@@ -810,17 +912,50 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
-            // Handle password decryption for response
+            // Handle password for response
+            // If password was provided in updates, return it (user just entered it)
+            // Otherwise, try to decrypt stored display password or legacy password
             let decryptedPassword: string | undefined;
-            if (result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
-                try {
-                    const decrypted = decryptPassword(result.password_encrypted);
-                    decryptedPassword = decrypted.password;
-                    logPasswordOperation('decrypt', userId, true);
-                } catch (error) {
-                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
-                    logPasswordOperation('decrypt', userId, false);
-                    decryptedPassword = undefined;
+            if (updates.password !== undefined) {
+                // Password was just updated - return the plain text password from the request
+                decryptedPassword = updates.password;
+                console.log(`✅ Returning plain text password from update request for user ${userId}`);
+            } else {
+                // Password was not updated, try to decrypt stored display password first
+                if (result.password_display_encrypted && isValidEncryptedPassword(result.password_display_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(result.password_display_encrypted);
+                        decryptedPassword = decrypted.password;
+                        console.log(`✅ Decrypted display password for user ${userId}`);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                    }
+                }
+                
+                // If display password not available, try legacy password_encrypted
+                if (!decryptedPassword && result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(result.password_encrypted);
+                        const decryptedValue = decrypted.password;
+                        
+                        // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
+                        
+                        if (isBcryptHash) {
+                            // New format: encrypted bcrypt hash - cannot decrypt to plain text
+                            // Return undefined as we cannot show plain text from bcrypt hash
+                            decryptedPassword = undefined;
+                            console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                        } else {
+                            // Legacy format: encrypted plain text password - return the plain text
+                            decryptedPassword = decryptedValue;
+                        }
+                        logPasswordOperation('decrypt', userId, true);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                        logPasswordOperation('decrypt', userId, false);
+                        decryptedPassword = undefined;
+                    }
                 }
             }
 
@@ -929,13 +1064,19 @@ export class UserManagementDynamoDBService {
             }
             if (updates.password !== undefined) {
                 // Handle password encryption using AES (same as Systiva users)
-                // First hash with bcrypt, then encrypt the bcrypt hash
+                // First hash with bcrypt, then encrypt the bcrypt hash (for authentication)
                 let encryptedPasswordData: EncryptedPassword | undefined;
+                // Also store plain text password encrypted with AES (for display purposes)
+                let encryptedDisplayPassword: EncryptedPassword | undefined;
                 try {
-                    // Hash password with bcrypt first
+                    // Hash password with bcrypt first (for authentication)
                     const bcryptHash = await this.hashPassword(updates.password);
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
+                    
+                    // Also encrypt the plain text password for display purposes (reversible)
+                    encryptedDisplayPassword = encryptPassword(updates.password);
+                    
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
                     console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
@@ -945,6 +1086,10 @@ export class UserManagementDynamoDBService {
                 
                 updateFields.push('password_encrypted = :passwordEncrypted');
                 expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
+                
+                // Store display password (plain text encrypted with AES, reversible)
+                updateFields.push('password_display_encrypted = :passwordDisplayEncrypted');
+                expressionAttributeValues[':passwordDisplayEncrypted'] = encryptedDisplayPassword;
                 
                 // Remove old bcrypt password field if it exists
                 updateFields.push('#password = :passwordRemove');
@@ -996,17 +1141,50 @@ export class UserManagementDynamoDBService {
                 return null;
             }
 
-            // Handle password decryption for response
+            // Handle password for response
+            // If password was provided in updates, return it (user just entered it)
+            // Otherwise, try to decrypt stored display password or legacy password
             let decryptedPassword: string | undefined;
-            if (result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
-                try {
-                    const decrypted = decryptPassword(result.password_encrypted);
-                    decryptedPassword = decrypted.password;
-                    logPasswordOperation('decrypt', userId, true);
-                } catch (error) {
-                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
-                    logPasswordOperation('decrypt', userId, false);
-                    decryptedPassword = undefined;
+            if (updates.password !== undefined) {
+                // Password was just updated - return the plain text password from the request
+                decryptedPassword = updates.password;
+                console.log(`✅ Returning plain text password from update request for user ${userId}`);
+            } else {
+                // Password was not updated, try to decrypt stored display password first
+                if (result.password_display_encrypted && isValidEncryptedPassword(result.password_display_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(result.password_display_encrypted);
+                        decryptedPassword = decrypted.password;
+                        console.log(`✅ Decrypted display password for user ${userId}`);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                    }
+                }
+                
+                // If display password not available, try legacy password_encrypted
+                if (!decryptedPassword && result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                    try {
+                        const decrypted = decryptPassword(result.password_encrypted);
+                        const decryptedValue = decrypted.password;
+                        
+                        // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
+                        
+                        if (isBcryptHash) {
+                            // New format: encrypted bcrypt hash - cannot decrypt to plain text
+                            // Return undefined as we cannot show plain text from bcrypt hash
+                            decryptedPassword = undefined;
+                            console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                        } else {
+                            // Legacy format: encrypted plain text password - return the plain text
+                            decryptedPassword = decryptedValue;
+                        }
+                        logPasswordOperation('decrypt', userId, true);
+                    } catch (error) {
+                        console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                        logPasswordOperation('decrypt', userId, false);
+                        decryptedPassword = undefined;
+                    }
                 }
             }
 

@@ -6092,24 +6092,29 @@ class GlobalSettingsController {
         @Query('accountId') accountId: string,
         @Query('accountName') accountName: string,
         @Query('enterpriseId') enterpriseId: string,
+        @Query('enterpriseName') enterpriseName: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        if (!accountId || !accountName || !enterpriseId) {
-            return {
-                error: 'accountId, accountName, and enterpriseId are required',
-            };
+        
+        // If no query parameters provided, return all records
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            console.log('📋 getEntities API called - fetching all global settings');
+            return await globalSettings.getAllEntities();
         }
+        
+        // Otherwise, filter by account and enterprise
         console.log(
-            `📋 getEntities API called for account: ${accountId}, enterprise: ${enterpriseId}`,
+            `📋 getEntities API called for account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         return await globalSettings.getEntitiesByAccountAndEnterprise(
             accountId,
             accountName,
             enterpriseId,
+            enterpriseName,
         );
     }
 
@@ -6119,24 +6124,26 @@ class GlobalSettingsController {
         @Query('accountId') accountId: string,
         @Query('accountName') accountName: string,
         @Query('enterpriseId') enterpriseId: string,
+        @Query('enterpriseName') enterpriseName: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        if (!accountId || !accountName || !enterpriseId) {
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
             return {
-                error: 'accountId, accountName, and enterpriseId are required',
+                error: 'accountId, accountName, enterpriseId, and enterpriseName are required',
             };
         }
         console.log(
-            `🔍 getEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
+            `🔍 getEntity API called for entity: ${entityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         return await globalSettings.getEntity(
             accountId,
             accountName,
             enterpriseId,
+            enterpriseName,
             entityName,
         );
     }
@@ -6148,13 +6155,53 @@ class GlobalSettingsController {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        console.log('🆕 createEntity API called with body:', body);
-        return await globalSettings.createEntity(body);
+        const {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            entityName,
+            configuration,
+        } = body || {};
+        if (
+            !accountId ||
+            !accountName ||
+            !enterpriseId ||
+            !enterpriseName ||
+            !entityName ||
+            !configuration
+        ) {
+            return {
+                error: 'accountId, accountName, enterpriseId, enterpriseName, entityName, and configuration are required',
+            };
+        }
+        console.log(
+            '🆕 createEntity API called with payload:',
+            JSON.stringify(
+                {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                    entityName,
+                },
+                null,
+                2,
+            ),
+        );
+        return await globalSettings.createEntity({
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            entityName,
+            configuration,
+        });
     }
 
-    @Put(':entityName')
+    @Put(':id')
     async updateEntity(
-        @Param('entityName') entityName: string,
+        @Param('id') recordId: string,
         @Body() body: any,
     ) {
         if (storageMode !== 'dynamodb') {
@@ -6162,20 +6209,50 @@ class GlobalSettingsController {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        const {accountId, accountName, enterpriseId, configuration} = body;
-        if (!accountId || !accountName || !enterpriseId || !configuration) {
-            return {
-                error: 'accountId, accountName, enterpriseId, and configuration are required',
-            };
-        }
-        console.log(
-            `🔄 updateEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
-        );
-        return await globalSettings.updateEntity(
+        const {
             accountId,
             accountName,
             enterpriseId,
+            enterpriseName,
             entityName,
+            entities,
+            configuration,
+        } = body || {};
+        
+        if (
+            !accountId ||
+            !accountName ||
+            !enterpriseId ||
+            !enterpriseName ||
+            !configuration
+        ) {
+            return {
+                error: 'accountId, accountName, enterpriseId, enterpriseName, and configuration are required',
+            };
+        }
+        
+        // Extract entity name from entities array if provided, otherwise use entityName
+        let finalEntityName = entityName;
+        if (entities && Array.isArray(entities) && entities.length > 0) {
+            finalEntityName = entities[0]; // Use first element of entities array
+        }
+        
+        if (!finalEntityName) {
+            return {
+                error: 'entityName or entities array with entity name is required',
+            };
+        }
+        
+        console.log(
+            `🔄 updateEntity API called for record ID: ${recordId}, entity: ${finalEntityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+        );
+        return await globalSettings.updateEntityById(
+            recordId,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            finalEntityName,
             configuration,
         );
     }
@@ -6186,59 +6263,29 @@ class GlobalSettingsController {
         @Query('accountId') accountId: string,
         @Query('accountName') accountName: string,
         @Query('enterpriseId') enterpriseId: string,
+        @Query('enterpriseName') enterpriseName: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        if (!accountId || !accountName || !enterpriseId) {
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
             return {
-                error: 'accountId, accountName, and enterpriseId are required',
+                error: 'accountId, accountName, enterpriseId, and enterpriseName are required',
             };
         }
         console.log(
-            `🗑️ deleteEntity API called for entity: ${entityName}, account: ${accountId}, enterprise: ${enterpriseId}`,
+            `🗑️ deleteEntity API called for entity: ${entityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         await globalSettings.deleteEntity(
             accountId,
             accountName,
             enterpriseId,
+            enterpriseName,
             entityName,
         );
         return {};
-    }
-
-    @Post('batch-save')
-    async batchSave(@Body() body: any) {
-        if (storageMode !== 'dynamodb') {
-            return {
-                error: 'Global settings only available in DynamoDB mode',
-            };
-        }
-        const {accountId, accountName, enterpriseId, enterpriseName, entities} =
-            body;
-        if (
-            !accountId ||
-            !accountName ||
-            !enterpriseId ||
-            !enterpriseName ||
-            !entities
-        ) {
-            return {
-                error: 'accountId, accountName, enterpriseId, enterpriseName, and entities are required',
-            };
-        }
-        console.log(
-            `💾 batchSave API called for account: ${accountId}, enterprise: ${enterpriseId} with ${entities.length} entities`,
-        );
-        return await globalSettings.batchSaveEntities(
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-            entities,
-        );
     }
 }
 
