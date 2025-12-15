@@ -52,6 +52,8 @@ import {BuildExecutionsDynamoDBService} from './services/buildExecutions-dynamod
 import {BuildsDynamoDBService} from './services/builds-dynamodb';
 import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
+import axios from 'axios';
+import {GitHubOAuthService} from './services/githubOAuth';
 
 dotenv.config();
 
@@ -200,6 +202,515 @@ class AuthController {
             success: true,
             message: 'Logged out successfully',
         });
+    }
+}
+
+@Controller('api/oauth')
+class OAuthController {
+    private githubOAuthService: GitHubOAuthService;
+
+    constructor() {
+        this.githubOAuthService = new GitHubOAuthService();
+    }
+
+    @Get('github/client-id')
+    async getGitHubClientId(
+        @Res() res: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+    ) {
+        const clientId = process.env.GITHUB_CLIENT_ID;
+        const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+
+        if (!clientId || !clientSecret) {
+            // Return a helpful response that allows the frontend to show setup instructions
+            return res.status(HttpStatus.OK).json({
+                clientId: null,
+                configured: false,
+                error: 'GitHub OAuth Client ID not configured in backend',
+                message:
+                    'GitHub OAuth Client ID is not configured. Please configure GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables.',
+                setupInstructions: {
+                    step1: 'Create a GitHub OAuth App at https://github.com/settings/developers',
+                    step2: 'Set Authorization callback URL to: ' +
+                        (process.env.APP_BASE_URL || 'http://localhost:3000') +
+                        '/security-governance/credentials/github/oauth2/callback',
+                    step3: 'Copy the Client ID and Client Secret',
+                    step4: 'Add to backend .env file: GITHUB_CLIENT_ID=your_client_id',
+                    step5: 'Add to backend .env file: GITHUB_CLIENT_SECRET=your_client_secret',
+                    step6: 'Restart the backend server',
+                },
+            });
+        }
+
+        return res.status(HttpStatus.OK).json({
+            clientId,
+            configured: true,
+        });
+    }
+
+    /**
+     * Get GitHub OAuth setup instructions
+     */
+    @Get('github/setup-instructions')
+    async getSetupInstructions(@Res() res: any) {
+        const appBaseUrl =
+            process.env.APP_BASE_URL || 'http://localhost:3000';
+        const callbackUrl = `${appBaseUrl}/security-governance/credentials/github/oauth2/callback`;
+
+        return res.status(HttpStatus.OK).json({
+            configured: !!(
+                process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET
+            ),
+            instructions: {
+                title: 'GitHub OAuth Setup Instructions',
+                steps: [
+                    {
+                        step: 1,
+                        title: 'Create GitHub OAuth App',
+                        description:
+                            'Go to https://github.com/settings/developers and click "New OAuth App"',
+                        details: [
+                            'Application name: Your App Name (e.g., "DevOps Automate")',
+                            'Homepage URL: ' + appBaseUrl,
+                            'Authorization callback URL: ' + callbackUrl,
+                        ],
+                    },
+                    {
+                        step: 2,
+                        title: 'Copy Credentials',
+                        description:
+                            'After creating the app, copy the Client ID and Client Secret',
+                    },
+                    {
+                        step: 3,
+                        title: 'Configure Backend',
+                        description:
+                            'Add the following to your backend .env file:',
+                        code: `GITHUB_CLIENT_ID=your_client_id_here
+GITHUB_CLIENT_SECRET=your_client_secret_here
+APP_BASE_URL=${appBaseUrl}`,
+                    },
+                    {
+                        step: 4,
+                        title: 'Restart Backend',
+                        description:
+                            'Restart your backend server for the changes to take effect',
+                    },
+                ],
+                callbackUrl: callbackUrl,
+                note: 'After setup, the app will appear in GitHub Settings → Applications → Authorized OAuth Apps when users authorize it.',
+            },
+        });
+    }
+
+    /**
+     * OAuth callback endpoint - handles redirect from GitHub
+     * This endpoint receives the authorization code and exchanges it for an access token
+     */
+    @Get('github/callback')
+    async handleCallback(
+        @Res() res: any,
+        @Query('code') code?: string,
+        @Query('state') state?: string,
+        @Query('error') error?: string,
+        @Query('error_description') errorDescription?: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('userId') userId?: string,
+    ) {
+        try {
+            // Handle OAuth errors from GitHub
+            if (error) {
+                console.error('GitHub OAuth error:', error, errorDescription);
+                return res.status(HttpStatus.BAD_REQUEST).send(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>GitHub OAuth Error</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                            .error { color: #d32f2f; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1 class="error">Authorization Failed</h1>
+                        <p>${errorDescription || error}</p>
+                        <script>
+                            // Close window if opened as popup, otherwise redirect
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'oauth-error', error: '${error}', errorDescription: '${errorDescription || ''}' }, '*');
+                                window.close();
+                            } else {
+                                setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            }
+
+            // Check if authorization code is present
+            if (!code) {
+                return res.status(HttpStatus.BAD_REQUEST).send(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>GitHub OAuth Error</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                            .error { color: #d32f2f; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1 class="error">Authorization Code Missing</h1>
+                        <p>No authorization code received from GitHub.</p>
+                        <script>
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'oauth-error', error: 'missing_code' }, '*');
+                                window.close();
+                            } else {
+                                setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            }
+
+            const clientId = process.env.GITHUB_CLIENT_ID;
+            const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+
+            if (!clientId || !clientSecret) {
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>GitHub OAuth Configuration Error</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                            .error { color: #d32f2f; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1 class="error">Configuration Error</h1>
+                        <p>GitHub OAuth is not properly configured on the server.</p>
+                        <script>
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'oauth-error', error: 'not_configured' }, '*');
+                                window.close();
+                            } else {
+                                setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            }
+
+            // Build redirect URI (must match the one used in authorization request)
+            const appBaseUrl =
+                process.env.APP_BASE_URL || 'http://localhost:3000';
+            const redirectUri = `${appBaseUrl}/security-governance/credentials/github/oauth2/callback`;
+
+            // Exchange code for access token with GitHub
+            const tokenResponse = await axios.post(
+                'https://github.com/login/oauth/access_token',
+                {
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    code: code,
+                    redirect_uri: redirectUri,
+                },
+                {
+                    headers: {
+                        Accept: 'application/json',
+                        'Content-Type': 'application/json',
+                    },
+                },
+            );
+
+            const {
+                access_token,
+                token_type,
+                scope,
+                error: tokenError,
+                error_description: tokenErrorDescription,
+            } = tokenResponse.data;
+
+            if (tokenError) {
+                console.error('GitHub OAuth token error:', tokenError, tokenErrorDescription);
+                return res.status(HttpStatus.BAD_REQUEST).send(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>GitHub OAuth Error</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                            .error { color: #d32f2f; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1 class="error">Token Exchange Failed</h1>
+                        <p>${tokenErrorDescription || tokenError || 'Failed to exchange authorization code'}</p>
+                        <script>
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'oauth-error', error: '${tokenError}', errorDescription: '${tokenErrorDescription || ''}' }, '*');
+                                window.close();
+                            } else {
+                                setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            }
+
+            if (!access_token) {
+                return res.status(HttpStatus.BAD_REQUEST).send(`
+                    <!DOCTYPE html>
+                    <html>
+                    <head>
+                        <title>GitHub OAuth Error</title>
+                        <style>
+                            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                            .error { color: #d32f2f; }
+                        </style>
+                    </head>
+                    <body>
+                        <h1 class="error">No Access Token Received</h1>
+                        <p>GitHub did not return an access token.</p>
+                        <script>
+                            if (window.opener) {
+                                window.opener.postMessage({ type: 'oauth-error', error: 'no_token' }, '*');
+                                window.close();
+                            } else {
+                                setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                            }
+                        </script>
+                    </body>
+                    </html>
+                `);
+            }
+
+            // Store the access token securely
+            try {
+                await this.githubOAuthService.storeAccessToken({
+                    userId: userId,
+                    accountId: accountId,
+                    accountName: accountName,
+                    enterpriseId: enterpriseId,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    accessToken: access_token,
+                    tokenType: token_type || 'bearer',
+                    scope: scope,
+                });
+            } catch (storageError) {
+                console.error('Failed to store access token:', storageError);
+                // Continue - token exchange was successful even if storage fails
+            }
+
+            // Return success page that closes the window or redirects
+            return res.status(HttpStatus.OK).send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>GitHub Authorization Successful</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                        .success { color: #2e7d32; }
+                        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+                        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+                    </style>
+                </head>
+                <body>
+                    <h1 class="success">✓ Authorization Successful!</h1>
+                    <p>Your GitHub account has been successfully connected.</p>
+                    <p>This window will close automatically...</p>
+                    <div class="spinner"></div>
+                    <script>
+                        // Send success message to parent window if opened as popup
+                        if (window.opener) {
+                            window.opener.postMessage({ 
+                                type: 'oauth-success', 
+                                accessToken: '${access_token}',
+                                tokenType: '${token_type || 'bearer'}',
+                                scope: '${scope || 'repo'}'
+                            }, '*');
+                            // Close the popup window
+                            setTimeout(() => window.close(), 1000);
+                        } else {
+                            // If not a popup, redirect to credentials page
+                            setTimeout(() => {
+                                window.location.href = '/security-governance/credentials';
+                            }, 2000);
+                        }
+                    </script>
+                </body>
+                </html>
+            `);
+        } catch (error: any) {
+            console.error('OAuth callback error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).send(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <title>GitHub OAuth Error</title>
+                    <style>
+                        body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+                        .error { color: #d32f2f; }
+                    </style>
+                </head>
+                <body>
+                    <h1 class="error">An Error Occurred</h1>
+                    <p>${error.message || 'Failed to process authorization'}</p>
+                    <script>
+                        if (window.opener) {
+                            window.opener.postMessage({ type: 'oauth-error', error: 'server_error', errorDescription: '${error.message || ''}' }, '*');
+                            window.close();
+                        } else {
+                            setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
+                        }
+                    </script>
+                </body>
+                </html>
+            `);
+        }
+    }
+
+}
+
+@Controller('api')
+class OAuthTokenController {
+    private githubOAuthService: GitHubOAuthService;
+
+    constructor() {
+        this.githubOAuthService = new GitHubOAuthService();
+    }
+
+    @Post('oauth-token')
+    async exchangeToken(
+        @Res() res: any,
+        @Body() body: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('userId') userId?: string,
+    ) {
+        try {
+            const {code, redirectUri: customRedirectUri} = body;
+
+            if (!code) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Authorization code is required',
+                });
+            }
+
+            const clientId = process.env.GITHUB_CLIENT_ID;
+            const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+
+            if (!clientId || !clientSecret) {
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message:
+                        'GitHub OAuth is not properly configured. Please set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables.',
+                });
+            }
+
+            // Build redirect URI (use custom if provided, otherwise default)
+            const appBaseUrl =
+                process.env.APP_BASE_URL || 'http://localhost:3000';
+            const redirectUri =
+                customRedirectUri ||
+                `${appBaseUrl}/security-governance/credentials/github/oauth2/callback`;
+
+            // Exchange code for access token with GitHub
+            const tokenResponse = await axios.post(
+                'https://github.com/login/oauth/access_token',
+                {
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                    code: code,
+                    redirect_uri: redirectUri,
+                },
+                {
+                    headers: {
+                        Accept: 'application/json',
+                        'Content-Type': 'application/json',
+                    },
+                },
+            );
+
+            const {
+                access_token,
+                token_type,
+                scope,
+                error,
+                error_description,
+            } = tokenResponse.data;
+
+            if (error) {
+                console.error('GitHub OAuth error:', error, error_description);
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message:
+                        error_description ||
+                        error ||
+                        'Failed to exchange authorization code',
+                });
+            }
+
+            if (!access_token) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'No access token received from GitHub',
+                });
+            }
+
+            // Store the access token securely
+            try {
+                await this.githubOAuthService.storeAccessToken({
+                    userId: userId,
+                    accountId: accountId,
+                    accountName: accountName,
+                    enterpriseId: enterpriseId,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    accessToken: access_token,
+                    tokenType: token_type || 'bearer',
+                    scope: scope,
+                });
+            } catch (storageError) {
+                console.error('Failed to store access token:', storageError);
+                // Continue even if storage fails - token exchange was successful
+            }
+
+            // Return success response
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                accessToken: access_token,
+                tokenType: token_type || 'bearer',
+                scope: scope || 'repo',
+                message: 'GitHub authorization successful. The app will appear in your GitHub Authorized OAuth Apps.',
+            });
+        } catch (error: any) {
+            console.error('Token exchange error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                message:
+                    error.message || 'Failed to exchange authorization code',
+            });
+        }
     }
 }
 
@@ -6293,6 +6804,8 @@ class GlobalSettingsController {
     controllers: [
         HealthController,
         AuthController,
+        OAuthController,
+        OAuthTokenController,
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,
@@ -6328,6 +6841,39 @@ async function bootstrap() {
         console.log('Starting DevOps Automate Backend...');
         console.log('Environment:', process.env.NODE_ENV || 'development');
         console.log('Storage Mode:', process.env.STORAGE_MODE || 'postgres');
+
+        // Check GitHub OAuth configuration
+        if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+            console.warn(
+                '⚠️  WARNING: GitHub OAuth is not configured!',
+            );
+            console.warn(
+                '   Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables',
+            );
+            console.warn(
+                '   GitHub OAuth endpoints will return errors until configured.',
+            );
+        } else {
+            console.log('✅ GitHub OAuth configuration found');
+        }
+
+        // Check token encryption key
+        if (
+            !process.env.TOKEN_ENCRYPTION_KEY &&
+            !process.env.PASSWORD_ENCRYPTION_KEY
+        ) {
+            console.warn(
+                '⚠️  WARNING: Token encryption key is not configured!',
+            );
+            console.warn(
+                '   Set TOKEN_ENCRYPTION_KEY or PASSWORD_ENCRYPTION_KEY environment variable',
+            );
+            console.warn(
+                '   Token storage will fail until encryption key is configured.',
+            );
+        } else {
+            console.log('✅ Token encryption key configured');
+        }
 
         // Load environment variables from config.env file
         dotenv.config({path: 'config.env'});
