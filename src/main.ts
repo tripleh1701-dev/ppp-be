@@ -714,6 +714,236 @@ class OAuthTokenController {
     }
 }
 
+// ============================================================================
+// JIRA CONNECTIVITY TEST ENDPOINT
+// ============================================================================
+// Endpoint: POST /api/connectors/jira/test-connection
+// Purpose: Test JIRA connectivity using provided URL, username, and API token
+// ============================================================================
+
+@Controller('api/connectors')
+class ConnectorsController {
+    /**
+     * POST /api/connectors/jira/test-connection
+     * 
+     * Tests JIRA connectivity using Username and API key:
+     * - Calls: <url>/rest/api/3/myself
+     * 
+     * Request Body:
+     * {
+     *   "connectorName": "Jira",
+     *   "url": "https://v88654876-1765564400100.atlassian.net",
+     *   "credentialName": "JIRA_Cred_Fin",
+     *   "username": "v88654876@gmail.com",
+     *   "apiToken": "ATATT3xFfGF0..."
+     * }
+     * 
+     * Response:
+     * {
+     *   "success": true,
+     *   "status": "success",
+     *   "connected": true,
+     *   "message": "Successfully connected to JIRA",
+     *   "userInfo": {
+     *     "accountId": "...",
+     *     "displayName": "...",
+     *     "emailAddress": "..."
+     *   }
+     * }
+     */
+    @Post('jira/test-connection')
+    async testJiraConnection(@Res() res: any, @Body() body: any) {
+        try {
+            // Extract credentials from request body
+            const { url, username, apiToken, credentialName } = body;
+
+            // Log received data for debugging
+            console.log('🧪 [JIRA Test] Received request:', {
+                hasUrl: !!url,
+                hasUsername: !!username,
+                hasApiToken: !!apiToken,
+                hasCredentialName: !!credentialName,
+                originalUrl: url,
+                bodyKeys: Object.keys(body)
+            });
+
+            // Normalize URL - extract base domain
+            let normalizedUrl = url ? url.trim() : '';
+            
+            if (normalizedUrl) {
+                try {
+                    const urlObj = new URL(normalizedUrl);
+                    // Extract just the protocol, hostname, and port (if any)
+                    // This removes any path components
+                    normalizedUrl = `${urlObj.protocol}//${urlObj.host}`;
+                    // Remove trailing slash if present
+                    normalizedUrl = normalizedUrl.replace(/\/$/, '');
+                } catch (error) {
+                    // If URL parsing fails, try to clean it manually
+                    normalizedUrl = normalizedUrl.replace(/\/rest\/.*$/, '')
+                        .replace(/\/$/, '');
+                }
+            }
+
+            // Validate URL format
+            if (!normalizedUrl) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Missing required field: url'
+                });
+            }
+
+            try {
+                new URL(normalizedUrl);
+            } catch (error) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Invalid URL format'
+                });
+            }
+
+            console.log('🔗 [JIRA Test] URL normalized:', {
+                original: url,
+                normalized: normalizedUrl
+            });
+
+            // Validate required fields
+            const missingFields: string[] = [];
+            if (!url) missingFields.push('url');
+            if (!username) missingFields.push('username');
+            if (!apiToken) missingFields.push('apiToken');
+
+            if (missingFields.length > 0) {
+                const errorMessage = `Missing required fields: ${missingFields.join(', ')}. Please provide url, username, and apiToken.`;
+                
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: errorMessage,
+                    missingFields: missingFields
+                });
+            }
+
+            // Test JIRA connection using Username and API key
+            console.log('👤 [JIRA Test] Using Username authentication (direct API call):', {
+                url: normalizedUrl,
+                username: username,
+                hasApiToken: !!apiToken
+            });
+
+            // Convert username:apiToken to Base64 for Basic Authentication
+            const credentials = `${username}:${apiToken}`;
+            const base64Credentials = Buffer.from(credentials).toString('base64');
+            console.log('🔐 [JIRA Test] Base64 credentials generated (length):', base64Credentials.length);
+
+            // Construct JIRA API endpoint for testing connectivity
+            // Using /rest/api/3/myself endpoint which returns current user info
+            const jiraApiUrl = `${normalizedUrl}/rest/api/3/myself`;
+            console.log('🌐 [JIRA Test] Calling JIRA API directly:', jiraApiUrl);
+
+            try {
+                // Make API call to JIRA with Basic Authentication
+                const response = await axios.get(jiraApiUrl, {
+                    headers: {
+                        'Authorization': `Basic ${base64Credentials}`,
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 10000 // 10 second timeout
+                });
+
+                console.log('✅ [JIRA Test] JIRA API response status:', response.status);
+                console.log('📦 [JIRA Test] JIRA API response data:', {
+                    accountId: response.data.accountId,
+                    displayName: response.data.displayName,
+                    emailAddress: response.data.emailAddress
+                });
+
+                // If we get a successful response (200-299), connection is successful
+                if (response.status >= 200 && response.status < 300) {
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        status: 'success',
+                        connected: true,
+                        message: 'Successfully connected to JIRA',
+                        userInfo: {
+                            accountId: response.data.accountId,
+                            displayName: response.data.displayName,
+                            emailAddress: response.data.emailAddress
+                        }
+                    });
+                } else {
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: `Unexpected response status: ${response.status}`
+                    });
+                }
+            } catch (error: any) {
+                console.error('❌ [JIRA Test] Error testing connectivity:', error);
+
+                // Handle different types of errors
+                let errorMessage = 'Failed to connect to JIRA';
+                let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+
+                if (error.response) {
+                    statusCode = error.response.status;
+
+                    if (statusCode === HttpStatus.UNAUTHORIZED) {
+                        errorMessage = 'Authentication failed. Please check your username and API token.';
+                    } else if (statusCode === HttpStatus.FORBIDDEN) {
+                        errorMessage = 'Access forbidden. Please check your API token permissions.';
+                    } else if (statusCode === HttpStatus.NOT_FOUND) {
+                        errorMessage = 'JIRA instance not found. Please check the URL.';
+                    } else {
+                        errorMessage = `JIRA API error: ${error.response.status} - ${error.response.statusText}`;
+                    }
+
+                    console.error('📛 [JIRA Test] JIRA API error response:', {
+                        status: error.response.status,
+                        statusText: error.response.statusText,
+                        data: error.response.data
+                    });
+                } else if (error.request) {
+                    errorMessage = 'No response from JIRA server. Please check the URL and network connectivity.';
+                    console.error('📛 [JIRA Test] No response received:', error.request);
+                } else if (error.code === 'ECONNREFUSED') {
+                    errorMessage = 'Connection refused. Please check the JIRA URL.';
+                } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                    errorMessage = 'Connection timeout. Please check the JIRA URL and network connectivity.';
+                } else {
+                    errorMessage = error.message || 'Unknown error occurred while testing connectivity';
+                }
+
+                return res.status(statusCode).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: errorMessage,
+                    error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                });
+            }
+        } catch (error: any) {
+            // This catch block handles unexpected errors during validation
+            console.error('❌ [JIRA Test] Unexpected error during validation:', error);
+
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'An unexpected error occurred while processing the request',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined
+            });
+        }
+    }
+}
+
 @Controller('api/accounts')
 class AccountsController {
     @Get()
@@ -6832,6 +7062,7 @@ class GlobalSettingsController {
         AccountLicensesController,
         UserManagementController,
         GlobalSettingsController,
+        ConnectorsController,
     ],
 })
 class AppModule {}
