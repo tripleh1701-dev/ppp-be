@@ -54,6 +54,10 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
+import {CognitoAuthService} from './services/cognitoAuth';
+
+// Cognito auth service instance
+const cognitoAuth = new CognitoAuthService();
 
 dotenv.config();
 
@@ -116,24 +120,82 @@ class AuthController {
     @Post('login')
     async login(@Body() body: any, @Res() res: any) {
         try {
-            const {email, password} = body;
+            const {email, password, username} = body;
+            const loginId = username || email; // Support both email and username
 
-            if (!email || !password) {
+            if (!loginId || !password) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
-                    error: 'Email and password are required',
+                    error: 'Email/username and password are required',
                 });
             }
 
-            // Use userManagement service for authentication
+            // Try Cognito authentication first (if IMS_API_URL is configured)
+            if (cognitoAuth.isAvailable()) {
+                console.log('Attempting Cognito authentication via IMS...');
+                const cognitoResult = await cognitoAuth.login(loginId, password);
+
+                // Handle NEW_PASSWORD_REQUIRED challenge
+                if (cognitoResult.requiresPasswordChange) {
+                    return res.status(HttpStatus.OK).json({
+                        success: false,
+                        requiresPasswordChange: true,
+                        challengeName: cognitoResult.challengeName,
+                        session: cognitoResult.session,
+                        message: cognitoResult.message || 'Password change required on first login',
+                        data: {
+                            user: {
+                                id: cognitoResult.user?.username || loginId,
+                                emailAddress: cognitoResult.user?.email || loginId,
+                                firstName: '',
+                                lastName: '',
+                            }
+                        }
+                    });
+                }
+
+                if (cognitoResult.success && cognitoResult.tokens) {
+                    const user = cognitoResult.user;
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        data: {
+                            user: {
+                                id: user?.username || loginId,
+                                firstName: user?.username?.split('@')[0] || 'User',
+                                middleName: '',
+                                lastName: '',
+                                emailAddress: user?.email || loginId,
+                                status: 'active',
+                                technicalUser: false,
+                                role: user?.userRoles?.[0] || 'User',
+                                tenantId: user?.tenantId,
+                                permissions: user?.permissions || [],
+                                groups: user?.groups || [],
+                            },
+                            token: cognitoResult.tokens.AccessToken,
+                            refreshToken: cognitoResult.tokens.RefreshToken,
+                            idToken: cognitoResult.tokens.IdToken,
+                            expiresIn: cognitoResult.tokens.ExpiresIn,
+                        },
+                    });
+                }
+
+                // Cognito auth failed - return error (don't fallback to local auth)
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    error: cognitoResult.error || 'Invalid email or password',
+                });
+            }
+
+            // Fallback: Use local DynamoDB authentication
             if (storageMode !== 'dynamodb' || !userManagement) {
                 return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
                     success: false,
-                    error: 'Authentication service not available',
+                    error: 'Authentication service not available. Configure IMS_API_URL for Cognito auth.',
                 });
             }
 
-            const user = await userManagement.authenticateUser(email, password);
+            const user = await userManagement.authenticateUser(loginId, password);
 
             if (!user) {
                 return res.status(HttpStatus.UNAUTHORIZED).json({
@@ -145,10 +207,8 @@ class AuthController {
             // Get user's groups and roles
             let userRole = 'User'; // Default role
             try {
-                // Note: For auth, we don't have account context, so only works for Systiva users
                 const userGroups = await userManagement.getUserGroups(user.id);
                 if (userGroups && userGroups.length > 0) {
-                    // Get roles from the first group
                     const groupRoles = await userManagement.getGroupRoles(
                         userGroups[0].id,
                     );
@@ -158,7 +218,6 @@ class AuthController {
                 }
             } catch (roleError) {
                 safeConsoleError('Error fetching user roles:', roleError);
-                // Continue with default role
             }
 
             // Generate JWT token (secure)
@@ -186,7 +245,6 @@ class AuthController {
                 },
             });
         } catch (error) {
-            // SECURITY: Use sanitized error logging to prevent password leaks
             safeConsoleError('Error during login', error);
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
@@ -195,9 +253,74 @@ class AuthController {
         }
     }
 
+    @Post('complete-password-challenge')
+    async completePasswordChallenge(@Body() body: any, @Res() res: any) {
+        try {
+            const {username, email, newPassword, session} = body;
+            const loginId = username || email;
+
+            if (!loginId || !newPassword || !session) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Username, new password, and session are required',
+                });
+            }
+
+            if (!cognitoAuth.isAvailable()) {
+                return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+                    success: false,
+                    error: 'Cognito authentication not configured',
+                });
+            }
+
+            const result = await cognitoAuth.completeNewPasswordChallenge(
+                loginId,
+                newPassword,
+                session
+            );
+
+            if (result.success && result.tokens) {
+                const user = result.user;
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    message: 'Password updated successfully',
+                    data: {
+                        user: {
+                            id: user?.username || loginId,
+                            firstName: user?.username?.split('@')[0] || 'User',
+                            middleName: '',
+                            lastName: '',
+                            emailAddress: user?.email || loginId,
+                            status: 'active',
+                            technicalUser: false,
+                            role: user?.userRoles?.[0] || 'User',
+                            tenantId: user?.tenantId,
+                            permissions: user?.permissions || [],
+                            groups: user?.groups || [],
+                        },
+                        token: result.tokens.AccessToken,
+                        refreshToken: result.tokens.RefreshToken,
+                        idToken: result.tokens.IdToken,
+                        expiresIn: result.tokens.ExpiresIn,
+                    },
+                });
+            }
+
+            return res.status(HttpStatus.BAD_REQUEST).json({
+                success: false,
+                error: result.error || 'Failed to update password',
+            });
+        } catch (error) {
+            safeConsoleError('Error completing password challenge', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: 'Failed to update password',
+            });
+        }
+    }
+
     @Post('logout')
     async logout(@Res() res: any) {
-        // In a real implementation, invalidate the token
         return res.status(HttpStatus.OK).json({
             success: true,
             message: 'Logged out successfully',
@@ -538,8 +661,8 @@ APP_BASE_URL=${appBaseUrl}`,
                     <script>
                         // Send success message to parent window if opened as popup
                         if (window.opener) {
-                            window.opener.postMessage({ 
-                                type: 'oauth-success', 
+                            window.opener.postMessage({
+                                type: 'oauth-success',
                                 accessToken: '${access_token}',
                                 tokenType: '${token_type || 'bearer'}',
                                 scope: '${scope || 'repo'}'
@@ -725,10 +848,10 @@ class OAuthTokenController {
 class ConnectorsController {
     /**
      * POST /api/connectors/jira/test-connection
-     * 
+     *
      * Tests JIRA connectivity using Username and API key:
      * - Calls: <url>/rest/api/3/myself
-     * 
+     *
      * Request Body:
      * {
      *   "connectorName": "Jira",
@@ -737,7 +860,7 @@ class ConnectorsController {
      *   "username": "v88654876@gmail.com",
      *   "apiToken": "ATATT3xFfGF0..."
      * }
-     * 
+     *
      * Response:
      * {
      *   "success": true,
@@ -769,7 +892,7 @@ class ConnectorsController {
 
             // Normalize URL - extract base domain
             let normalizedUrl = url ? url.trim() : '';
-            
+
             if (normalizedUrl) {
                 try {
                     const urlObj = new URL(normalizedUrl);
@@ -819,7 +942,7 @@ class ConnectorsController {
 
             if (missingFields.length > 0) {
                 const errorMessage = `Missing required fields: ${missingFields.join(', ')}. Please provide url, username, and apiToken.`;
-                
+
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
                     status: 'failed',
@@ -3177,7 +3300,7 @@ class UsersController {
                 if (storageMode === 'dynamodb' && userManagement) {
                     console.log(`📦 Processing ${body.groups.length} group(s) for create-and-assign`);
                     console.log(`📦 Groups received:`, JSON.stringify(body.groups, null, 2));
-                    
+
                     const user = await userManagement.getUser(id);
                     if (!user) {
                         return res.status(HttpStatus.NOT_FOUND).json({
@@ -3187,30 +3310,30 @@ class UsersController {
                     }
 
                     let groupIds: string[] = [];
-                    
+
                     // Get all existing groups to match by name
                     const allExistingGroups = await userManagement.listGroups();
                     console.log(`📋 Found ${allExistingGroups.length} existing groups in database`);
-                    
+
                     // Process each group
                     const seenGroupIds = new Set<string>(); // Track unique group IDs
                     for (const groupData of body.groups) {
                         const groupName = groupData.groupName || groupData.name;
                         console.log(`🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`);
-                        
+
                         // Try to find group by NAME (not by frontend-generated ID)
                         let existingGroup = allExistingGroups.find(g => g.name === groupName);
-                        
+
                         if (existingGroup) {
                             console.log(`✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`);
-                            
+
                             // Skip if we've already processed this group ID (deduplication)
                             if (seenGroupIds.has(existingGroup.id)) {
                                 console.log(`⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`);
                                 continue;
                             }
                             seenGroupIds.add(existingGroup.id);
-                            
+
                             // Get current group data from database to preserve correct values
                             const currentGroup = await userManagement.getGroup(existingGroup.id);
                             if (!currentGroup) {
@@ -3218,7 +3341,7 @@ class UsersController {
                                 groupIds.push(existingGroup.id);
                                 continue;
                             }
-                            
+
                             // Only update fields that actually changed and are provided
                             const updates: any = {};
                             if (groupData.name && groupData.name !== currentGroup.name) {
@@ -3226,13 +3349,13 @@ class UsersController {
                             }
                             // Only update description if it's different and not empty
                             // Protect against overwriting with incorrect/stale data from frontend
-                            if (groupData.description !== undefined && 
+                            if (groupData.description !== undefined &&
                                 groupData.description !== null &&
                                 groupData.description.trim() !== '' &&
                                 groupData.description !== currentGroup.description) {
                                 console.log(`📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`);
                                 updates.description = groupData.description;
-                            } else if (groupData.description !== undefined && 
+                            } else if (groupData.description !== undefined &&
                                       groupData.description !== currentGroup.description) {
                                 console.log(`⚠️  Skipping description update - empty or matches current value`);
                             }
@@ -3248,7 +3371,7 @@ class UsersController {
                             if (groupData.assignedRoles !== undefined) {
                                 updates.assignedRoles = groupData.assignedRoles || [];
                             }
-                            
+
                             // Only update if there are actual changes
                             if (Object.keys(updates).length > 0) {
                                 console.log(`🔄 Updating group with changes:`, JSON.stringify(updates, null, 2));
@@ -3256,7 +3379,7 @@ class UsersController {
                             } else {
                                 console.log(`ℹ️  No changes detected, skipping update`);
                             }
-                            
+
                             groupIds.push(existingGroup.id);
                         } else {
                             console.log(`🆕 Creating new group: "${groupName}"`);
@@ -3270,7 +3393,7 @@ class UsersController {
                                 assignedRoles: groupData.assignedRoles || [],
                             });
                             console.log(`✅ Created new group with ID: ${newGroup.id}`);
-                            
+
                             // Skip if duplicate
                             if (seenGroupIds.has(newGroup.id)) {
                                 console.log(`⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`);
@@ -4462,20 +4585,20 @@ class RolesController {
         if (!searchTerm) {
             return await this.list(undefined, accountId, accountName);
         }
-        
+
         if (storageMode === 'dynamodb' && userManagement) {
-            const allRoles = accountId && accountName 
+            const allRoles = accountId && accountName
                 ? await userManagement.listRolesByAccount(accountId, accountName)
                 : await userManagement.listRoles();
-            
-            const filtered = allRoles.filter((role: any) => 
+
+            const filtered = allRoles.filter((role: any) =>
                 role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 role.description?.toLowerCase().includes(searchTerm.toLowerCase())
             );
             return filtered;
         } else {
             const allRoles = await roles.list();
-            const filtered = allRoles.filter((role: any) => 
+            const filtered = allRoles.filter((role: any) =>
                 role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 role.description?.toLowerCase().includes(searchTerm.toLowerCase())
             );
@@ -4518,7 +4641,7 @@ class RolesController {
                 // Get all users and filter by roles through their assigned groups
                 const allUsers = await userManagement.listUsers();
                 const allGroups = await userManagement.listGroups();
-                
+
                 // Find groups that have this role
                 const groupsWithRole = allGroups.filter(
                     (group) =>
@@ -4526,14 +4649,14 @@ class RolesController {
                         group.assignedRoles.includes(roleId),
                 );
                 const groupIds = groupsWithRole.map((g) => g.id);
-                
+
                 // Find users that belong to those groups
                 const roleUsers = allUsers.filter(
                     (user) =>
                         user.assignedGroups &&
                         user.assignedGroups.some((gId: string) => groupIds.includes(gId)),
                 );
-                
+
                 return res.status(HttpStatus.OK).json({
                     success: true,
                     data: {users: roleUsers},
@@ -4622,7 +4745,7 @@ class RolesController {
                 await userManagement.updateGroup(groupId, {
                     assignedRoles: updatedRoles,
                 });
-                
+
                 return res.status(HttpStatus.NO_CONTENT).send();
             } else {
                 await roles.removeRoleFromGroup(groupId, roleId);
@@ -5791,20 +5914,20 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
-        
+
         if (hasAccountContext) {
             console.log(`✅ Listing users for account: ${accountName} (${accountId})`);
             if (enterpriseId && enterpriseName) {
                 console.log(`   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
             }
-            
+
             const users = await userManagement.listUsersByAccount(
-                accountId, 
+                accountId,
                 accountName,
                 enterpriseId,  // Pass enterprise filter
                 enterpriseName  // Pass enterprise filter
             );
-            
+
             // Fetch assigned groups for each user
             const usersWithGroups = await Promise.all(
                 users.map(async (user: any) => {
@@ -5815,14 +5938,14 @@ class UserManagementController {
                         const userAccountName = user.accountName || accountName;
                         const userEnterpriseId = user.enterpriseId || enterpriseId;
                         const userEnterpriseName = user.enterpriseName || enterpriseName;
-                        
+
                         console.log(`🔍 Fetching groups for user ${user.id}:`, {
                             userAccountId,
                             userAccountName,
                             userEnterpriseId,
                             userEnterpriseName,
                         });
-                        
+
                         const assignedGroups = await userManagement.getUserGroups(
                             user.id,
                             userAccountId,      // Use user's account context
@@ -5830,9 +5953,9 @@ class UserManagementController {
                             userEnterpriseId,   // Use user's enterprise context
                             userEnterpriseName  // Use user's enterprise context
                         );
-                        
+
                         console.log(`✅ Got ${assignedGroups.length} group(s) for user ${user.id}`);
-                        
+
                         return {
                             ...user,
                             assignedUserGroups: assignedGroups,
@@ -5846,7 +5969,7 @@ class UserManagementController {
                     }
                 }),
             );
-            
+
             return usersWithGroups;
         } else {
             console.log('✅ Listing Systiva users (no account context)');
@@ -5894,11 +6017,11 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = body.accountId && body.accountName;
-        
+
         if (hasAccountContext) {
             console.log(`✅ Creating user in account table: ${body.accountName} (${body.accountId})`);
             console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
-            
+
             // Prepare user data for account-specific creation (include enterprise context)
             const userPayload = {
                 firstName: body.firstName,
@@ -5946,13 +6069,13 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = body.accountId && body.accountName;
-        
+
         if (hasAccountContext) {
             console.log(`✅ Updating user in account table: ${body.accountName} (${body.accountId})`);
             if (body.enterpriseId && body.enterpriseName) {
                 console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
             }
-            
+
             const updatePayload: any = {
                 firstName: body.firstName,
                 middleName: body.middleName,
@@ -6012,7 +6135,7 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
-        
+
         if (hasAccountContext) {
             console.log(`✅ Deleting user from account table: ${accountName} (${accountId})`);
             if (enterpriseId && enterpriseName) {
@@ -6023,7 +6146,7 @@ class UserManagementController {
             console.log('✅ Deleting user from Systiva table (no account context)');
             await userManagement.deleteUser(id);
         }
-        
+
         return {};
     }
 
@@ -6131,7 +6254,7 @@ class UserManagementController {
                     // If it's a Systiva group in account context, try to find account-specific alternative
                     if (validation.scopeType === 'systiva' && validation.group && hasAccountContext) {
                         console.log(`🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`);
-                        
+
                         const alternative = await userManagement.findAccountSpecificGroupByName(
                             validation.group.name,
                             accountId!,
@@ -6185,7 +6308,7 @@ class UserManagementController {
                 console.log(`✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`);
                 await userManagement.updateUserInAccountTable(
                     id,
-                    { 
+                    {
                         assignedGroups: validatedGroupIds,
                         enterpriseId,
                         enterpriseName,
@@ -6297,7 +6420,7 @@ class UserManagementController {
             if (hasAccountContext) {
                 await userManagement.updateUserInAccountTable(
                     id,
-                    { 
+                    {
                         assignedGroups: updatedGroups,
                         enterpriseId,      // Preserve enterprise context
                         enterpriseName     // Preserve enterprise context
@@ -6370,8 +6493,8 @@ class UserManagementController {
             }
 
             const groups = await userManagement.getUserGroups(
-                id, 
-                accountId, 
+                id,
+                accountId,
                 accountName,
                 enterpriseId,      // Pass enterprise context
                 enterpriseName     // Pass enterprise context
@@ -6569,7 +6692,7 @@ class UserManagementController {
 
             const currentRoles = group.assignedRoles || [];
             const updatedRoles = currentRoles.filter((r) => r !== roleId);
-            
+
             await userManagement.updateGroup(id, {
                 assignedRoles: updatedRoles,
                 selectedAccountId: accountId,
@@ -6606,7 +6729,7 @@ class UserManagementController {
             };
         }
         console.log('🆕 createGroup API called with body:', body);
-        
+
         // Map frontend field names to backend expected names
         const groupData = {
             ...body,
@@ -6616,7 +6739,7 @@ class UserManagementController {
             selectedEnterpriseId: body.enterpriseId,
             selectedEnterpriseName: body.enterpriseName,
         };
-        
+
         console.log('🆕 createGroup mapped data:', groupData);
         const result = await userManagement.createGroup(groupData);
         console.log('🆕 createGroup created group:', result);
@@ -6631,7 +6754,7 @@ class UserManagementController {
             };
         }
         console.log(`🔄 updateGroup API called for id: ${id} with body:`, body);
-        
+
         // Map frontend field names to backend expected names
         const updateData = {
             ...body,
@@ -6641,7 +6764,7 @@ class UserManagementController {
             selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
             selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
         };
-        
+
         console.log(`🔄 updateGroup mapped data:`, updateData);
         const result = await userManagement.updateGroup(id, updateData);
         console.log(`🔄 updateGroup result:`, result);
@@ -6746,7 +6869,7 @@ class UserManagementController {
             };
         }
         console.log('🆕 createRole API called with body:', body);
-        
+
         // Map frontend field names to backend expected names (similar to createGroup)
         const roleData = {
             ...body,
@@ -6756,7 +6879,7 @@ class UserManagementController {
             selectedEnterpriseId: body.enterpriseId,
             selectedEnterpriseName: body.enterpriseName,
         };
-        
+
         console.log('🆕 createRole mapped data:', roleData);
         const result = await userManagement.createRole(roleData);
         console.log('🆕 createRole created role:', result);
@@ -6771,7 +6894,7 @@ class UserManagementController {
             };
         }
         console.log(`🔄 updateRole API called for id: ${id} with body:`, body);
-        
+
         // Map frontend field names to backend expected names (similar to updateGroup)
         const updateData = {
             ...body,
@@ -6781,7 +6904,7 @@ class UserManagementController {
             selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
             selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
         };
-        
+
         console.log(`🔄 updateRole mapped data:`, updateData);
         const result = await userManagement.updateRole(id, updateData);
         console.log(`🔄 updateRole result:`, result);
@@ -6840,13 +6963,13 @@ class GlobalSettingsController {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        
+
         // If no query parameters provided, return all records
         if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
             console.log('📋 getEntities API called - fetching all global settings');
             return await globalSettings.getAllEntities();
         }
-        
+
         // Otherwise, filter by account and enterprise
         console.log(
             `📋 getEntities API called for account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
@@ -6959,7 +7082,7 @@ class GlobalSettingsController {
             entities,
             configuration,
         } = body || {};
-        
+
         if (
             !accountId ||
             !accountName ||
@@ -6971,19 +7094,19 @@ class GlobalSettingsController {
                 error: 'accountId, accountName, enterpriseId, enterpriseName, and configuration are required',
             };
         }
-        
+
         // Extract entity name from entities array if provided, otherwise use entityName
         let finalEntityName = entityName;
         if (entities && Array.isArray(entities) && entities.length > 0) {
             finalEntityName = entities[0]; // Use first element of entities array
         }
-        
+
         if (!finalEntityName) {
             return {
                 error: 'entityName or entities array with entity name is required',
             };
         }
-        
+
         console.log(
             `🔄 updateEntity API called for record ID: ${recordId}, entity: ${finalEntityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
