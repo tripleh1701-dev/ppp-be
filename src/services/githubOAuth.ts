@@ -12,6 +12,8 @@ export interface GitHubOAuthToken {
     enterpriseId?: string;
     enterpriseName?: string;
     workstream?: string;
+    product?: string;
+    service?: string;
     accessToken: string; // Encrypted when stored
     tokenType: string;
     scope?: string;
@@ -27,6 +29,8 @@ export interface StoreTokenParams {
     enterpriseId?: string;
     enterpriseName?: string;
     workstream?: string;
+    product?: string;
+    service?: string;
     accessToken: string;
     tokenType?: string;
     scope?: string;
@@ -59,6 +63,8 @@ export class GitHubOAuthService {
             enterpriseId: params.enterpriseId,
             enterpriseName: params.enterpriseName,
             workstream: params.workstream,
+            product: params.product,
+            service: params.service,
             accessToken: JSON.stringify(encryptedTokenData), // Store encrypted token as JSON string
             tokenType: params.tokenType || 'bearer',
             scope: params.scope,
@@ -80,16 +86,47 @@ export class GitHubOAuthService {
      * Store token in DynamoDB
      */
     private async storeTokenDynamoDB(tokenData: GitHubOAuthToken): Promise<GitHubOAuthToken> {
+        console.log('💾 [GitHubOAuth] storeTokenDynamoDB called with tokenData:', {
+            id: tokenData.id,
+            accountId: tokenData.accountId,
+            accountName: tokenData.accountName,
+            enterpriseId: tokenData.enterpriseId,
+            enterpriseName: tokenData.enterpriseName,
+            workstream: tokenData.workstream,
+            product: tokenData.product,
+            service: tokenData.service,
+            userId: tokenData.userId,
+        });
+
         // Create a composite key based on context
         const contextKey = this.buildContextKey(
             tokenData.accountId,
             tokenData.accountName,
             tokenData.enterpriseId,
             tokenData.enterpriseName,
+            tokenData.workstream,
+            tokenData.product,
+            tokenData.service,
         );
 
         const PK = `GITHUB_OAUTH#${contextKey}`;
         const SK = `TOKEN#${tokenData.id}`;
+
+        console.log('💾 [GitHubOAuth] Generated contextKey:', contextKey);
+        console.log('💾 [GitHubOAuth] Storing token with PK:', PK, 'SK:', SK);
+        
+        if (contextKey === 'DEFAULT') {
+            console.warn('⚠️ [GitHubOAuth] WARNING: Token being stored with DEFAULT context key! This means no context parameters were provided.');
+            console.warn('⚠️ [GitHubOAuth] Provided parameters:', {
+                hasAccountId: !!tokenData.accountId,
+                hasAccountName: !!tokenData.accountName,
+                hasEnterpriseId: !!tokenData.enterpriseId,
+                hasEnterpriseName: !!tokenData.enterpriseName,
+                hasWorkstream: !!tokenData.workstream,
+                hasProduct: !!tokenData.product,
+                hasService: !!tokenData.service,
+            });
+        }
 
         // If userId is provided, also create a user-specific lookup
         if (tokenData.userId) {
@@ -106,14 +143,52 @@ export class GitHubOAuthService {
         }
 
         // Store main token record
+        // Explicitly include all fields to ensure they're stored even if undefined
         const item = {
             PK,
             SK,
-            ...tokenData,
+            id: tokenData.id,
+            user_id: tokenData.userId || null,
+            userId: tokenData.userId || null,
+            account_id: tokenData.accountId || null,
+            accountId: tokenData.accountId || null,
+            account_name: tokenData.accountName || null,
+            accountName: tokenData.accountName || null,
+            enterprise_id: tokenData.enterpriseId || null,
+            enterpriseId: tokenData.enterpriseId || null,
+            enterprise_name: tokenData.enterpriseName || null,
+            enterpriseName: tokenData.enterpriseName || null,
+            workstream: tokenData.workstream || null,
+            product: tokenData.product || null,
+            service: tokenData.service || null,
+            access_token: tokenData.accessToken,
+            accessToken: tokenData.accessToken,
+            token_type: tokenData.tokenType,
+            tokenType: tokenData.tokenType,
+            scope: tokenData.scope || null,
+            created_at: tokenData.createdAt,
+            createdAt: tokenData.createdAt,
+            updated_at: tokenData.updatedAt,
+            updatedAt: tokenData.updatedAt,
+            expires_at: tokenData.expiresAt || null,
+            expiresAt: tokenData.expiresAt || null,
             entity_type: 'GITHUB_OAUTH_TOKEN',
         };
 
+        console.log('💾 [GitHubOAuth] Item to store:', {
+            PK: item.PK,
+            accountId: item.accountId,
+            account_id: item.account_id,
+            enterpriseId: item.enterpriseId,
+            enterprise_id: item.enterprise_id,
+            workstream: item.workstream,
+            product: item.product,
+            service: item.service,
+        });
+
         await DynamoDBOperations.putItem(this.tableName, item);
+
+        console.log('✅ [GitHubOAuth] Token stored successfully in DynamoDB');
 
         // Remove encrypted token from response
         const {accessToken, ...responseData} = tokenData;
@@ -125,6 +200,18 @@ export class GitHubOAuthService {
      */
     private async storeTokenPostgres(tokenData: GitHubOAuthToken): Promise<GitHubOAuthToken> {
         return withPg(async (client) => {
+            console.log('💾 [GitHubOAuth] storeTokenPostgres called with tokenData:', {
+                id: tokenData.id,
+                accountId: tokenData.accountId,
+                accountName: tokenData.accountName,
+                enterpriseId: tokenData.enterpriseId,
+                enterpriseName: tokenData.enterpriseName,
+                workstream: tokenData.workstream,
+                product: tokenData.product,
+                service: tokenData.service,
+                userId: tokenData.userId,
+            });
+
             // Check if table exists, create if not
             await client.query(`
                 CREATE TABLE IF NOT EXISTS systiva.github_oauth_tokens (
@@ -135,6 +222,8 @@ export class GitHubOAuthService {
                     enterprise_id VARCHAR(255),
                     enterprise_name VARCHAR(255),
                     workstream VARCHAR(255),
+                    product VARCHAR(255),
+                    service VARCHAR(255),
                     access_token TEXT NOT NULL,
                     token_type VARCHAR(50) DEFAULT 'bearer',
                     scope TEXT,
@@ -142,6 +231,25 @@ export class GitHubOAuthService {
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
                     expires_at TIMESTAMP WITH TIME ZONE
                 )
+            `);
+
+            // Add product and service columns if they don't exist (for existing tables)
+            await client.query(`
+                DO $$ 
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_schema = 'systiva' 
+                                   AND table_name = 'github_oauth_tokens' 
+                                   AND column_name = 'product') THEN
+                        ALTER TABLE systiva.github_oauth_tokens ADD COLUMN product VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_schema = 'systiva' 
+                                   AND table_name = 'github_oauth_tokens' 
+                                   AND column_name = 'service') THEN
+                        ALTER TABLE systiva.github_oauth_tokens ADD COLUMN service VARCHAR(255);
+                    END IF;
+                END $$;
             `);
 
             // Create unique index for non-null combinations
@@ -184,8 +292,10 @@ export class GitHubOAuthService {
                          expires_at = $5,
                          account_name = $6,
                          enterprise_name = $7,
-                         workstream = $8
-                     WHERE id = $9
+                         workstream = $8,
+                         product = $9,
+                         service = $10
+                     WHERE id = $11
                      RETURNING *`,
                     [
                         tokenData.accessToken,
@@ -196,6 +306,8 @@ export class GitHubOAuthService {
                         tokenData.accountName || null,
                         tokenData.enterpriseName || null,
                         tokenData.workstream || null,
+                        tokenData.product || null,
+                        tokenData.service || null,
                         existingToken.rows[0].id,
                     ],
                 );
@@ -204,8 +316,8 @@ export class GitHubOAuthService {
                 result = await client.query(
                     `INSERT INTO systiva.github_oauth_tokens 
                      (id, user_id, account_id, account_name, enterprise_id, enterprise_name, 
-                      workstream, access_token, token_type, scope, created_at, updated_at, expires_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                      workstream, product, service, access_token, token_type, scope, created_at, updated_at, expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                      RETURNING *`,
                     [
                         tokenData.id,
@@ -215,6 +327,8 @@ export class GitHubOAuthService {
                         tokenData.enterpriseId || null,
                         tokenData.enterpriseName || null,
                         tokenData.workstream || null,
+                        tokenData.product || null,
+                        tokenData.service || null,
                         tokenData.accessToken,
                         tokenData.tokenType,
                         tokenData.scope || null,
@@ -226,6 +340,12 @@ export class GitHubOAuthService {
             }
 
             const storedToken = result.rows[0];
+            console.log('✅ [GitHubOAuth] Token stored successfully in PostgreSQL:', {
+                id: storedToken.id,
+                accountId: storedToken.account_id,
+                enterpriseId: storedToken.enterprise_id,
+            });
+
             // Remove access token from response
             const {access_token, ...responseData} = storedToken;
             return {
@@ -245,6 +365,9 @@ export class GitHubOAuthService {
         accountName?: string;
         enterpriseId?: string;
         enterpriseName?: string;
+        workstream?: string;
+        product?: string;
+        service?: string;
     }): Promise<string | null> {
         const storageMode = getStorageMode();
 
@@ -266,45 +389,334 @@ export class GitHubOAuthService {
         accountName?: string;
         enterpriseId?: string;
         enterpriseName?: string;
+        workstream?: string;
+        product?: string;
+        service?: string;
     }): Promise<string | null> {
-        const contextKey = this.buildContextKey(
-            params.accountId,
-            params.accountName,
-            params.enterpriseId,
-            params.enterpriseName,
-        );
+        console.log('🔍 [GitHubOAuth] getTokenDynamoDB called with params:', {
+            accountId: params.accountId,
+            accountName: params.accountName,
+            enterpriseId: params.enterpriseId,
+            enterpriseName: params.enterpriseName,
+            workstream: params.workstream,
+            product: params.product,
+            service: params.service,
+            userId: params.userId,
+        });
 
-        const PK = `GITHUB_OAUTH#${contextKey}`;
+        // Try multiple lookup strategies to handle cases where parameters might be missing
+        const lookupStrategies = [
+            // Strategy 1: Full match with all parameters
+            this.buildContextKey(
+                params.accountId,
+                params.accountName,
+                params.enterpriseId,
+                params.enterpriseName,
+                params.workstream,
+                params.product,
+                params.service,
+            ),
+            // Strategy 2: Match without accountName (if it was missing during storage)
+            this.buildContextKey(
+                params.accountId,
+                undefined,
+                params.enterpriseId,
+                params.enterpriseName,
+                params.workstream,
+                params.product,
+                params.service,
+            ),
+            // Strategy 3: Match without enterpriseName (if it was missing during storage)
+            this.buildContextKey(
+                params.accountId,
+                params.accountName,
+                params.enterpriseId,
+                undefined,
+                params.workstream,
+                params.product,
+                params.service,
+            ),
+            // Strategy 4: Match with only IDs and workstream/product/service
+            this.buildContextKey(
+                params.accountId,
+                undefined,
+                params.enterpriseId,
+                undefined,
+                params.workstream,
+                params.product,
+                params.service,
+            ),
+            // Strategy 5: Match without workstream/product/service (legacy tokens)
+            this.buildContextKey(
+                params.accountId,
+                params.accountName,
+                params.enterpriseId,
+                params.enterpriseName,
+                undefined,
+                undefined,
+                undefined,
+            ),
+            // Strategy 6: Match with only IDs (most basic match)
+            this.buildContextKey(
+                params.accountId,
+                undefined,
+                params.enterpriseId,
+                undefined,
+                undefined,
+                undefined,
+                undefined,
+            ),
+        ];
 
-        // Query for tokens matching the context
-        const items = await DynamoDBOperations.queryItems(
-            this.tableName,
-            'PK = :pk',
-            {':pk': PK},
-        );
+        // Remove duplicates
+        const uniqueStrategies = [...new Set(lookupStrategies)];
 
-        if (!items || items.length === 0) {
-            return null;
-        }
+        console.log('🔍 [GitHubOAuth] Trying lookup strategies:', uniqueStrategies);
 
-        // Get the most recent token
-        const tokenItem = items.sort(
-            (a, b) =>
-                new Date(b.created_at || b.createdAt || 0).getTime() -
-                new Date(a.created_at || a.createdAt || 0).getTime(),
-        )[0];
+        for (const contextKey of uniqueStrategies) {
+            const PK = `GITHUB_OAUTH#${contextKey}`;
+            console.log(`🔍 [GitHubOAuth] Querying with PK: ${PK}`);
 
-        // Decrypt the token
-        try {
-            const encryptedTokenData: EncryptedToken = JSON.parse(
-                tokenItem.access_token || tokenItem.accessToken,
+            // Query for tokens matching the context
+            const items = await DynamoDBOperations.queryItems(
+                this.tableName,
+                'PK = :pk',
+                {':pk': PK},
             );
-            const decrypted = decryptToken(encryptedTokenData);
-            return decrypted.token;
-        } catch (error) {
-            console.error('Failed to decrypt token:', error);
-            return null;
+
+            console.log(`🔍 [GitHubOAuth] Found ${items?.length || 0} items for PK: ${PK}`);
+
+            if (items && items.length > 0) {
+                // Filter items by accountId, enterpriseId, workstream, product, and service if provided (for exact match)
+                let matchingItems = items;
+                if (params.accountId || params.enterpriseId || params.workstream || params.product || params.service) {
+                    matchingItems = items.filter((item: any) => {
+                        const matchesAccountId = !params.accountId || 
+                            item.account_id === params.accountId || 
+                            item.accountId === params.accountId;
+                        const matchesEnterpriseId = !params.enterpriseId || 
+                            item.enterprise_id === params.enterpriseId || 
+                            item.enterpriseId === params.enterpriseId;
+                        const matchesWorkstream = !params.workstream || 
+                            item.workstream === params.workstream;
+                        const matchesProduct = !params.product || 
+                            item.product === params.product;
+                        const matchesService = !params.service || 
+                            item.service === params.service;
+                        return matchesAccountId && matchesEnterpriseId && matchesWorkstream && matchesProduct && matchesService;
+                    });
+                    console.log(`🔍 [GitHubOAuth] Filtered to ${matchingItems.length} items matching accountId/enterpriseId/workstream/product/service`);
+                }
+
+                if (matchingItems.length > 0) {
+                    // Get the most recent token
+                    const tokenItem = matchingItems.sort(
+                        (a, b) =>
+                            new Date(b.created_at || b.createdAt || 0).getTime() -
+                            new Date(a.created_at || a.createdAt || 0).getTime(),
+                    )[0];
+
+                    console.log('✅ [GitHubOAuth] Found matching token item:', {
+                        id: tokenItem.id,
+                        accountId: tokenItem.account_id || tokenItem.accountId,
+                        enterpriseId: tokenItem.enterprise_id || tokenItem.enterpriseId,
+                        createdAt: tokenItem.created_at || tokenItem.createdAt,
+                    });
+
+                    // Decrypt the token
+                    try {
+                        const encryptedTokenData: EncryptedToken = JSON.parse(
+                            tokenItem.access_token || tokenItem.accessToken,
+                        );
+                        const decrypted = decryptToken(encryptedTokenData);
+                        console.log('✅ [GitHubOAuth] Successfully decrypted token');
+                        return decrypted.token;
+                    } catch (error) {
+                        console.error('❌ [GitHubOAuth] Failed to decrypt token:', error);
+                        // Continue to next strategy
+                    }
+                }
+            }
         }
+
+        // If PK-based queries failed, try scanning by accountId/enterpriseId directly
+        // This handles cases where tokens were stored with accountName/enterpriseName in PK
+        // but we only have IDs during lookup
+        // Also handles cases where tokens were stored without accountId/enterpriseId (DEFAULT PK)
+        
+        // First, try to find account-specific tokens
+        if (params.accountId && params.enterpriseId) {
+            console.log('🔍 [GitHubOAuth] PK queries failed, trying scan by accountId/enterpriseId');
+            
+            try {
+                // Scan for all GitHub OAuth tokens, then filter by accountId/enterpriseId
+                const allItems = await DynamoDBOperations.scanItems(
+                    this.tableName,
+                    'entity_type = :entityType',
+                    {':entityType': 'GITHUB_OAUTH_TOKEN'},
+                );
+
+                console.log(`🔍 [GitHubOAuth] Scanned ${allItems?.length || 0} total OAuth tokens`);
+
+                if (allItems && allItems.length > 0) {
+                    // Log sample of stored tokens to debug structure
+                    const sampleTokens = allItems.slice(0, 3);
+                    console.log('🔍 [GitHubOAuth] Sample stored tokens (first 3):', 
+                        sampleTokens.map((item: any) => ({
+                            PK: item.PK,
+                            accountId: item.account_id || item.accountId,
+                            accountName: item.account_name || item.accountName,
+                            enterpriseId: item.enterprise_id || item.enterpriseId,
+                            enterpriseName: item.enterprise_name || item.enterpriseName,
+                            workstream: item.workstream,
+                            product: item.product,
+                            service: item.service,
+                            createdAt: item.created_at || item.createdAt,
+                            // Show all keys to see field structure
+                            allKeys: Object.keys(item).filter(k => !k.startsWith('access_token')),
+                        }))
+                    );
+
+                    // Filter by accountId, enterpriseId, workstream, product, and service (checking both snake_case and camelCase field names)
+                    const matchingItems = allItems.filter((item: any) => {
+                        const itemAccountId = item.account_id || item.accountId;
+                        const itemEnterpriseId = item.enterprise_id || item.enterpriseId;
+                        const itemWorkstream = item.workstream;
+                        const itemProduct = item.product;
+                        const itemService = item.service;
+                        
+                        const matchesAccountId = !params.accountId || itemAccountId === params.accountId;
+                        const matchesEnterpriseId = !params.enterpriseId || itemEnterpriseId === params.enterpriseId;
+                        const matchesWorkstream = !params.workstream || itemWorkstream === params.workstream;
+                        const matchesProduct = !params.product || itemProduct === params.product;
+                        const matchesService = !params.service || itemService === params.service;
+                        
+                        const matches = matchesAccountId && matchesEnterpriseId && matchesWorkstream && matchesProduct && matchesService;
+                        
+                        if (matches) {
+                            console.log('✅ [GitHubOAuth] Found matching token:', {
+                                PK: item.PK,
+                                accountId: itemAccountId,
+                                enterpriseId: itemEnterpriseId,
+                                accountName: item.account_name || item.accountName,
+                                enterpriseName: item.enterprise_name || item.enterpriseName,
+                                workstream: itemWorkstream,
+                                product: itemProduct,
+                                service: itemService,
+                            });
+                        }
+                        
+                        return matches;
+                    });
+
+                    // If no matches, log what we're looking for vs what exists
+                    if (matchingItems.length === 0) {
+                        console.log('❌ [GitHubOAuth] No matches found. Looking for:', {
+                            accountId: params.accountId,
+                            enterpriseId: params.enterpriseId,
+                            workstream: params.workstream,
+                            product: params.product,
+                            service: params.service,
+                        });
+                        console.log('❌ [GitHubOAuth] Available accountIds in stored tokens:', 
+                            [...new Set(allItems.map((item: any) => item.account_id || item.accountId).filter(Boolean))].slice(0, 10)
+                        );
+                        console.log('❌ [GitHubOAuth] Available enterpriseIds in stored tokens:', 
+                            [...new Set(allItems.map((item: any) => item.enterprise_id || item.enterpriseId).filter(Boolean))].slice(0, 10)
+                        );
+                        console.log('❌ [GitHubOAuth] Available workstreams in stored tokens:', 
+                            [...new Set(allItems.map((item: any) => item.workstream).filter(Boolean))].slice(0, 10)
+                        );
+                        console.log('❌ [GitHubOAuth] Available products in stored tokens:', 
+                            [...new Set(allItems.map((item: any) => item.product).filter(Boolean))].slice(0, 10)
+                        );
+                        console.log('❌ [GitHubOAuth] Available services in stored tokens:', 
+                            [...new Set(allItems.map((item: any) => item.service).filter(Boolean))].slice(0, 10)
+                        );
+                    }
+
+                    console.log(`🔍 [GitHubOAuth] Found ${matchingItems.length} tokens matching accountId/enterpriseId/workstream/product/service after scan`);
+
+                    if (matchingItems.length > 0) {
+                        // Get the most recent token
+                        const tokenItem = matchingItems.sort(
+                            (a, b) =>
+                                new Date(b.created_at || b.createdAt || 0).getTime() -
+                                new Date(a.created_at || a.createdAt || 0).getTime(),
+                        )[0];
+
+                        console.log('✅ [GitHubOAuth] Found matching token via scan:', {
+                            id: tokenItem.id,
+                            accountId: tokenItem.account_id || tokenItem.accountId,
+                            enterpriseId: tokenItem.enterprise_id || tokenItem.enterpriseId,
+                            accountName: tokenItem.account_name || tokenItem.accountName,
+                            enterpriseName: tokenItem.enterprise_name || tokenItem.enterpriseName,
+                            PK: tokenItem.PK,
+                            createdAt: tokenItem.created_at || tokenItem.createdAt,
+                        });
+
+                        // Decrypt the token
+                        try {
+                            const encryptedTokenData: EncryptedToken = JSON.parse(
+                                tokenItem.access_token || tokenItem.accessToken,
+                            );
+                            const decrypted = decryptToken(encryptedTokenData);
+                            console.log('✅ [GitHubOAuth] Successfully decrypted token from scan');
+                            return decrypted.token;
+                        } catch (error) {
+                            console.error('❌ [GitHubOAuth] Failed to decrypt token from scan:', error);
+                        }
+                    }
+                }
+            } catch (scanError) {
+                console.error('❌ [GitHubOAuth] Error during scan:', scanError);
+            }
+        }
+
+        // Fallback: If no account-specific token found, try DEFAULT tokens
+        // This handles legacy tokens stored without accountId/enterpriseId
+        console.log('🔍 [GitHubOAuth] No account-specific token found, trying DEFAULT tokens');
+        try {
+            const defaultPK = 'GITHUB_OAUTH#DEFAULT';
+            const defaultItems = await DynamoDBOperations.queryItems(
+                this.tableName,
+                'PK = :pk',
+                {':pk': defaultPK},
+            );
+
+            console.log(`🔍 [GitHubOAuth] Found ${defaultItems?.length || 0} DEFAULT tokens`);
+
+            if (defaultItems && defaultItems.length > 0) {
+                // Get the most recent DEFAULT token
+                const tokenItem = defaultItems.sort(
+                    (a, b) =>
+                        new Date(b.created_at || b.createdAt || 0).getTime() -
+                        new Date(a.created_at || a.createdAt || 0).getTime(),
+                )[0];
+
+                console.log('✅ [GitHubOAuth] Using DEFAULT token (legacy token without account context):', {
+                    id: tokenItem.id,
+                    createdAt: tokenItem.created_at || tokenItem.createdAt,
+                });
+
+                // Decrypt the token
+                try {
+                    const encryptedTokenData: EncryptedToken = JSON.parse(
+                        tokenItem.access_token || tokenItem.accessToken,
+                    );
+                    const decrypted = decryptToken(encryptedTokenData);
+                    console.log('✅ [GitHubOAuth] Successfully decrypted DEFAULT token');
+                    return decrypted.token;
+                } catch (error) {
+                    console.error('❌ [GitHubOAuth] Failed to decrypt DEFAULT token:', error);
+                }
+            }
+        } catch (defaultError) {
+            console.error('❌ [GitHubOAuth] Error querying DEFAULT tokens:', defaultError);
+        }
+
+        console.log('❌ [GitHubOAuth] No token found with any lookup strategy');
+        return null;
     }
 
     /**
@@ -316,33 +728,89 @@ export class GitHubOAuthService {
         accountName?: string;
         enterpriseId?: string;
         enterpriseName?: string;
+        workstream?: string;
+        product?: string;
+        service?: string;
     }): Promise<string | null> {
         return withPg(async (client) => {
-            const result = await client.query(
-                `SELECT access_token FROM systiva.github_oauth_tokens 
-                 WHERE (user_id = $1 OR $1 IS NULL)
-                   AND (account_id = $2 OR $2 IS NULL)
-                   AND (enterprise_id = $3 OR $3 IS NULL)
-                 ORDER BY created_at DESC
-                 LIMIT 1`,
-                [params.userId || null, params.accountId || null, params.enterpriseId || null],
-            );
+            console.log('🔍 [GitHubOAuth] getTokenPostgres called with params:', {
+                accountId: params.accountId,
+                accountName: params.accountName,
+                enterpriseId: params.enterpriseId,
+                enterpriseName: params.enterpriseName,
+                userId: params.userId,
+            });
 
-            if (!result.rows || result.rows.length === 0) {
-                return null;
+            // Try multiple query strategies to handle cases where parameters might be missing
+            const queryStrategies = [
+                // Strategy 1: Match with accountId and enterpriseId (most specific)
+                {
+                    query: `SELECT access_token, account_id, enterprise_id, created_at 
+                            FROM systiva.github_oauth_tokens 
+                            WHERE account_id = $1 AND enterprise_id = $2
+                            ORDER BY created_at DESC
+                            LIMIT 1`,
+                    params: [params.accountId, params.enterpriseId],
+                    name: 'accountId + enterpriseId',
+                },
+                // Strategy 2: Match with accountId only
+                {
+                    query: `SELECT access_token, account_id, enterprise_id, created_at 
+                            FROM systiva.github_oauth_tokens 
+                            WHERE account_id = $1
+                            ORDER BY created_at DESC
+                            LIMIT 1`,
+                    params: [params.accountId],
+                    name: 'accountId only',
+                },
+                // Strategy 3: Match with enterpriseId only
+                {
+                    query: `SELECT access_token, account_id, enterprise_id, created_at 
+                            FROM systiva.github_oauth_tokens 
+                            WHERE enterprise_id = $1
+                            ORDER BY created_at DESC
+                            LIMIT 1`,
+                    params: [params.enterpriseId],
+                    name: 'enterpriseId only',
+                },
+            ];
+
+            for (const strategy of queryStrategies) {
+                // Skip strategies that require missing parameters
+                if (strategy.params.some((p) => !p)) {
+                    continue;
+                }
+
+                console.log(`🔍 [GitHubOAuth] Trying PostgreSQL query strategy: ${strategy.name}`);
+                const result = await client.query(strategy.query, strategy.params);
+
+                console.log(`🔍 [GitHubOAuth] Found ${result.rows?.length || 0} rows with strategy: ${strategy.name}`);
+
+                if (result.rows && result.rows.length > 0) {
+                    const tokenRow = result.rows[0];
+                    console.log('✅ [GitHubOAuth] Found matching token row:', {
+                        accountId: tokenRow.account_id,
+                        enterpriseId: tokenRow.enterprise_id,
+                        createdAt: tokenRow.created_at,
+                    });
+
+                    // Decrypt the token
+                    try {
+                        const encryptedTokenData: EncryptedToken = JSON.parse(
+                            tokenRow.access_token,
+                        );
+                        const decrypted = decryptToken(encryptedTokenData);
+                        console.log('✅ [GitHubOAuth] Successfully decrypted token');
+                        return decrypted.token;
+                    } catch (error) {
+                        console.error('❌ [GitHubOAuth] Failed to decrypt token:', error);
+                        // Continue to next strategy
+                    }
+                }
             }
 
-            // Decrypt the token
-            try {
-                const encryptedTokenData: EncryptedToken = JSON.parse(
-                    result.rows[0].access_token,
-                );
-                const decrypted = decryptToken(encryptedTokenData);
-                return decrypted.token;
-            } catch (error) {
-                console.error('Failed to decrypt token:', error);
-                return null;
-            }
+            console.log('❌ [GitHubOAuth] No token found with any PostgreSQL query strategy');
+            return null;
         });
     }
 
@@ -354,12 +822,18 @@ export class GitHubOAuthService {
         accountName?: string,
         enterpriseId?: string,
         enterpriseName?: string,
+        workstream?: string,
+        product?: string,
+        service?: string,
     ): string {
         const parts: string[] = [];
         if (enterpriseId) parts.push(`ENT#${enterpriseId}`);
         if (enterpriseName) parts.push(`ENT_NAME#${enterpriseName}`);
         if (accountId) parts.push(`ACC#${accountId}`);
         if (accountName) parts.push(`ACC_NAME#${accountName}`);
+        if (workstream) parts.push(`WS#${workstream}`);
+        if (product) parts.push(`PROD#${product}`);
+        if (service) parts.push(`SVC#${service}`);
         return parts.length > 0 ? parts.join('#') : 'DEFAULT';
     }
 }

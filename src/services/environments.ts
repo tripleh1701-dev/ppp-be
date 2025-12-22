@@ -16,6 +16,7 @@ export interface Environment {
     accountId?: string;
     accountName?: string;
     enterpriseId?: string;
+    enterpriseName?: string;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -44,7 +45,9 @@ export class EnvironmentsService {
                     tags jsonb,
                     environment_type text,
                     account_id text,
+                    account_name text,
                     enterprise_id text,
+                    enterprise_name text,
                     created_at timestamp default now(),
                     updated_at timestamp default now()
                 )
@@ -69,7 +72,9 @@ export class EnvironmentsService {
                         tags,
                         environment_type as "environmentType",
                         account_id as "accountId",
+                        account_name as "accountName",
                         enterprise_id as "enterpriseId",
+                        enterprise_name as "enterpriseName",
                         created_at as "createdAt",
                         updated_at as "updatedAt"
                      from ${this.schema}.environments
@@ -99,7 +104,9 @@ export class EnvironmentsService {
                         tags,
                         environment_type as "environmentType",
                         account_id as "accountId",
+                        account_name as "accountName",
                         enterprise_id as "enterpriseId",
+                        enterprise_name as "enterpriseName",
                         created_at as "createdAt",
                         updated_at as "updatedAt"
                      from ${this.schema}.environments
@@ -130,8 +137,8 @@ export class EnvironmentsService {
                 await c.query(
                     `insert into ${this.schema}.environments (
                         id, environment_name, details, deployment_type, test_connectivity,
-                        status, url, credential_name, tags, environment_type, account_id, enterprise_id
-                    ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+                        status, url, credential_name, tags, environment_type, account_id, account_name, enterprise_id, enterprise_name
+                    ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
                     [
                         newEnvironment.id,
                         newEnvironment.environmentName,
@@ -144,7 +151,9 @@ export class EnvironmentsService {
                         JSON.stringify(newEnvironment.tags || []),
                         newEnvironment.environmentType,
                         newEnvironment.accountId || null,
+                        newEnvironment.accountName || null,
                         newEnvironment.enterpriseId || null,
+                        newEnvironment.enterpriseName || null,
                     ],
                 );
             });
@@ -208,9 +217,17 @@ export class EnvironmentsService {
                     setClauses.push(`account_id = $${paramIndex++}`);
                     values.push(updates.accountId);
                 }
+                if (updates.accountName !== undefined) {
+                    setClauses.push(`account_name = $${paramIndex++}`);
+                    values.push(updates.accountName);
+                }
                 if (updates.enterpriseId !== undefined) {
                     setClauses.push(`enterprise_id = $${paramIndex++}`);
                     values.push(updates.enterpriseId);
+                }
+                if (updates.enterpriseName !== undefined) {
+                    setClauses.push(`enterprise_name = $${paramIndex++}`);
+                    values.push(updates.enterpriseName);
                 }
 
                 setClauses.push(`updated_at = now()`);
@@ -232,7 +249,9 @@ export class EnvironmentsService {
                         tags,
                         environment_type as "environmentType",
                         account_id as "accountId",
+                        account_name as "accountName",
                         enterprise_id as "enterpriseId",
+                        enterprise_name as "enterpriseName",
                         created_at as "createdAt",
                         updated_at as "updatedAt"`,
                     values,
