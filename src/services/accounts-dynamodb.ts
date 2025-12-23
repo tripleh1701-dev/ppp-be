@@ -205,16 +205,26 @@ export class AccountsDynamoDBService {
             );
 
             // Scan the account registry table for all accounts
-            // Filter for entityType = 'ACCOUNT' or PK begins_with 'ACCOUNT#'
-            const items = await DynamoDBOperations.scanItems(
+            // Don't use filter - scan all items and filter in code
+            // This handles both entityType = 'ACCOUNT' and PK starts with 'ACCOUNT#'
+            const allItems = await DynamoDBOperations.scanItems(
                 this.accountRegistryTable,
-                'entityType = :entityType',
-                {
-                    ':entityType': 'ACCOUNT',
-                },
             );
 
-            console.log(`✅ Found ${items.length} accounts in registry`);
+            console.log(`📋 Raw scan returned ${allItems.length} items`);
+
+            // Filter for accounts only (entityType = 'ACCOUNT' OR PK starts with 'ACCOUNT#')
+            const items = allItems.filter((item: any) => {
+                // Check entityType field
+                if (item.entityType === 'ACCOUNT') return true;
+                // Check PK field (admin-portal format: ACCOUNT#12345678)
+                if (item.PK && item.PK.startsWith('ACCOUNT#')) return true;
+                // Check if it has accountName and accountId (likely an account record)
+                if (item.accountName && (item.accountId || item.PK)) return true;
+                return false;
+            });
+
+            console.log(`✅ Found ${items.length} accounts in registry (filtered from ${allItems.length} total items)`);
 
             // Map admin-portal schema to our Account format
             return items.map((item: any) => {
