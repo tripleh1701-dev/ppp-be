@@ -1,127 +1,255 @@
 /**
- * AWS Lambda Handler for NestJS Application
+ * Simplified AWS Lambda Handler for ppp-be-main
  *
- * This file provides the Lambda handler function that wraps the NestJS application
- * for serverless deployment on AWS Lambda behind API Gateway.
+ * This handler directly processes API requests without full NestJS overhead
+ * to ensure reliable Lambda execution.
  */
 
 import 'reflect-metadata';
-import {NestFactory} from '@nestjs/core';
-import {ExpressAdapter} from '@nestjs/platform-express';
-import serverlessExpress from '@vendia/serverless-express';
-import express, {Express} from 'express';
-import {AppModule} from './main';
 import * as dotenv from 'dotenv';
+import {AccountsDynamoDBService} from './services/accounts-dynamodb';
+import {EnterprisesDynamoDBService} from './services/enterprises-dynamodb';
+import {ProductsDynamoDBService} from './services/products-dynamodb';
+import {ServicesDynamoDBService} from './services/services-dynamodb';
 
 // Load environment variables
 dotenv.config();
 
-// Cache the serverless express instance for warm starts
-let cachedServer: any;
-
-/**
- * Bootstrap the NestJS application for Lambda
- */
-async function bootstrap(): Promise<any> {
-    console.log('🚀 Bootstrapping NestJS app for Lambda...');
-    console.log('📊 Environment:', {
-        NODE_ENV: process.env.NODE_ENV || 'not set',
-        WORKSPACE: process.env.WORKSPACE || 'not set',
-        STORAGE_MODE: process.env.STORAGE_MODE || 'dynamodb',
-        DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE || 'not set',
-        ACCOUNT_REGISTRY_TABLE_NAME: process.env.ACCOUNT_REGISTRY_TABLE_NAME || 'not set',
-    });
-
-    const expressApp: Express = express();
-
-    // Create NestJS app with Express adapter
-    const adapter = new ExpressAdapter(expressApp);
-    const app = await NestFactory.create(AppModule, adapter, {
-        logger: ['error', 'warn', 'log'],
-    });
-
-    // Configure CORS
-    const allowedOrigins = process.env.ALLOWED_ORIGINS
-        ? process.env.ALLOWED_ORIGINS.split(',')
-        : ['*'];
-
-    app.enableCors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (like Lambda invocations)
-            if (!origin) return callback(null, true);
-
-            // Allow all origins in development/staging
-            if (allowedOrigins.includes('*')) return callback(null, true);
-
-            if (allowedOrigins.includes(origin)) {
-                callback(null, true);
-            } else {
-                console.warn(`CORS blocked origin: ${origin}`);
-                callback(null, true); // Allow anyway for API Gateway
-            }
-        },
-        credentials: true,
-        methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
-    });
-
-    // Initialize the app
-    await app.init();
-
-    console.log('✅ NestJS app initialized for Lambda');
-
-    // Create serverless express handler
-    return serverlessExpress({app: expressApp});
-}
-
-/**
- * Lambda Handler
- *
- * This is the entry point for AWS Lambda. It creates or reuses
- * the NestJS application instance and handles the incoming request.
- */
-export const handler = async (event: any, context: any): Promise<any> => {
-    console.log('📨 Lambda invoked:', {
-        path: event.path || event.rawPath,
-        method: event.httpMethod || event.requestContext?.http?.method,
-        resource: event.resource,
-    });
-
-    try {
-        // Reuse cached server for warm starts
-        if (!cachedServer) {
-            console.log('🔄 Cold start - initializing server...');
-            cachedServer = await bootstrap();
-        } else {
-            console.log('♻️ Warm start - reusing cached server');
-        }
-
-        // Handle the request
-        const response = await cachedServer(event, context);
-        console.log('✅ Response status:', response.statusCode);
-        return response;
-    } catch (error: any) {
-        console.error('❌ Lambda handler error:', error);
-        return {
-            statusCode: 500,
-            headers: {
-                'Content-Type': 'application/json',
-                'Access-Control-Allow-Origin': '*',
-                'Access-Control-Allow-Headers': 'Content-Type,Authorization',
-            },
-            body: JSON.stringify({
-                error: 'Internal Server Error',
-                message: error?.message || 'Unknown error',
-                timestamp: new Date().toISOString(),
-            }),
-        };
-    }
+// CORS headers for all responses
+const CORS_HEADERS = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type,Authorization,X-Requested-With',
+    'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,PATCH,OPTIONS',
 };
 
-// For local testing
-if (process.env.LOCAL_DEVELOPMENT === 'true') {
-    const port = process.env.PORT || 4000;
-    bootstrap().then(() => {
-        console.log(`🚀 Local development server would run on port ${port}`);
-    });
+// Initialize services once (reused across warm starts)
+let accountsService: AccountsDynamoDBService | null = null;
+let enterprisesService: EnterprisesDynamoDBService | null = null;
+let productsService: ProductsDynamoDBService | null = null;
+let servicesService: ServicesDynamoDBService | null = null;
+
+function initServices(): void {
+    if (!accountsService) {
+        console.log('🔧 Initializing services...');
+        const STORAGE_DIR = process.env.STORAGE_DIR || '/tmp';
+        accountsService = new AccountsDynamoDBService();
+        enterprisesService = new EnterprisesDynamoDBService(STORAGE_DIR);
+        productsService = new ProductsDynamoDBService(STORAGE_DIR);
+        servicesService = new ServicesDynamoDBService(STORAGE_DIR);
+        console.log('✅ Services initialized');
+    }
 }
+
+// Helper to create response
+function response(statusCode: number, body: any): any {
+    return {
+        statusCode,
+        headers: CORS_HEADERS,
+        body: JSON.stringify(body),
+    };
+}
+
+// Helper to extract path from event
+function getPath(event: any): string {
+    // Handle both API Gateway v1 and v2 formats
+    let path = event.path || event.rawPath || '';
+
+    // Remove stage prefix if present (e.g., /prod, /dev)
+    const stage = event.requestContext?.stage;
+    if (stage && path.startsWith(`/${stage}`)) {
+        path = path.slice(stage.length + 1);
+    }
+
+    // Remove /api/v1/app prefix for routing (our proxy path)
+    if (path.startsWith('/api/v1/app')) {
+        path = path.slice('/api/v1/app'.length);
+    }
+
+    return path;
+}
+
+// Helper to get HTTP method
+function getMethod(event: any): string {
+    return (
+        event.httpMethod ||
+        event.requestContext?.http?.method ||
+        'GET'
+    ).toUpperCase();
+}
+
+// Helper to parse body
+function parseBody(event: any): any {
+    if (!event.body) return {};
+    try {
+        if (event.isBase64Encoded) {
+            return JSON.parse(Buffer.from(event.body, 'base64').toString());
+        }
+        return JSON.parse(event.body);
+    } catch {
+        return {};
+    }
+}
+
+/**
+ * Main Lambda Handler
+ */
+export const handler = async (event: any, context: any): Promise<any> => {
+    console.log('📨 Lambda invoked');
+    console.log('Event path:', event.path || event.rawPath);
+    console.log('Event method:', event.httpMethod || event.requestContext?.http?.method);
+
+    // Handle OPTIONS (CORS preflight)
+    if (getMethod(event) === 'OPTIONS') {
+        return response(200, {message: 'OK'});
+    }
+
+    try {
+        // Initialize services
+        initServices();
+
+        const path = getPath(event);
+        const method = getMethod(event);
+
+        console.log('🔀 Routing:', method, path);
+
+        // Health check
+        if (path === '/health' || path === '/api/health') {
+            return response(200, {
+                status: 'healthy',
+                timestamp: new Date().toISOString(),
+                version: '1.0.0',
+            });
+        }
+
+        // ============ ACCOUNTS ROUTES ============
+        if (path === '/api/accounts' && method === 'GET') {
+            console.log('📋 GET /api/accounts');
+            const accounts = await accountsService!.list();
+            return response(200, {
+                msg: 'Accounts retrieved successfully',
+                data: {
+                    accounts: accounts || [],
+                    totalCount: accounts?.length || 0,
+                    timestamp: new Date().toISOString(),
+                },
+                result: 'success',
+            });
+        }
+
+        if (path === '/api/accounts/onboard' && method === 'POST') {
+            console.log('📝 POST /api/accounts/onboard');
+            const body = parseBody(event);
+
+            // Validate required fields (only 3 required)
+            const requiredFields = ['accountName', 'masterAccount', 'subscriptionTier'];
+            const missingFields = requiredFields.filter((f) => !body[f]);
+
+            if (missingFields.length > 0) {
+                return response(400, {
+                    result: 'failed',
+                    msg: `Missing required fields: ${missingFields.join(', ')}`,
+                });
+            }
+
+            // Map subscriptionTier to cloudType for storage
+            let cloudType = body.subscriptionTier || '';
+            if (body.subscriptionTier) {
+                const tier = body.subscriptionTier.toLowerCase();
+                if (tier === 'private') {
+                    cloudType = 'Private Cloud';
+                } else if (tier === 'public' || tier === 'platform') {
+                    cloudType = 'Public Cloud';
+                }
+            }
+
+            // Create account using the service
+            const account = await accountsService!.create({
+                accountName: body.accountName,
+                masterAccount: body.masterAccount,
+                cloudType: cloudType,
+                email: body.email || body.technicalUser?.adminEmail || '',
+                firstName: body.firstName || body.technicalUser?.firstName || '',
+                lastName: body.lastName || body.technicalUser?.lastName || '',
+                status: body.status || 'Active',
+                technicalUsers: body.technicalUser ? [body.technicalUser] : [],
+                addresses: body.addressDetails ? [body.addressDetails] : [],
+            } as any);
+
+            return response(201, {
+                result: 'success',
+                msg: 'Account created successfully',
+                data: {
+                    account,
+                    accountId: account?.id,
+                },
+            });
+        }
+
+        // ============ ENTERPRISES ROUTES ============
+        if (path === '/api/enterprises' && method === 'GET') {
+            console.log('📋 GET /api/enterprises');
+            const enterprises = await enterprisesService!.list();
+            return response(200, enterprises || []);
+        }
+
+        if (path === '/api/enterprises' && method === 'POST') {
+            console.log('📝 POST /api/enterprises');
+            const body = parseBody(event);
+            const enterprise = await enterprisesService!.create(body);
+            return response(201, enterprise);
+        }
+
+        // ============ PRODUCTS ROUTES ============
+        if (path === '/api/products' && method === 'GET') {
+            console.log('📋 GET /api/products');
+            const products = await productsService!.list();
+            return response(200, products || []);
+        }
+
+        if (path === '/api/products' && method === 'POST') {
+            console.log('📝 POST /api/products');
+            const body = parseBody(event);
+            const product = await productsService!.create(body);
+            return response(201, product);
+        }
+
+        // ============ SERVICES ROUTES ============
+        if (path === '/api/services' && method === 'GET') {
+            console.log('📋 GET /api/services');
+            const svcList = await servicesService!.list();
+            return response(200, svcList || []);
+        }
+
+        if (path === '/api/services' && method === 'POST') {
+            console.log('📝 POST /api/services');
+            const body = parseBody(event);
+            const svc = await servicesService!.create(body);
+            return response(201, svc);
+        }
+
+        // ============ 404 NOT FOUND ============
+        console.log('❌ Route not found:', method, path);
+        return response(404, {
+            error: 'Not Found',
+            message: `Route ${method} ${path} not found`,
+            availableRoutes: [
+                'GET /api/accounts',
+                'POST /api/accounts/onboard',
+                'GET /api/enterprises',
+                'POST /api/enterprises',
+                'GET /api/products',
+                'POST /api/products',
+                'GET /api/services',
+                'POST /api/services',
+            ],
+        });
+    } catch (error: any) {
+        console.error('❌ Handler error:', error);
+        return response(500, {
+            error: 'Internal Server Error',
+            message: error?.message || 'Unknown error',
+            stack: process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
+        });
+    }
+};
