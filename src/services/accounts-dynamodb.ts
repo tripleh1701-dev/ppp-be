@@ -191,13 +191,17 @@ export class AccountsDynamoDBService {
                 }
 
                 // Must have accountName (non-empty string)
-                if (!item.accountName || String(item.accountName).trim() === '') {
+                if (
+                    !item.accountName ||
+                    String(item.accountName).trim() === ''
+                ) {
                     return false;
                 }
 
                 // Check entityType field OR PK format OR has accountId
                 if (item.entityType === 'ACCOUNT') return true;
-                if (pk.startsWith('ACCOUNT#') && !pk.includes('#AUDIT')) return true;
+                if (pk.startsWith('ACCOUNT#') && !pk.includes('#AUDIT'))
+                    return true;
                 if (item.accountId) return true;
 
                 return false;
@@ -210,8 +214,11 @@ export class AccountsDynamoDBService {
             // Deduplicate by accountId - keep the most complete record (latest updatedAt)
             const accountMap = new Map<string, any>();
             for (const item of filteredItems) {
-                const accountId = item.accountId ||
-                    (item.PK ? String(item.PK).replace('ACCOUNT#', '').split('#')[0] : '');
+                const accountId =
+                    item.accountId ||
+                    (item.PK
+                        ? String(item.PK).replace('ACCOUNT#', '').split('#')[0]
+                        : '');
 
                 if (!accountId) continue;
 
@@ -220,8 +227,12 @@ export class AccountsDynamoDBService {
                     accountMap.set(accountId, item);
                 } else {
                     // Keep the one with more complete data or newer timestamp
-                    const existingTime = new Date(existing.lastModified || existing.updatedAt || 0).getTime();
-                    const currentTime = new Date(item.lastModified || item.updatedAt || 0).getTime();
+                    const existingTime = new Date(
+                        existing.lastModified || existing.updatedAt || 0,
+                    ).getTime();
+                    const currentTime = new Date(
+                        item.lastModified || item.updatedAt || 0,
+                    ).getTime();
 
                     // Prefer item with provisioningState or newer timestamp
                     if (item.provisioningState && !existing.provisioningState) {
@@ -447,32 +458,57 @@ export class AccountsDynamoDBService {
             }
 
             // 2. Create Account Entity (with technical user ID if available)
+            // Use admin-portal format for compatibility: PK = ACCOUNT#{id}
             const accountItem = {
-                PK: `SYSTIVA#ACCOUNTS`,
+                PK: `ACCOUNT#${accountId}`,
                 SK: `ACCOUNT#${accountId}`,
-                id: accountId,
-                account_name: accountData.accountName,
-                master_account: accountData.masterAccount || '',
-                cloud_type: (accountData as any).cloudType || '',
+                accountId: accountId,
+                accountName: accountData.accountName,
+                masterAccount:
+                    accountData.masterAccount || accountData.accountName,
+                subscriptionTier:
+                    (accountData as any).subscriptionTier ||
+                    ((accountData as any).cloudType === 'Private Cloud'
+                        ? 'private'
+                        : 'public'),
+                cloudType: (accountData as any).cloudType || '',
                 address: (accountData as any).address || '',
                 country: accountData.country || '',
-                address_line1: accountData.addressLine1 || '',
-                addresses: (accountData as any).addresses || [],
-                technical_user_id: technicalUserId || null,
-                technical_username: technicalUsername || '',
-                created_date: now,
-                updated_date: now,
-                entity_type: 'ACCOUNT',
+                addressLine1: accountData.addressLine1 || '',
+                addressDetails: (accountData as any).addresses?.[0] || null,
+                technicalUser: (accountData as any).technicalUsers?.[0] || null,
+                adminUsername: technicalUsername || '',
+                email: (accountData as any).email || '',
+                firstName: (accountData as any).firstName || '',
+                lastName: (accountData as any).lastName || '',
+                status: (accountData as any).status || 'Active',
+                provisioningState: 'active',
+                entityType: 'ACCOUNT',
+                registeredOn: now,
+                createdAt: now,
+                lastModified: now,
+                updatedAt: now,
             };
 
             console.log(
-                '📝 Account entity to save:',
+                '📝 Account entity to save to table:',
+                this.accountRegistryTable,
+            );
+            console.log(
+                '📝 Account data:',
                 JSON.stringify(accountItem, null, 2),
             );
 
-            await DynamoDBOperations.putItem(this.tableName, accountItem);
+            // Save to accountRegistryTable (same table GET reads from)
+            await DynamoDBOperations.putItem(
+                this.accountRegistryTable,
+                accountItem,
+            );
 
-            console.log('✅ Account entity created successfully');
+            console.log(
+                '✅ Account entity created successfully in',
+                this.accountRegistryTable,
+            );
 
             // 3. Create Licenses if provided
             const licenses =

@@ -167,6 +167,7 @@ export const handler = async (event: any, context: any): Promise<any> => {
             const account = await accountsService!.create({
                 accountName: body.accountName,
                 masterAccount: body.masterAccount,
+                subscriptionTier: body.subscriptionTier,
                 cloudType: cloudType,
                 email: body.email || body.technicalUser?.adminEmail || '',
                 firstName: body.firstName || body.technicalUser?.firstName || '',
@@ -186,11 +187,27 @@ export const handler = async (event: any, context: any): Promise<any> => {
             });
         }
 
+        // PUT /api/accounts/:id
+        if (path.startsWith('/api/accounts/') && !path.includes('/onboard') && method === 'PUT') {
+            const id = path.replace('/api/accounts/', '');
+            console.log('📝 PUT /api/accounts/' + id);
+            const body = parseBody(event);
+            const account = await accountsService!.update(id, body);
+            return response(200, {
+                result: 'success',
+                msg: 'Account updated successfully',
+                data: { account },
+            });
+        }
+
         // ============ ENTERPRISES ROUTES ============
         if (path === '/api/enterprises' && method === 'GET') {
             console.log('📋 GET /api/enterprises');
             const enterprises = await enterprisesService!.list();
-            return response(200, enterprises || []);
+            return response(200, {
+                data: enterprises || [],
+                totalCount: enterprises?.length || 0,
+            });
         }
 
         if (path === '/api/enterprises' && method === 'POST') {
@@ -200,11 +217,23 @@ export const handler = async (event: any, context: any): Promise<any> => {
             return response(201, enterprise);
         }
 
+        // PUT /api/enterprises/:id
+        if (path.startsWith('/api/enterprises/') && method === 'PUT') {
+            const id = path.replace('/api/enterprises/', '');
+            console.log('📝 PUT /api/enterprises/' + id);
+            const body = parseBody(event);
+            const enterprise = await enterprisesService!.update(id, body);
+            return response(200, enterprise);
+        }
+
         // ============ PRODUCTS ROUTES ============
         if (path === '/api/products' && method === 'GET') {
             console.log('📋 GET /api/products');
             const products = await productsService!.list();
-            return response(200, products || []);
+            return response(200, {
+                data: products || [],
+                totalCount: products?.length || 0,
+            });
         }
 
         if (path === '/api/products' && method === 'POST') {
@@ -214,11 +243,23 @@ export const handler = async (event: any, context: any): Promise<any> => {
             return response(201, product);
         }
 
+        // PUT /api/products/:id
+        if (path.startsWith('/api/products/') && method === 'PUT') {
+            const id = path.replace('/api/products/', '');
+            console.log('📝 PUT /api/products/' + id);
+            const body = parseBody(event);
+            const product = await productsService!.update(id, body);
+            return response(200, product);
+        }
+
         // ============ SERVICES ROUTES ============
         if (path === '/api/services' && method === 'GET') {
             console.log('📋 GET /api/services');
             const svcList = await servicesService!.list();
-            return response(200, svcList || []);
+            return response(200, {
+                data: svcList || [],
+                totalCount: svcList?.length || 0,
+            });
         }
 
         if (path === '/api/services' && method === 'POST') {
@@ -226,6 +267,15 @@ export const handler = async (event: any, context: any): Promise<any> => {
             const body = parseBody(event);
             const svc = await servicesService!.create(body);
             return response(201, svc);
+        }
+
+        // PUT /api/services/:id
+        if (path.startsWith('/api/services/') && method === 'PUT') {
+            const id = path.replace('/api/services/', '');
+            console.log('📝 PUT /api/services/' + id);
+            const body = parseBody(event);
+            const svc = await servicesService!.update(id, body);
+            return response(200, svc);
         }
 
         // ============ 404 NOT FOUND ============
@@ -236,12 +286,16 @@ export const handler = async (event: any, context: any): Promise<any> => {
             availableRoutes: [
                 'GET /api/accounts',
                 'POST /api/accounts/onboard',
+                'PUT /api/accounts/:id',
                 'GET /api/enterprises',
                 'POST /api/enterprises',
+                'PUT /api/enterprises/:id',
                 'GET /api/products',
                 'POST /api/products',
+                'PUT /api/products/:id',
                 'GET /api/services',
                 'POST /api/services',
+                'PUT /api/services/:id',
             ],
         });
     } catch (error: any) {
