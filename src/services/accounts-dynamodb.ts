@@ -1,5 +1,19 @@
-import {v4 as uuidv4} from 'uuid';
+import * as crypto from 'crypto';
 import {DynamoDBOperations} from '../dynamodb';
+
+// Helper to generate UUID using Node.js crypto
+const uuidv4 = (): string => crypto.randomUUID();
+
+// Declare process for TypeScript
+declare const process: {
+    env: {
+        ACCOUNT_REGISTRY_TABLE_NAME?: string;
+        DYNAMODB_SYSTIVA_TABLE?: string;
+        WORKSPACE?: string;
+        NODE_ENV?: string;
+        [key: string]: string | undefined;
+    };
+};
 
 export interface Account {
     id: string;
@@ -73,97 +87,199 @@ export interface License {
 
 export class AccountsDynamoDBService {
     private readonly tableName: string;
+    private readonly accountRegistryTable: string;
 
     constructor() {
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Primary table: ACCOUNT_REGISTRY_TABLE_NAME (same as admin-portal-be workflow 06)
+        // This is where accounts are stored via the onboarding workflow
+        this.accountRegistryTable =
+            process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
+            `admin-portal-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }-account-registry`;
+
+        // Fallback/legacy table (not currently used in production)
+        this.tableName =
+            process.env.DYNAMODB_SYSTIVA_TABLE || this.accountRegistryTable;
+
+        console.log('📋 AccountsDynamoDBService initialized with tables:', {
+            accountRegistryTable: this.accountRegistryTable,
+            tableName: this.tableName,
+        });
     }
 
     async list(): Promise<Account[]> {
         try {
             console.log(
                 '📋 Listing accounts from DynamoDB table:',
-                this.tableName,
+                this.accountRegistryTable,
             );
 
-            // Query accounts with PK pattern
-            const items = await DynamoDBOperations.queryItems(
-                this.tableName,
-                'PK = :pk AND begins_with(SK, :sk)',
-                {
-                    ':pk': 'SYSTIVA#ACCOUNTS',
-                    ':sk': 'ACCOUNT#',
-                },
+            // Query accounts from account registry table (same as admin-portal-be workflow 06)
+            // This is the single source of truth for accounts
+            const baseAccounts = await this.listFromAccountRegistry();
+            console.log(
+                `✅ Found ${baseAccounts.length} accounts from account registry`,
             );
 
-            console.log(`✅ Found ${items.length} accounts`);
-
-            // For each account, fetch its licenses and technical users
+            // For each account, fetch its licenses, technical users, and addresses
             const accountsWithRelations = await Promise.all(
-                items.map(async (item) => {
-                    const accountId = item.id;
+                baseAccounts.map(async (account) => {
+                    const accountId = account.id || account.accountId;
 
                     // Fetch licenses for this account (handle errors gracefully)
-                    let licenses: any[] = [];
+                    let licenses: any[] = account.licenses || [];
                     try {
-                        licenses = await this.listLicenses(accountId);
+                        const fetchedLicenses = await this.listLicenses(
+                            accountId,
+                        );
+                        if (fetchedLicenses && fetchedLicenses.length > 0) {
+                            licenses = fetchedLicenses;
+                        }
                     } catch (error) {
                         console.warn(
                             `⚠️ Could not fetch licenses for account ${accountId}:`,
                             error,
                         );
-                        licenses = [];
                     }
 
-                    // Fetch technical user for this account (handle errors gracefully)
+                    // Fetch technical users for this account (handle errors gracefully)
+                    let technicalUsers: any[] = account.technicalUsers || [];
                     let technicalUser: any = null;
                     try {
                         technicalUser = await this.getTechnicalUser(accountId);
+                        if (technicalUser) {
+                            technicalUsers = [technicalUser];
+                        }
                     } catch (error) {
                         console.warn(
                             `⚠️ Could not fetch technical user for account ${accountId}:`,
                             error,
                         );
-                        technicalUser = null;
                     }
 
-                    console.log(`📊 DynamoDB item for ${item.account_name}:`, {
-                        addresses: item.addresses,
-                        address: item.address,
-                        addressLine1: item.address_line1,
-                        allKeys: Object.keys(item),
+                    // Addresses are already included from listFromAccountRegistry()
+                    const addresses: any[] = account.addresses || [];
+
+                    console.log(`📊 Account ${account.accountName}:`, {
+                        licensesCount: licenses.length,
+                        technicalUsersCount: technicalUsers.length,
+                        addressesCount: addresses.length,
                     });
 
                     return {
-                        id: item.id || item.SK?.replace('ACCOUNT#', ''),
-                        accountName:
-                            item.account_name || item.accountName || '',
-                        masterAccount:
-                            item.master_account || item.masterAccount || '',
-                        cloudType: item.cloud_type || item.cloudType || '',
-                        address: item.address || '',
-                        country: item.country || '',
-                        addressLine1:
-                            item.address_line1 || item.addressLine1 || '',
-                        addresses: item.addresses || [],
-                        // Note: technicalUsers are fetched separately via user management API with technical_user=true filter
+                        ...account,
+                        licenses: licenses,
+                        technicalUsers: technicalUsers,
                         technicalUsername:
-                            item.technical_username ||
+                            account.technicalUsername ||
                             technicalUser?.username ||
+                            technicalUser?.adminUsername ||
                             '',
                         technicalUserId:
-                            item.technical_user_id || technicalUser?.id || '',
-                        licenses: licenses || [],
-                        createdAt: item.created_date || item.createdAt,
-                        updatedAt: item.updated_date || item.updatedAt,
+                            account.technicalUserId || technicalUser?.id || '',
+                        addresses: addresses,
                     };
                 }),
             );
 
+            // Sort by account name and return
             return accountsWithRelations.sort((a, b) =>
                 (a.accountName || '').localeCompare(b.accountName || ''),
             );
         } catch (error) {
             console.error('❌ Error listing accounts:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * List accounts from admin-portal account registry table
+     * This queries the table where accounts are stored via the onboarding workflow
+     */
+    async listFromAccountRegistry(): Promise<any[]> {
+        try {
+            console.log(
+                '📋 Scanning account registry table:',
+                this.accountRegistryTable,
+            );
+
+            // Scan the account registry table for all accounts
+            // Filter for entityType = 'ACCOUNT' or PK begins_with 'ACCOUNT#'
+            const items = await DynamoDBOperations.scanItems(
+                this.accountRegistryTable,
+                'entityType = :entityType',
+                {
+                    ':entityType': 'ACCOUNT',
+                },
+            );
+
+            console.log(`✅ Found ${items.length} accounts in registry`);
+
+            // Map admin-portal schema to our Account format
+            return items.map((item: any) => {
+                // Extract accountId from PK (format: ACCOUNT#12345678)
+                const accountId =
+                    item.accountId ||
+                    (item.PK ? item.PK.replace('ACCOUNT#', '') : '');
+
+                // Map subscriptionTier to cloudType display value
+                let cloudType = item.cloudType || '';
+                if (item.subscriptionTier) {
+                    const tier = item.subscriptionTier.toLowerCase();
+                    if (tier === 'private') {
+                        cloudType = 'Private Cloud';
+                    } else if (tier === 'public' || tier === 'platform') {
+                        cloudType = 'Public Cloud';
+                    } else {
+                        cloudType = item.subscriptionTier;
+                    }
+                }
+
+                return {
+                    // Use accountId for id to match expected format
+                    id: accountId,
+                    accountId: accountId,
+                    accountName: item.accountName || '',
+                    masterAccount: item.masterAccount || item.accountName || '',
+                    cloudType: cloudType,
+                    subscriptionTier: item.subscriptionTier || '',
+                    // Address fields
+                    address: item.address || '',
+                    country: item.addressDetails?.country || item.country || '',
+                    addressLine1: item.addressDetails?.addressLine1 || '',
+                    addressLine2: item.addressDetails?.addressLine2 || '',
+                    city: item.addressDetails?.city || '',
+                    state: item.addressDetails?.state || '',
+                    addresses: item.addressDetails ? [item.addressDetails] : [],
+                    // Technical user fields
+                    technicalUsername:
+                        item.technicalUser?.adminUsername ||
+                        item.adminUsername ||
+                        '',
+                    technicalUserId: '',
+                    technicalUsers: item.technicalUser
+                        ? [item.technicalUser]
+                        : [],
+                    // Other fields
+                    email: item.email || item.adminEmail || '',
+                    firstName: item.firstName || '',
+                    lastName: item.lastName || '',
+                    status: item.provisioningState || item.status || 'Active',
+                    provisioningState: item.provisioningState || '',
+                    licenses: [],
+                    createdAt:
+                        item.registeredOn ||
+                        item.createdAt ||
+                        item.created_date,
+                    updatedAt:
+                        item.lastModified ||
+                        item.updatedAt ||
+                        item.updated_date,
+                };
+            });
+        } catch (error) {
+            console.error('❌ Error listing from account registry:', error);
             throw error;
         }
     }
