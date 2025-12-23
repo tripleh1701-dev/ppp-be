@@ -93,19 +93,20 @@ const accounts = new AccountsService(STORAGE_DIR);
 
 // Initialize DynamoDB services immediately based on storage mode
 // This ensures they are available when controllers are instantiated
-let accountsDynamoDB: AccountsDynamoDBService | null = null;
+// Using definite assignment assertion (!) to indicate these will be initialized before use
+let accountsDynamoDB: AccountsDynamoDBService;
 let enterprises: any;
 let services: any;
 let products: any;
 let enterpriseProductsServices: any;
-let accountLicenses: AccountLicensesDynamoDBService | null = null;
-let userManagement: UserManagementDynamoDBService | null = null;
-let AccessControl_Service: AccessControl_DynamoDBService | null = null;
+let accountLicenses: AccountLicensesDynamoDBService;
+let userManagement: UserManagementDynamoDBService;
+let AccessControl_Service: AccessControl_DynamoDBService;
 let environments: any;
-let globalSettings: GlobalSettingsDynamoDBService | null = null;
-let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
-let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
-let buildsDynamoDB: BuildsDynamoDBService | null = null;
+let globalSettings: GlobalSettingsDynamoDBService;
+let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService;
+let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService;
+let buildsDynamoDB: BuildsDynamoDBService;
 
 // Initialize services based on storage mode at module load time
 if (storageMode === 'dynamodb') {
