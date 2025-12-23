@@ -90,21 +90,21 @@ export class AccountsDynamoDBService {
     private readonly accountRegistryTable: string;
 
     constructor() {
-        // Primary table: ACCOUNT_REGISTRY_TABLE_NAME (same as admin-portal-be workflow 06)
-        // This is where accounts are stored via the onboarding workflow
-        this.accountRegistryTable =
-            process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
-            `admin-portal-${
-                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
-            }-account-registry`;
-
-        // Fallback/legacy table (not currently used in production)
+        // Primary table: DYNAMODB_SYSTIVA_TABLE (systiva-admin-dev)
+        // This is the main database for ppp-be accounts
         this.tableName =
-            process.env.DYNAMODB_SYSTIVA_TABLE || this.accountRegistryTable;
+            process.env.DYNAMODB_SYSTIVA_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
+
+        // Account registry table for fetching accounts (may be same table)
+        this.accountRegistryTable =
+            process.env.ACCOUNT_REGISTRY_TABLE_NAME || this.tableName;
 
         console.log('📋 AccountsDynamoDBService initialized with tables:', {
-            accountRegistryTable: this.accountRegistryTable,
             tableName: this.tableName,
+            accountRegistryTable: this.accountRegistryTable,
         });
     }
 
