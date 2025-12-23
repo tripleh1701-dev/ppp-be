@@ -76,30 +76,71 @@ try {
     GEO_DATA = {};
 }
 
+// Initialize storage mode from environment variables immediately
+// This must happen before services are used by controllers
+const storageMode: string = process.env.STORAGE_MODE || 'dynamodb';
+console.log('🔧 Storage mode (from env):', storageMode);
+console.log('🔧 Environment variables at load time:', {
+    STORAGE_MODE: process.env.STORAGE_MODE,
+    NODE_ENV: process.env.NODE_ENV,
+    WORKSPACE: process.env.WORKSPACE,
+    ACCOUNT_REGISTRY_TABLE_NAME: process.env.ACCOUNT_REGISTRY_TABLE_NAME,
+    DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+});
+
 // Providers (plain classes)
 const accounts = new AccountsService(STORAGE_DIR);
-let accountsDynamoDB: AccountsDynamoDBService | null = null;
 
-// Global service variables - will be initialized in bootstrap after env vars are loaded
-let storageMode: string;
+// Initialize DynamoDB services immediately based on storage mode
+// This ensures they are available when controllers are instantiated
+let accountsDynamoDB: AccountsDynamoDBService | null = null;
 let enterprises: any;
+let services: any;
+let products: any;
+let enterpriseProductsServices: any;
+let accountLicenses: AccountLicensesDynamoDBService | null = null;
+let userManagement: UserManagementDynamoDBService | null = null;
+let AccessControl_Service: AccessControl_DynamoDBService | null = null;
+let environments: any;
+let globalSettings: GlobalSettingsDynamoDBService | null = null;
+let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
+let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
+let buildsDynamoDB: BuildsDynamoDBService | null = null;
+
+// Initialize services based on storage mode at module load time
+if (storageMode === 'dynamodb') {
+    console.log('🔧 Initializing DynamoDB services at module load...');
+    try {
+        accountsDynamoDB = new AccountsDynamoDBService();
+        enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
+        services = new ServicesDynamoDBService(STORAGE_DIR);
+        products = new ProductsDynamoDBService(STORAGE_DIR);
+        enterpriseProductsServices = new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
+        accountLicenses = new AccountLicensesDynamoDBService();
+        userManagement = new UserManagementDynamoDBService();
+        AccessControl_Service = new AccessControl_DynamoDBService();
+        environments = new EnvironmentsDynamoDBService();
+        globalSettings = new GlobalSettingsDynamoDBService();
+        pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
+        buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
+        buildsDynamoDB = new BuildsDynamoDBService();
+        console.log('✅ DynamoDB services initialized successfully');
+    } catch (error) {
+        console.error('❌ Failed to initialize DynamoDB services:', error);
+    }
+} else {
+    console.log('🔧 Using filesystem/postgres services');
+    enterprises = new EnterprisesService(STORAGE_DIR);
+    services = new ServicesService(STORAGE_DIR);
+    products = new ProductsService(STORAGE_DIR);
+    enterpriseProductsServices = new EnterpriseProductsServicesService(STORAGE_DIR);
+    environments = new EnvironmentsService(STORAGE_DIR);
+}
 
 const businessUnits = new BusinessUnitsService(STORAGE_DIR);
 const templates = new TemplatesService(STORAGE_DIR);
 const pipelineYaml = new PipelineYamlService(STORAGE_DIR);
 const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
-// Global service variables - will be initialized in bootstrap after env vars are loaded
-let services: any;
-let products: any;
-let enterpriseProductsServices: any;
-let accountLicenses: AccountLicensesDynamoDBService;
-let userManagement: UserManagementDynamoDBService;
-let AccessControl_Service: AccessControl_DynamoDBService;
-let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
-let globalSettings: GlobalSettingsDynamoDBService;
-let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
-let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
-let buildsDynamoDB: BuildsDynamoDBService | null = null;
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -7705,18 +7746,25 @@ async function bootstrap() {
             console.log('✅ Token encryption key configured');
         }
 
-        // Load environment variables from config.env file
+        // Load environment variables from config.env file (for local development)
         dotenv.config({path: 'config.env'});
         dotenv.config(); // Also load from .env if it exists
 
-        storageMode = process.env.STORAGE_MODE || 'postgres';
-        console.log('Loaded Storage Mode:', storageMode);
+        // Note: storageMode is already initialized at module load time
+        // This is just for logging and connection testing in standalone mode
+        const currentStorageMode = process.env.STORAGE_MODE || 'dynamodb';
+        console.log('Bootstrap - Storage Mode:', currentStorageMode);
+        console.log('Bootstrap - Services already initialized:', {
+            accountsDynamoDB: !!accountsDynamoDB,
+            enterprises: !!enterprises,
+            services: !!services,
+        });
         console.log(
             'Use In-Memory DynamoDB:',
             process.env.USE_IN_MEMORY_DYNAMODB,
         );
 
-        if (storageMode === 'postgres') {
+        if (currentStorageMode === 'postgres') {
             console.log('Testing PostgreSQL connection...');
             const dbConnected = await testConnection();
             if (!dbConnected) {
@@ -7726,7 +7774,7 @@ async function bootstrap() {
                 process.exit(1);
             }
             console.log('PostgreSQL connection successful!');
-        } else if (storageMode === 'dynamodb') {
+        } else if (currentStorageMode === 'dynamodb') {
             console.log('Testing DynamoDB connection...');
             const dynamoConnected = await testDynamoDBConnection();
             if (!dynamoConnected) {
@@ -7750,10 +7798,15 @@ async function bootstrap() {
             console.log('DynamoDB connection successful!');
         }
 
-        // Initialize services based on storage mode after environment variables are loaded
-        console.log('Initializing services for storage mode:', storageMode);
+        // Services are already initialized at module load time
+        // This section is kept for backward compatibility and logging
+        console.log('Services status for storage mode:', currentStorageMode);
+        console.log('  accountsDynamoDB:', accountsDynamoDB ? 'initialized' : 'not initialized');
+        console.log('  enterprises:', enterprises ? 'initialized' : 'not initialized');
 
-        if (storageMode === 'dynamodb') {
+        // Re-initialize services only if not already done (should not happen normally)
+        if (currentStorageMode === 'dynamodb' && !accountsDynamoDB) {
+            console.log('⚠️ Re-initializing DynamoDB services in bootstrap (this should not happen)');
             accountsDynamoDB = new AccountsDynamoDBService();
             enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
             services = new ServicesDynamoDBService(STORAGE_DIR);
@@ -7767,15 +7820,9 @@ async function bootstrap() {
             pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
             buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
             buildsDynamoDB = new BuildsDynamoDBService();
-            // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
-            console.log('Accounts DynamoDB service initialized');
-            console.log('AccessControl DynamoDB service initialized');
-            console.log('UserManagement DynamoDB service initialized');
-            console.log('Environments DynamoDB service initialized');
-            console.log('GlobalSettings DynamoDB service initialized');
-            console.log('PipelineCanvas DynamoDB service initialized');
-        } else {
+        } else if (currentStorageMode !== 'dynamodb' && !enterprises) {
+            console.log('⚠️ Re-initializing filesystem services in bootstrap');
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
             products = new ProductsService(STORAGE_DIR);
