@@ -179,21 +179,62 @@ export class AccountsDynamoDBService {
                 );
             }
 
-            // Filter for accounts only (entityType = 'ACCOUNT' OR PK starts with 'ACCOUNT#')
-            const items = allItems.filter((item: any) => {
+            // Filter for accounts only - exclude AUDIT records and items without accountName
+            const filteredItems = allItems.filter((item: any) => {
                 if (!item) return false;
-                // Check entityType field
+
+                // Exclude AUDIT records (PK or SK contains #AUDIT)
+                const pk = String(item.PK || '');
+                const sk = String(item.SK || '');
+                if (pk.includes('#AUDIT') || sk.includes('#AUDIT')) {
+                    return false;
+                }
+
+                // Must have accountName (non-empty string)
+                if (!item.accountName || String(item.accountName).trim() === '') {
+                    return false;
+                }
+
+                // Check entityType field OR PK format OR has accountId
                 if (item.entityType === 'ACCOUNT') return true;
-                // Check PK field (admin-portal format: ACCOUNT#12345678)
-                if (item.PK && item.PK.startsWith('ACCOUNT#')) return true;
-                // Check if it has accountName and accountId (likely an account record)
-                if (item.accountName && (item.accountId || item.PK))
-                    return true;
+                if (pk.startsWith('ACCOUNT#') && !pk.includes('#AUDIT')) return true;
+                if (item.accountId) return true;
+
                 return false;
             });
 
             console.log(
-                `✅ Found ${items.length} accounts in registry (filtered from ${allItems.length} total items)`,
+                `📋 After filtering: ${filteredItems.length} items (from ${allItems.length} total)`,
+            );
+
+            // Deduplicate by accountId - keep the most complete record (latest updatedAt)
+            const accountMap = new Map<string, any>();
+            for (const item of filteredItems) {
+                const accountId = item.accountId ||
+                    (item.PK ? String(item.PK).replace('ACCOUNT#', '').split('#')[0] : '');
+
+                if (!accountId) continue;
+
+                const existing = accountMap.get(accountId);
+                if (!existing) {
+                    accountMap.set(accountId, item);
+                } else {
+                    // Keep the one with more complete data or newer timestamp
+                    const existingTime = new Date(existing.lastModified || existing.updatedAt || 0).getTime();
+                    const currentTime = new Date(item.lastModified || item.updatedAt || 0).getTime();
+
+                    // Prefer item with provisioningState or newer timestamp
+                    if (item.provisioningState && !existing.provisioningState) {
+                        accountMap.set(accountId, item);
+                    } else if (currentTime > existingTime) {
+                        accountMap.set(accountId, item);
+                    }
+                }
+            }
+
+            const items = Array.from(accountMap.values());
+            console.log(
+                `✅ Found ${items.length} unique accounts (deduplicated from ${filteredItems.length})`,
             );
 
             // Map admin-portal schema to our Account format
