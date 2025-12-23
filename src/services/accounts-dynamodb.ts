@@ -76,6 +76,17 @@ export class AccountsDynamoDBService {
     private readonly accountRegistryTable: string;
 
     constructor() {
+        console.log('========================================');
+        console.log('🚀 AccountsDynamoDBService CONSTRUCTOR');
+        console.log('🚀 Raw env vars:', {
+            ACCOUNT_REGISTRY_TABLE_NAME:
+                process.env.ACCOUNT_REGISTRY_TABLE_NAME,
+            DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+            WORKSPACE: process.env.WORKSPACE,
+            NODE_ENV: process.env.NODE_ENV,
+            STORAGE_MODE: process.env.STORAGE_MODE,
+        });
+
         // Account registry table - where accounts are stored (from admin-portal)
         this.accountRegistryTable =
             process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
@@ -91,6 +102,7 @@ export class AccountsDynamoDBService {
             accountRegistryTable: this.accountRegistryTable,
             tableName: this.tableName,
         });
+        console.log('========================================');
     }
 
     async list(): Promise<Account[]> {
@@ -102,6 +114,13 @@ export class AccountsDynamoDBService {
 
             // Query accounts from account registry table
             const accounts = await this.listFromAccountRegistry();
+
+            // Null safety
+            if (!accounts || !Array.isArray(accounts)) {
+                console.warn('⚠️ No accounts returned');
+                return [];
+            }
+
             console.log(`✅ Found ${accounts.length} accounts`);
 
             // Sort by account name and return
@@ -120,22 +139,49 @@ export class AccountsDynamoDBService {
      */
     async listFromAccountRegistry(): Promise<any[]> {
         try {
-            console.log(
-                '📋 Scanning account registry table:',
-                this.accountRegistryTable,
-            );
+            console.log('========================================');
+            console.log('📋 listFromAccountRegistry() STARTED');
+            console.log('📋 Table name:', this.accountRegistryTable);
+            console.log('📋 Environment:', {
+                ACCOUNT_REGISTRY_TABLE_NAME:
+                    process.env.ACCOUNT_REGISTRY_TABLE_NAME,
+                DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+                WORKSPACE: process.env.WORKSPACE,
+                NODE_ENV: process.env.NODE_ENV,
+                STORAGE_MODE: process.env.STORAGE_MODE,
+            });
+            console.log('========================================');
 
             // Scan the account registry table for all accounts
-            // Don't use filter - scan all items and filter in code
-            // This handles both entityType = 'ACCOUNT' and PK starts with 'ACCOUNT#'
+            console.log('📋 Calling DynamoDBOperations.scanItems...');
             const allItems = await DynamoDBOperations.scanItems(
                 this.accountRegistryTable,
             );
 
+            console.log('📋 scanItems returned:', typeof allItems);
+
+            // Null safety - ensure we have an array
+            if (!allItems || !Array.isArray(allItems)) {
+                console.warn(
+                    '⚠️ Scan returned no items or invalid data:',
+                    allItems,
+                );
+                return [];
+            }
+
             console.log(`📋 Raw scan returned ${allItems.length} items`);
+
+            // Log first item for debugging (if exists)
+            if (allItems.length > 0) {
+                console.log(
+                    '📋 First item sample:',
+                    JSON.stringify(allItems[0], null, 2),
+                );
+            }
 
             // Filter for accounts only (entityType = 'ACCOUNT' OR PK starts with 'ACCOUNT#')
             const items = allItems.filter((item: any) => {
+                if (!item) return false;
                 // Check entityType field
                 if (item.entityType === 'ACCOUNT') return true;
                 // Check PK field (admin-portal format: ACCOUNT#12345678)
@@ -152,68 +198,102 @@ export class AccountsDynamoDBService {
 
             // Map admin-portal schema to our Account format
             return items.map((item: any) => {
-                // Extract accountId from PK (format: ACCOUNT#12345678)
-                const accountId =
-                    item.accountId ||
-                    (item.PK ? item.PK.replace('ACCOUNT#', '') : '');
+                try {
+                    // Extract accountId from PK (format: ACCOUNT#12345678)
+                    const accountId =
+                        item.accountId ||
+                        (item.PK
+                            ? String(item.PK).replace('ACCOUNT#', '')
+                            : '');
 
-                // Map subscriptionTier to cloudType display value
-                let cloudType = item.cloudType || '';
-                if (item.subscriptionTier) {
-                    const tier = item.subscriptionTier.toLowerCase();
-                    if (tier === 'private') {
-                        cloudType = 'Private Cloud';
-                    } else if (tier === 'public' || tier === 'platform') {
-                        cloudType = 'Public Cloud';
-                    } else {
-                        cloudType = item.subscriptionTier;
+                    // Map subscriptionTier to cloudType display value
+                    let cloudType = item.cloudType || '';
+                    if (
+                        item.subscriptionTier &&
+                        typeof item.subscriptionTier === 'string'
+                    ) {
+                        const tier = item.subscriptionTier.toLowerCase();
+                        if (tier === 'private') {
+                            cloudType = 'Private Cloud';
+                        } else if (tier === 'public' || tier === 'platform') {
+                            cloudType = 'Public Cloud';
+                        } else {
+                            cloudType = item.subscriptionTier;
+                        }
                     }
-                }
 
-                return {
-                    // Use accountId for id to match expected format
-                    id: accountId,
-                    accountId: accountId,
-                    accountName: item.accountName || '',
-                    masterAccount: item.masterAccount || item.accountName || '',
-                    cloudType: cloudType,
-                    subscriptionTier: item.subscriptionTier || '',
-                    // Address fields
-                    address: item.address || '',
-                    country: item.addressDetails?.country || item.country || '',
-                    addressLine1: item.addressDetails?.addressLine1 || '',
-                    addressLine2: item.addressDetails?.addressLine2 || '',
-                    city: item.addressDetails?.city || '',
-                    state: item.addressDetails?.state || '',
-                    addresses: item.addressDetails ? [item.addressDetails] : [],
-                    // Technical user fields
-                    technicalUsername:
-                        item.technicalUser?.adminUsername ||
-                        item.adminUsername ||
-                        '',
-                    technicalUserId: '',
-                    technicalUsers: item.technicalUser
-                        ? [item.technicalUser]
-                        : [],
-                    // Other fields
-                    email: item.email || item.adminEmail || '',
-                    firstName: item.firstName || '',
-                    lastName: item.lastName || '',
-                    status: item.provisioningState || item.status || 'Active',
-                    provisioningState: item.provisioningState || '',
-                    licenses: [],
-                    createdAt:
-                        item.registeredOn ||
-                        item.createdAt ||
-                        item.created_date,
-                    updatedAt:
-                        item.lastModified ||
-                        item.updatedAt ||
-                        item.updated_date,
-                };
+                    return {
+                        // Use accountId for id to match expected format
+                        id: accountId,
+                        accountId: accountId,
+                        accountName: item.accountName || '',
+                        masterAccount:
+                            item.masterAccount || item.accountName || '',
+                        cloudType: cloudType,
+                        subscriptionTier: item.subscriptionTier || '',
+                        // Address fields
+                        address: item.address || '',
+                        country:
+                            item.addressDetails?.country || item.country || '',
+                        addressLine1: item.addressDetails?.addressLine1 || '',
+                        addressLine2: item.addressDetails?.addressLine2 || '',
+                        city: item.addressDetails?.city || '',
+                        state: item.addressDetails?.state || '',
+                        addresses: item.addressDetails
+                            ? [item.addressDetails]
+                            : [],
+                        // Technical user fields
+                        technicalUsername:
+                            item.technicalUser?.adminUsername ||
+                            item.adminUsername ||
+                            '',
+                        technicalUserId: '',
+                        technicalUsers: item.technicalUser
+                            ? [item.technicalUser]
+                            : [],
+                        // Other fields
+                        email: item.email || item.adminEmail || '',
+                        firstName: item.firstName || '',
+                        lastName: item.lastName || '',
+                        status:
+                            item.provisioningState || item.status || 'Active',
+                        provisioningState: item.provisioningState || '',
+                        licenses: [],
+                        createdAt:
+                            item.registeredOn ||
+                            item.createdAt ||
+                            item.created_date,
+                        updatedAt:
+                            item.lastModified ||
+                            item.updatedAt ||
+                            item.updated_date,
+                    };
+                } catch (mapError) {
+                    console.error(
+                        '❌ Error mapping account item:',
+                        mapError,
+                        item,
+                    );
+                    // Return a minimal valid account object
+                    return {
+                        id: item.accountId || item.PK || '',
+                        accountId: item.accountId || '',
+                        accountName: item.accountName || 'Unknown',
+                        cloudType: '',
+                        addresses: [],
+                        technicalUsers: [],
+                        licenses: [],
+                    };
+                }
             });
-        } catch (error) {
-            console.error('❌ Error listing from account registry:', error);
+        } catch (error: any) {
+            console.error('========================================');
+            console.error('❌ ERROR in listFromAccountRegistry');
+            console.error('❌ Error message:', error?.message);
+            console.error('❌ Error name:', error?.name);
+            console.error('❌ Error stack:', error?.stack);
+            console.error('❌ Table name was:', this.accountRegistryTable);
+            console.error('========================================');
             throw error;
         }
     }
