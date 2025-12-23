@@ -4,17 +4,6 @@ import {DynamoDBOperations} from '../dynamodb';
 // Helper to generate UUID using Node.js crypto
 const uuidv4 = (): string => crypto.randomUUID();
 
-// Declare process for TypeScript
-declare const process: {
-    env: {
-        ACCOUNT_REGISTRY_TABLE_NAME?: string;
-        DYNAMODB_SYSTIVA_TABLE?: string;
-        WORKSPACE?: string;
-        NODE_ENV?: string;
-        [key: string]: string | undefined;
-    };
-};
-
 export interface Account {
     id: string;
     accountName: string;
@@ -220,11 +209,14 @@ export class AccountsDynamoDBService {
                 // Check PK field (admin-portal format: ACCOUNT#12345678)
                 if (item.PK && item.PK.startsWith('ACCOUNT#')) return true;
                 // Check if it has accountName and accountId (likely an account record)
-                if (item.accountName && (item.accountId || item.PK)) return true;
+                if (item.accountName && (item.accountId || item.PK))
+                    return true;
                 return false;
             });
 
-            console.log(`✅ Found ${items.length} accounts in registry (filtered from ${allItems.length} total items)`);
+            console.log(
+                `✅ Found ${items.length} accounts in registry (filtered from ${allItems.length} total items)`,
+            );
 
             // Map admin-portal schema to our Account format
             return items.map((item: any) => {

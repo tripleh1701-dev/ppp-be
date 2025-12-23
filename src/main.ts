@@ -1133,10 +1133,24 @@ class ConnectorsController {
 class AccountsController {
     @Get()
     async list() {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.list();
+        try {
+            console.log('📋 GET /api/accounts - storageMode:', storageMode);
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                console.log('📋 Using DynamoDB service to list accounts');
+                const result = await accountsDynamoDB.list();
+                console.log('✅ Listed', result?.length || 0, 'accounts');
+                return result;
+            }
+            console.log('📋 Using filesystem service to list accounts');
+            return await accounts.list();
+        } catch (error: any) {
+            console.error('❌ Error listing accounts:', error);
+            return {
+                error: 'Failed to list accounts',
+                message: error?.message || 'Unknown error',
+                stack: process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
+            };
         }
-        return await accounts.list();
     }
 
     @Get(':id')
@@ -1149,10 +1163,21 @@ class AccountsController {
 
     @Post()
     async create(@Body() body: any) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.create(body);
+        try {
+            console.log('📝 POST /api/accounts - Creating account:', body?.accountName);
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                const result = await accountsDynamoDB.create(body);
+                console.log('✅ Account created:', result?.id);
+                return result;
+            }
+            return await accounts.create(body);
+        } catch (error: any) {
+            console.error('❌ Error creating account:', error);
+            return {
+                error: 'Failed to create account',
+                message: error?.message || 'Unknown error',
+            };
         }
-        return await accounts.create(body);
     }
 
     @Put()
