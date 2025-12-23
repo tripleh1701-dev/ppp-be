@@ -1,8 +1,5 @@
-import * as crypto from 'crypto';
+import {v4 as uuidv4} from 'uuid';
 import {DynamoDBOperations} from '../dynamodb';
-
-// Helper to generate UUID using Node.js crypto
-const uuidv4 = (): string => crypto.randomUUID();
 
 export interface Account {
     id: string;
@@ -79,21 +76,20 @@ export class AccountsDynamoDBService {
     private readonly accountRegistryTable: string;
 
     constructor() {
-        // Primary table: DYNAMODB_SYSTIVA_TABLE (systiva-admin-dev)
-        // This is the main database for ppp-be accounts
-        this.tableName =
-            process.env.DYNAMODB_SYSTIVA_TABLE ||
-            `systiva-admin-${
-                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
-            }`;
-
-        // Account registry table for fetching accounts (may be same table)
+        // Account registry table - where accounts are stored (from admin-portal)
         this.accountRegistryTable =
-            process.env.ACCOUNT_REGISTRY_TABLE_NAME || this.tableName;
+            process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
+            `admin-portal-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }-account-registry`;
+
+        // Systiva table for other operations
+        this.tableName =
+            process.env.DYNAMODB_SYSTIVA_TABLE || this.accountRegistryTable;
 
         console.log('📋 AccountsDynamoDBService initialized with tables:', {
-            tableName: this.tableName,
             accountRegistryTable: this.accountRegistryTable,
+            tableName: this.tableName,
         });
     }
 
@@ -104,76 +100,12 @@ export class AccountsDynamoDBService {
                 this.accountRegistryTable,
             );
 
-            // Query accounts from account registry table (same as admin-portal-be workflow 06)
-            // This is the single source of truth for accounts
-            const baseAccounts = await this.listFromAccountRegistry();
-            console.log(
-                `✅ Found ${baseAccounts.length} accounts from account registry`,
-            );
-
-            // For each account, fetch its licenses, technical users, and addresses
-            const accountsWithRelations = await Promise.all(
-                baseAccounts.map(async (account) => {
-                    const accountId = account.id || account.accountId;
-
-                    // Fetch licenses for this account (handle errors gracefully)
-                    let licenses: any[] = account.licenses || [];
-                    try {
-                        const fetchedLicenses = await this.listLicenses(
-                            accountId,
-                        );
-                        if (fetchedLicenses && fetchedLicenses.length > 0) {
-                            licenses = fetchedLicenses;
-                        }
-                    } catch (error) {
-                        console.warn(
-                            `⚠️ Could not fetch licenses for account ${accountId}:`,
-                            error,
-                        );
-                    }
-
-                    // Fetch technical users for this account (handle errors gracefully)
-                    let technicalUsers: any[] = account.technicalUsers || [];
-                    let technicalUser: any = null;
-                    try {
-                        technicalUser = await this.getTechnicalUser(accountId);
-                        if (technicalUser) {
-                            technicalUsers = [technicalUser];
-                        }
-                    } catch (error) {
-                        console.warn(
-                            `⚠️ Could not fetch technical user for account ${accountId}:`,
-                            error,
-                        );
-                    }
-
-                    // Addresses are already included from listFromAccountRegistry()
-                    const addresses: any[] = account.addresses || [];
-
-                    console.log(`📊 Account ${account.accountName}:`, {
-                        licensesCount: licenses.length,
-                        technicalUsersCount: technicalUsers.length,
-                        addressesCount: addresses.length,
-                    });
-
-                    return {
-                        ...account,
-                        licenses: licenses,
-                        technicalUsers: technicalUsers,
-                        technicalUsername:
-                            account.technicalUsername ||
-                            technicalUser?.username ||
-                            technicalUser?.adminUsername ||
-                            '',
-                        technicalUserId:
-                            account.technicalUserId || technicalUser?.id || '',
-                        addresses: addresses,
-                    };
-                }),
-            );
+            // Query accounts from account registry table
+            const accounts = await this.listFromAccountRegistry();
+            console.log(`✅ Found ${accounts.length} accounts`);
 
             // Sort by account name and return
-            return accountsWithRelations.sort((a, b) =>
+            return accounts.sort((a, b) =>
                 (a.accountName || '').localeCompare(b.accountName || ''),
             );
         } catch (error) {
