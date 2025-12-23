@@ -133,7 +133,10 @@ class AuthController {
             // Try Cognito authentication first (if IMS_API_URL is configured)
             if (cognitoAuth.isAvailable()) {
                 console.log('Attempting Cognito authentication via IMS...');
-                const cognitoResult = await cognitoAuth.login(loginId, password);
+                const cognitoResult = await cognitoAuth.login(
+                    loginId,
+                    password,
+                );
 
                 // Handle NEW_PASSWORD_REQUIRED challenge
                 if (cognitoResult.requiresPasswordChange) {
@@ -142,15 +145,18 @@ class AuthController {
                         requiresPasswordChange: true,
                         challengeName: cognitoResult.challengeName,
                         session: cognitoResult.session,
-                        message: cognitoResult.message || 'Password change required on first login',
+                        message:
+                            cognitoResult.message ||
+                            'Password change required on first login',
                         data: {
                             user: {
                                 id: cognitoResult.user?.username || loginId,
-                                emailAddress: cognitoResult.user?.email || loginId,
+                                emailAddress:
+                                    cognitoResult.user?.email || loginId,
                                 firstName: '',
                                 lastName: '',
-                            }
-                        }
+                            },
+                        },
                     });
                 }
 
@@ -161,7 +167,8 @@ class AuthController {
                         data: {
                             user: {
                                 id: user?.username || loginId,
-                                firstName: user?.username?.split('@')[0] || 'User',
+                                firstName:
+                                    user?.username?.split('@')[0] || 'User',
                                 middleName: '',
                                 lastName: '',
                                 emailAddress: user?.email || loginId,
@@ -195,7 +202,10 @@ class AuthController {
                 });
             }
 
-            const user = await userManagement.authenticateUser(loginId, password);
+            const user = await userManagement.authenticateUser(
+                loginId,
+                password,
+            );
 
             if (!user) {
                 return res.status(HttpStatus.UNAUTHORIZED).json({
@@ -276,7 +286,7 @@ class AuthController {
             const result = await cognitoAuth.completeNewPasswordChallenge(
                 loginId,
                 newPassword,
-                session
+                session,
             );
 
             if (result.success && result.tokens) {
@@ -358,7 +368,8 @@ class OAuthController {
                     'GitHub OAuth Client ID is not configured. Please configure GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables.',
                 setupInstructions: {
                     step1: 'Create a GitHub OAuth App at https://github.com/settings/developers',
-                    step2: 'Set Authorization callback URL to: ' +
+                    step2:
+                        'Set Authorization callback URL to: ' +
                         (process.env.APP_BASE_URL || 'http://localhost:3000') +
                         '/security-governance/credentials/github/oauth2/callback',
                     step3: 'Copy the Client ID and Client Secret',
@@ -380,8 +391,7 @@ class OAuthController {
      */
     @Get('github/setup-instructions')
     async getSetupInstructions(@Res() res: any) {
-        const appBaseUrl =
-            process.env.APP_BASE_URL || 'http://localhost:3000';
+        const appBaseUrl = process.env.APP_BASE_URL || 'http://localhost:3000';
         const callbackUrl = `${appBaseUrl}/security-governance/credentials/github/oauth2/callback`;
 
         return res.status(HttpStatus.OK).json({
@@ -468,7 +478,9 @@ APP_BASE_URL=${appBaseUrl}`,
                         <script>
                             // Close window if opened as popup, otherwise redirect
                             if (window.opener) {
-                                window.opener.postMessage({ type: 'oauth-error', error: '${error}', errorDescription: '${errorDescription || ''}' }, '*');
+                                window.opener.postMessage({ type: 'oauth-error', error: '${error}', errorDescription: '${
+                    errorDescription || ''
+                }' }, '*');
                                 window.close();
                             } else {
                                 setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -568,7 +580,11 @@ APP_BASE_URL=${appBaseUrl}`,
             } = tokenResponse.data;
 
             if (tokenError) {
-                console.error('GitHub OAuth token error:', tokenError, tokenErrorDescription);
+                console.error(
+                    'GitHub OAuth token error:',
+                    tokenError,
+                    tokenErrorDescription,
+                );
                 return res.status(HttpStatus.BAD_REQUEST).send(`
                     <!DOCTYPE html>
                     <html>
@@ -581,10 +597,16 @@ APP_BASE_URL=${appBaseUrl}`,
                     </head>
                     <body>
                         <h1 class="error">Token Exchange Failed</h1>
-                        <p>${tokenErrorDescription || tokenError || 'Failed to exchange authorization code'}</p>
+                        <p>${
+                            tokenErrorDescription ||
+                            tokenError ||
+                            'Failed to exchange authorization code'
+                        }</p>
                         <script>
                             if (window.opener) {
-                                window.opener.postMessage({ type: 'oauth-error', error: '${tokenError}', errorDescription: '${tokenErrorDescription || ''}' }, '*');
+                                window.opener.postMessage({ type: 'oauth-error', error: '${tokenError}', errorDescription: '${
+                    tokenErrorDescription || ''
+                }' }, '*');
                                 window.close();
                             } else {
                                 setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -696,7 +718,9 @@ APP_BASE_URL=${appBaseUrl}`,
                     <p>${error.message || 'Failed to process authorization'}</p>
                     <script>
                         if (window.opener) {
-                            window.opener.postMessage({ type: 'oauth-error', error: 'server_error', errorDescription: '${error.message || ''}' }, '*');
+                            window.opener.postMessage({ type: 'oauth-error', error: 'server_error', errorDescription: '${
+                                error.message || ''
+                            }' }, '*');
                             window.close();
                         } else {
                             setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -707,7 +731,6 @@ APP_BASE_URL=${appBaseUrl}`,
             `);
         }
     }
-
 }
 
 @Controller('api')
@@ -774,13 +797,8 @@ class OAuthTokenController {
                 },
             );
 
-            const {
-                access_token,
-                token_type,
-                scope,
-                error,
-                error_description,
-            } = tokenResponse.data;
+            const {access_token, token_type, scope, error, error_description} =
+                tokenResponse.data;
 
             if (error) {
                 console.error('GitHub OAuth error:', error, error_description);
@@ -824,7 +842,8 @@ class OAuthTokenController {
                 accessToken: access_token,
                 tokenType: token_type || 'bearer',
                 scope: scope || 'repo',
-                message: 'GitHub authorization successful. The app will appear in your GitHub Authorized OAuth Apps.',
+                message:
+                    'GitHub authorization successful. The app will appear in your GitHub Authorized OAuth Apps.',
             });
         } catch (error: any) {
             console.error('Token exchange error:', error);
@@ -878,7 +897,7 @@ class ConnectorsController {
     async testJiraConnection(@Res() res: any, @Body() body: any) {
         try {
             // Extract credentials from request body
-            const { url, username, apiToken, credentialName } = body;
+            const {url, username, apiToken, credentialName} = body;
 
             // Log received data for debugging
             console.log('🧪 [JIRA Test] Received request:', {
@@ -887,7 +906,7 @@ class ConnectorsController {
                 hasApiToken: !!apiToken,
                 hasCredentialName: !!credentialName,
                 originalUrl: url,
-                bodyKeys: Object.keys(body)
+                bodyKeys: Object.keys(body),
             });
 
             // Normalize URL - extract base domain
@@ -903,7 +922,8 @@ class ConnectorsController {
                     normalizedUrl = normalizedUrl.replace(/\/$/, '');
                 } catch (error) {
                     // If URL parsing fails, try to clean it manually
-                    normalizedUrl = normalizedUrl.replace(/\/rest\/.*$/, '')
+                    normalizedUrl = normalizedUrl
+                        .replace(/\/rest\/.*$/, '')
                         .replace(/\/$/, '');
                 }
             }
@@ -914,7 +934,7 @@ class ConnectorsController {
                     success: false,
                     status: 'failed',
                     connected: false,
-                    message: 'Missing required field: url'
+                    message: 'Missing required field: url',
                 });
             }
 
@@ -925,13 +945,13 @@ class ConnectorsController {
                     success: false,
                     status: 'failed',
                     connected: false,
-                    message: 'Invalid URL format'
+                    message: 'Invalid URL format',
                 });
             }
 
             console.log('🔗 [JIRA Test] URL normalized:', {
                 original: url,
-                normalized: normalizedUrl
+                normalized: normalizedUrl,
             });
 
             // Validate required fields
@@ -941,50 +961,65 @@ class ConnectorsController {
             if (!apiToken) missingFields.push('apiToken');
 
             if (missingFields.length > 0) {
-                const errorMessage = `Missing required fields: ${missingFields.join(', ')}. Please provide url, username, and apiToken.`;
+                const errorMessage = `Missing required fields: ${missingFields.join(
+                    ', ',
+                )}. Please provide url, username, and apiToken.`;
 
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
                     status: 'failed',
                     connected: false,
                     message: errorMessage,
-                    missingFields: missingFields
+                    missingFields: missingFields,
                 });
             }
 
             // Test JIRA connection using Username and API key
-            console.log('👤 [JIRA Test] Using Username authentication (direct API call):', {
-                url: normalizedUrl,
-                username: username,
-                hasApiToken: !!apiToken
-            });
+            console.log(
+                '👤 [JIRA Test] Using Username authentication (direct API call):',
+                {
+                    url: normalizedUrl,
+                    username: username,
+                    hasApiToken: !!apiToken,
+                },
+            );
 
             // Convert username:apiToken to Base64 for Basic Authentication
             const credentials = `${username}:${apiToken}`;
-            const base64Credentials = Buffer.from(credentials).toString('base64');
-            console.log('🔐 [JIRA Test] Base64 credentials generated (length):', base64Credentials.length);
+            const base64Credentials =
+                Buffer.from(credentials).toString('base64');
+            console.log(
+                '🔐 [JIRA Test] Base64 credentials generated (length):',
+                base64Credentials.length,
+            );
 
             // Construct JIRA API endpoint for testing connectivity
             // Using /rest/api/3/myself endpoint which returns current user info
             const jiraApiUrl = `${normalizedUrl}/rest/api/3/myself`;
-            console.log('🌐 [JIRA Test] Calling JIRA API directly:', jiraApiUrl);
+            console.log(
+                '🌐 [JIRA Test] Calling JIRA API directly:',
+                jiraApiUrl,
+            );
 
             try {
                 // Make API call to JIRA with Basic Authentication
                 const response = await axios.get(jiraApiUrl, {
                     headers: {
-                        'Authorization': `Basic ${base64Credentials}`,
-                        'Accept': 'application/json',
-                        'Content-Type': 'application/json'
+                        Authorization: `Basic ${base64Credentials}`,
+                        Accept: 'application/json',
+                        'Content-Type': 'application/json',
                     },
-                    timeout: 10000 // 10 second timeout
+                    timeout: 10000, // 10 second timeout
                 });
 
-                console.log('✅ [JIRA Test] JIRA API response status:', response.status);
+                console.log(
+                    '✅ [JIRA Test] JIRA API response status:',
+                    response.status,
+                );
                 console.log('📦 [JIRA Test] JIRA API response data:', {
                     accountId: response.data.accountId,
                     displayName: response.data.displayName,
-                    emailAddress: response.data.emailAddress
+                    emailAddress: response.data.emailAddress,
                 });
 
                 // If we get a successful response (200-299), connection is successful
@@ -997,19 +1032,22 @@ class ConnectorsController {
                         userInfo: {
                             accountId: response.data.accountId,
                             displayName: response.data.displayName,
-                            emailAddress: response.data.emailAddress
-                        }
+                            emailAddress: response.data.emailAddress,
+                        },
                     });
                 } else {
                     return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                         success: false,
                         status: 'failed',
                         connected: false,
-                        message: `Unexpected response status: ${response.status}`
+                        message: `Unexpected response status: ${response.status}`,
                     });
                 }
             } catch (error: any) {
-                console.error('❌ [JIRA Test] Error testing connectivity:', error);
+                console.error(
+                    '❌ [JIRA Test] Error testing connectivity:',
+                    error,
+                );
 
                 // Handle different types of errors
                 let errorMessage = 'Failed to connect to JIRA';
@@ -1019,11 +1057,14 @@ class ConnectorsController {
                     statusCode = error.response.status;
 
                     if (statusCode === HttpStatus.UNAUTHORIZED) {
-                        errorMessage = 'Authentication failed. Please check your username and API token.';
+                        errorMessage =
+                            'Authentication failed. Please check your username and API token.';
                     } else if (statusCode === HttpStatus.FORBIDDEN) {
-                        errorMessage = 'Access forbidden. Please check your API token permissions.';
+                        errorMessage =
+                            'Access forbidden. Please check your API token permissions.';
                     } else if (statusCode === HttpStatus.NOT_FOUND) {
-                        errorMessage = 'JIRA instance not found. Please check the URL.';
+                        errorMessage =
+                            'JIRA instance not found. Please check the URL.';
                     } else {
                         errorMessage = `JIRA API error: ${error.response.status} - ${error.response.statusText}`;
                     }
@@ -1031,17 +1072,28 @@ class ConnectorsController {
                     console.error('📛 [JIRA Test] JIRA API error response:', {
                         status: error.response.status,
                         statusText: error.response.statusText,
-                        data: error.response.data
+                        data: error.response.data,
                     });
                 } else if (error.request) {
-                    errorMessage = 'No response from JIRA server. Please check the URL and network connectivity.';
-                    console.error('📛 [JIRA Test] No response received:', error.request);
+                    errorMessage =
+                        'No response from JIRA server. Please check the URL and network connectivity.';
+                    console.error(
+                        '📛 [JIRA Test] No response received:',
+                        error.request,
+                    );
                 } else if (error.code === 'ECONNREFUSED') {
-                    errorMessage = 'Connection refused. Please check the JIRA URL.';
-                } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-                    errorMessage = 'Connection timeout. Please check the JIRA URL and network connectivity.';
+                    errorMessage =
+                        'Connection refused. Please check the JIRA URL.';
+                } else if (
+                    error.code === 'ETIMEDOUT' ||
+                    error.code === 'ECONNABORTED'
+                ) {
+                    errorMessage =
+                        'Connection timeout. Please check the JIRA URL and network connectivity.';
                 } else {
-                    errorMessage = error.message || 'Unknown error occurred while testing connectivity';
+                    errorMessage =
+                        error.message ||
+                        'Unknown error occurred while testing connectivity';
                 }
 
                 return res.status(statusCode).json({
@@ -1049,19 +1101,29 @@ class ConnectorsController {
                     status: 'failed',
                     connected: false,
                     message: errorMessage,
-                    error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                    error:
+                        process.env.NODE_ENV === 'development'
+                            ? error.message
+                            : undefined,
                 });
             }
         } catch (error: any) {
             // This catch block handles unexpected errors during validation
-            console.error('❌ [JIRA Test] Unexpected error during validation:', error);
+            console.error(
+                '❌ [JIRA Test] Unexpected error during validation:',
+                error,
+            );
 
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
                 status: 'failed',
                 connected: false,
-                message: 'An unexpected error occurred while processing the request',
-                error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                message:
+                    'An unexpected error occurred while processing the request',
+                error:
+                    process.env.NODE_ENV === 'development'
+                        ? error.message
+                        : undefined,
             });
         }
     }
@@ -1117,6 +1179,110 @@ class AccountsController {
         }
         await accounts.remove(Number(id)); // Number ID for PostgreSQL
         return {};
+    }
+
+    /**
+     * Onboard a new account
+     * POST /api/accounts/onboard
+     *
+     * Required fields: accountName, masterAccount, subscriptionTier
+     * Optional fields: addressDetails, technicalUser, email, firstName, lastName, etc.
+     */
+    @Post('onboard')
+    async onboard(@Body() body: any, @Res() res: any) {
+        try {
+            // Validate required fields
+            const requiredFields = [
+                'accountName',
+                'masterAccount',
+                'subscriptionTier',
+            ];
+            const missingFields = requiredFields.filter(
+                (field) => !body[field],
+            );
+
+            if (missingFields.length > 0) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Missing required fields: ${missingFields.join(', ')}`,
+                });
+            }
+
+            // Validate subscription tier
+            const validTiers = ['public', 'private', 'platform'];
+            if (!validTiers.includes(body.subscriptionTier)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Invalid subscriptionTier. Must be one of: ${validTiers.join(
+                        ', ',
+                    )}`,
+                });
+            }
+
+            // Generate account ID (YYYYMMDD format with random suffix if needed)
+            const now = new Date();
+            const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
+            const randomSuffix = Math.floor(Math.random() * 99)
+                .toString()
+                .padStart(2, '0');
+            const accountId = `${dateStr.slice(0, 6)}${randomSuffix}`;
+
+            // Build account data - required fields
+            const accountData: any = {
+                id: accountId,
+                accountId: accountId,
+                accountName: body.accountName,
+                masterAccount: body.masterAccount,
+                subscriptionTier: body.subscriptionTier,
+                provisioningState: 'active',
+                status: 'ACTIVE',
+                createdAt: now.toISOString(),
+                updatedAt: now.toISOString(),
+                createdBy: body.createdBy || 'admin',
+            };
+
+            // Add optional fields if provided
+            if (body.email) accountData.email = body.email;
+            if (body.firstName) accountData.firstName = body.firstName;
+            if (body.lastName) accountData.lastName = body.lastName;
+            if (body.adminUsername)
+                accountData.adminUsername = body.adminUsername;
+            if (body.adminEmail) accountData.adminEmail = body.adminEmail;
+            if (body.adminPassword)
+                accountData.adminPassword = body.adminPassword;
+            if (body.addressDetails)
+                accountData.addressDetails = body.addressDetails;
+            if (body.technicalUser)
+                accountData.technicalUser = body.technicalUser;
+
+            console.log('🚀 Onboarding new account:', accountData.accountName);
+
+            // Save to DynamoDB or PostgreSQL
+            let savedAccount;
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                savedAccount = await accountsDynamoDB.create(accountData);
+            } else {
+                savedAccount = await accounts.create(accountData);
+            }
+
+            console.log(
+                '✅ Account onboarded successfully:',
+                savedAccount?.id || accountId,
+            );
+
+            return res.status(HttpStatus.CREATED).json({
+                result: 'success',
+                msg: 'Account onboarded successfully',
+                data: savedAccount || accountData,
+                accountId: savedAccount?.id || accountId,
+            });
+        } catch (error: any) {
+            console.error('❌ Error onboarding account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to onboard account: ${error.message}`,
+            });
+        }
     }
 
     // Technical User endpoints
@@ -1790,10 +1956,10 @@ class UsersController {
                             const assignedGroups =
                                 await userManagement.getUserGroups(
                                     user.id,
-                                    accountId,      // Pass account context
-                                    accountName,    // Pass account context
-                                    undefined,      // enterpriseId (not available in /api/users)
-                                    undefined       // enterpriseName (not available in /api/users)
+                                    accountId, // Pass account context
+                                    accountName, // Pass account context
+                                    undefined, // enterpriseId (not available in /api/users)
+                                    undefined, // enterpriseName (not available in /api/users)
                                 );
                             return {
                                 ...user,
@@ -3199,7 +3365,10 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            console.log(`🔗 Assigning group to user ${id}, body:`, JSON.stringify(body, null, 2));
+            console.log(
+                `🔗 Assigning group to user ${id}, body:`,
+                JSON.stringify(body, null, 2),
+            );
 
             // Check if this is a single group assignment {groupId: "..."} or bulk assignment {groupIds: [...]}
             if (body.groupId) {
@@ -3259,9 +3428,11 @@ class UsersController {
                         success: true,
                         message: 'Groups assigned successfully',
                         data: {
-                            assignedGroups: body.groupIds.map((groupId: string) => ({
-                                id: groupId,
-                            })),
+                            assignedGroups: body.groupIds.map(
+                                (groupId: string) => ({
+                                    id: groupId,
+                                }),
+                            ),
                         },
                     });
                 } else {
@@ -3298,8 +3469,13 @@ class UsersController {
             } else if (body.groups && Array.isArray(body.groups)) {
                 // New format: array of complete group objects (create-and-assign)
                 if (storageMode === 'dynamodb' && userManagement) {
-                    console.log(`📦 Processing ${body.groups.length} group(s) for create-and-assign`);
-                    console.log(`📦 Groups received:`, JSON.stringify(body.groups, null, 2));
+                    console.log(
+                        `📦 Processing ${body.groups.length} group(s) for create-and-assign`,
+                    );
+                    console.log(
+                        `📦 Groups received:`,
+                        JSON.stringify(body.groups, null, 2),
+                    );
 
                     const user = await userManagement.getUser(id);
                     if (!user) {
@@ -3313,76 +3489,123 @@ class UsersController {
 
                     // Get all existing groups to match by name
                     const allExistingGroups = await userManagement.listGroups();
-                    console.log(`📋 Found ${allExistingGroups.length} existing groups in database`);
+                    console.log(
+                        `📋 Found ${allExistingGroups.length} existing groups in database`,
+                    );
 
                     // Process each group
                     const seenGroupIds = new Set<string>(); // Track unique group IDs
                     for (const groupData of body.groups) {
                         const groupName = groupData.groupName || groupData.name;
-                        console.log(`🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`);
+                        console.log(
+                            `🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`,
+                        );
 
                         // Try to find group by NAME (not by frontend-generated ID)
-                        let existingGroup = allExistingGroups.find(g => g.name === groupName);
+                        let existingGroup = allExistingGroups.find(
+                            (g) => g.name === groupName,
+                        );
 
                         if (existingGroup) {
-                            console.log(`✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`);
+                            console.log(
+                                `✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`,
+                            );
 
                             // Skip if we've already processed this group ID (deduplication)
                             if (seenGroupIds.has(existingGroup.id)) {
-                                console.log(`⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`);
+                                console.log(
+                                    `⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`,
+                                );
                                 continue;
                             }
                             seenGroupIds.add(existingGroup.id);
 
                             // Get current group data from database to preserve correct values
-                            const currentGroup = await userManagement.getGroup(existingGroup.id);
+                            const currentGroup = await userManagement.getGroup(
+                                existingGroup.id,
+                            );
                             if (!currentGroup) {
-                                console.log(`⚠️  Could not fetch current group data, skipping update`);
+                                console.log(
+                                    `⚠️  Could not fetch current group data, skipping update`,
+                                );
                                 groupIds.push(existingGroup.id);
                                 continue;
                             }
 
                             // Only update fields that actually changed and are provided
                             const updates: any = {};
-                            if (groupData.name && groupData.name !== currentGroup.name) {
+                            if (
+                                groupData.name &&
+                                groupData.name !== currentGroup.name
+                            ) {
                                 updates.name = groupData.name;
                             }
                             // Only update description if it's different and not empty
                             // Protect against overwriting with incorrect/stale data from frontend
-                            if (groupData.description !== undefined &&
+                            if (
+                                groupData.description !== undefined &&
                                 groupData.description !== null &&
                                 groupData.description.trim() !== '' &&
-                                groupData.description !== currentGroup.description) {
-                                console.log(`📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`);
+                                groupData.description !==
+                                    currentGroup.description
+                            ) {
+                                console.log(
+                                    `📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`,
+                                );
                                 updates.description = groupData.description;
-                            } else if (groupData.description !== undefined &&
-                                      groupData.description !== currentGroup.description) {
-                                console.log(`⚠️  Skipping description update - empty or matches current value`);
+                            } else if (
+                                groupData.description !== undefined &&
+                                groupData.description !==
+                                    currentGroup.description
+                            ) {
+                                console.log(
+                                    `⚠️  Skipping description update - empty or matches current value`,
+                                );
                             }
-                            if (groupData.entity !== undefined && groupData.entity !== currentGroup.entity) {
+                            if (
+                                groupData.entity !== undefined &&
+                                groupData.entity !== currentGroup.entity
+                            ) {
                                 updates.entity = groupData.entity;
                             }
-                            if (groupData.product !== undefined && groupData.product !== currentGroup.product) {
+                            if (
+                                groupData.product !== undefined &&
+                                groupData.product !== currentGroup.product
+                            ) {
                                 updates.product = groupData.product;
                             }
-                            if (groupData.service !== undefined && groupData.service !== currentGroup.service) {
+                            if (
+                                groupData.service !== undefined &&
+                                groupData.service !== currentGroup.service
+                            ) {
                                 updates.service = groupData.service;
                             }
                             if (groupData.assignedRoles !== undefined) {
-                                updates.assignedRoles = groupData.assignedRoles || [];
+                                updates.assignedRoles =
+                                    groupData.assignedRoles || [];
                             }
 
                             // Only update if there are actual changes
                             if (Object.keys(updates).length > 0) {
-                                console.log(`🔄 Updating group with changes:`, JSON.stringify(updates, null, 2));
-                                await userManagement.updateGroup(existingGroup.id, updates);
+                                console.log(
+                                    `🔄 Updating group with changes:`,
+                                    JSON.stringify(updates, null, 2),
+                                );
+                                await userManagement.updateGroup(
+                                    existingGroup.id,
+                                    updates,
+                                );
                             } else {
-                                console.log(`ℹ️  No changes detected, skipping update`);
+                                console.log(
+                                    `ℹ️  No changes detected, skipping update`,
+                                );
                             }
 
                             groupIds.push(existingGroup.id);
                         } else {
-                            console.log(`🆕 Creating new group: "${groupName}"`);
+                            console.log(
+                                `🆕 Creating new group: "${groupName}"`,
+                            );
                             // Create new group (let it generate its own ID)
                             const newGroup = await userManagement.createGroup({
                                 name: groupName,
@@ -3392,11 +3615,15 @@ class UsersController {
                                 service: groupData.service || '',
                                 assignedRoles: groupData.assignedRoles || [],
                             });
-                            console.log(`✅ Created new group with ID: ${newGroup.id}`);
+                            console.log(
+                                `✅ Created new group with ID: ${newGroup.id}`,
+                            );
 
                             // Skip if duplicate
                             if (seenGroupIds.has(newGroup.id)) {
-                                console.log(`⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`);
+                                console.log(
+                                    `⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`,
+                                );
                                 continue;
                             }
                             seenGroupIds.add(newGroup.id);
@@ -3407,20 +3634,32 @@ class UsersController {
                     // Deduplicate final group IDs array
                     const uniqueGroupIds = Array.from(new Set(groupIds));
                     if (uniqueGroupIds.length !== groupIds.length) {
-                        console.log(`⚠️  Removed ${groupIds.length - uniqueGroupIds.length} duplicate group ID(s)`);
+                        console.log(
+                            `⚠️  Removed ${
+                                groupIds.length - uniqueGroupIds.length
+                            } duplicate group ID(s)`,
+                        );
                         console.log(`   Before: ${JSON.stringify(groupIds)}`);
-                        console.log(`   After:  ${JSON.stringify(uniqueGroupIds)}`);
+                        console.log(
+                            `   After:  ${JSON.stringify(uniqueGroupIds)}`,
+                        );
                     }
                     groupIds = uniqueGroupIds;
 
-                    console.log(`📋 Final group IDs to assign: ${JSON.stringify(groupIds)}`);
+                    console.log(
+                        `📋 Final group IDs to assign: ${JSON.stringify(
+                            groupIds,
+                        )}`,
+                    );
 
                     // Assign all groups to user
                     await userManagement.updateUser(id, {
                         assignedGroups: groupIds,
                     });
 
-                    console.log(`✅ Assigned ${groupIds.length} unique group(s) to user ${id}`);
+                    console.log(
+                        `✅ Assigned ${groupIds.length} unique group(s) to user ${id}`,
+                    );
 
                     return res.status(HttpStatus.OK).json({
                         success: true,
@@ -4587,20 +4826,34 @@ class RolesController {
         }
 
         if (storageMode === 'dynamodb' && userManagement) {
-            const allRoles = accountId && accountName
-                ? await userManagement.listRolesByAccount(accountId, accountName)
-                : await userManagement.listRoles();
+            const allRoles =
+                accountId && accountName
+                    ? await userManagement.listRolesByAccount(
+                          accountId,
+                          accountName,
+                      )
+                    : await userManagement.listRoles();
 
-            const filtered = allRoles.filter((role: any) =>
-                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            const filtered = allRoles.filter(
+                (role: any) =>
+                    role.name
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()) ||
+                    role.description
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()),
             );
             return filtered;
         } else {
             const allRoles = await roles.list();
-            const filtered = allRoles.filter((role: any) =>
-                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            const filtered = allRoles.filter(
+                (role: any) =>
+                    role.name
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()) ||
+                    role.description
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()),
             );
             return filtered;
         }
@@ -4654,7 +4907,9 @@ class RolesController {
                 const roleUsers = allUsers.filter(
                     (user) =>
                         user.assignedGroups &&
-                        user.assignedGroups.some((gId: string) => groupIds.includes(gId)),
+                        user.assignedGroups.some((gId: string) =>
+                            groupIds.includes(gId),
+                        ),
                 );
 
                 return res.status(HttpStatus.OK).json({
@@ -5905,27 +6160,34 @@ class UserManagementController {
             };
         }
 
-        console.log('📋 GET /api/user-management/users called with query params:', {
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        });
+        console.log(
+            '📋 GET /api/user-management/users called with query params:',
+            {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            },
+        );
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
 
         if (hasAccountContext) {
-            console.log(`✅ Listing users for account: ${accountName} (${accountId})`);
+            console.log(
+                `✅ Listing users for account: ${accountName} (${accountId})`,
+            );
             if (enterpriseId && enterpriseName) {
-                console.log(`   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
+                console.log(
+                    `   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                );
             }
 
             const users = await userManagement.listUsersByAccount(
                 accountId,
                 accountName,
-                enterpriseId,  // Pass enterprise filter
-                enterpriseName  // Pass enterprise filter
+                enterpriseId, // Pass enterprise filter
+                enterpriseName, // Pass enterprise filter
             );
 
             // Fetch assigned groups for each user
@@ -5936,8 +6198,10 @@ class UserManagementController {
                         // Not from the query parameters, as they might differ
                         const userAccountId = user.accountId || accountId;
                         const userAccountName = user.accountName || accountName;
-                        const userEnterpriseId = user.enterpriseId || enterpriseId;
-                        const userEnterpriseName = user.enterpriseName || enterpriseName;
+                        const userEnterpriseId =
+                            user.enterpriseId || enterpriseId;
+                        const userEnterpriseName =
+                            user.enterpriseName || enterpriseName;
 
                         console.log(`🔍 Fetching groups for user ${user.id}:`, {
                             userAccountId,
@@ -5946,22 +6210,28 @@ class UserManagementController {
                             userEnterpriseName,
                         });
 
-                        const assignedGroups = await userManagement.getUserGroups(
-                            user.id,
-                            userAccountId,      // Use user's account context
-                            userAccountName,    // Use user's account context
-                            userEnterpriseId,   // Use user's enterprise context
-                            userEnterpriseName  // Use user's enterprise context
-                        );
+                        const assignedGroups =
+                            await userManagement.getUserGroups(
+                                user.id,
+                                userAccountId, // Use user's account context
+                                userAccountName, // Use user's account context
+                                userEnterpriseId, // Use user's enterprise context
+                                userEnterpriseName, // Use user's enterprise context
+                            );
 
-                        console.log(`✅ Got ${assignedGroups.length} group(s) for user ${user.id}`);
+                        console.log(
+                            `✅ Got ${assignedGroups.length} group(s) for user ${user.id}`,
+                        );
 
                         return {
                             ...user,
                             assignedUserGroups: assignedGroups,
                         };
                     } catch (error) {
-                        console.error(`❌ Failed to get groups for user ${user.id}:`, error);
+                        console.error(
+                            `❌ Failed to get groups for user ${user.id}:`,
+                            error,
+                        );
                         return {
                             ...user,
                             assignedUserGroups: [],
@@ -6019,8 +6289,12 @@ class UserManagementController {
         const hasAccountContext = body.accountId && body.accountName;
 
         if (hasAccountContext) {
-            console.log(`✅ Creating user in account table: ${body.accountName} (${body.accountId})`);
-            console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
+            console.log(
+                `✅ Creating user in account table: ${body.accountName} (${body.accountId})`,
+            );
+            console.log(
+                `   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`,
+            );
 
             // Prepare user data for account-specific creation (include enterprise context)
             const userPayload = {
@@ -6030,14 +6304,19 @@ class UserManagementController {
                 emailAddress: body.emailAddress,
                 password: body.password,
                 status: body.status || 'ACTIVE',
-                startDate: body.startDate || new Date().toISOString().split('T')[0],
+                startDate:
+                    body.startDate || new Date().toISOString().split('T')[0],
                 endDate: body.endDate,
-                technicalUser: body.technicalUser === true || body.technicalUser === 'true',
+                technicalUser:
+                    body.technicalUser === true ||
+                    body.technicalUser === 'true',
                 assignedGroups: body.assignedUserGroups
-                    ? body.assignedUserGroups.map((group: any) => group.id || group)
+                    ? body.assignedUserGroups.map(
+                          (group: any) => group.id || group,
+                      )
                     : [],
-                enterpriseId: body.enterpriseId,  // Pass enterprise context
-                enterpriseName: body.enterpriseName,  // Pass enterprise context
+                enterpriseId: body.enterpriseId, // Pass enterprise context
+                enterpriseName: body.enterpriseName, // Pass enterprise context
             };
 
             return await userManagement.createUserInAccountTable(
@@ -6046,7 +6325,9 @@ class UserManagementController {
                 body.accountName,
             );
         } else {
-            console.log('✅ Creating user in Systiva table (no account context)');
+            console.log(
+                '✅ Creating user in Systiva table (no account context)',
+            );
             return await userManagement.createUser(body);
         }
     }
@@ -6071,9 +6352,13 @@ class UserManagementController {
         const hasAccountContext = body.accountId && body.accountName;
 
         if (hasAccountContext) {
-            console.log(`✅ Updating user in account table: ${body.accountName} (${body.accountId})`);
+            console.log(
+                `✅ Updating user in account table: ${body.accountName} (${body.accountId})`,
+            );
             if (body.enterpriseId && body.enterpriseName) {
-                console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
+                console.log(
+                    `   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`,
+                );
             }
 
             const updatePayload: any = {
@@ -6085,14 +6370,16 @@ class UserManagementController {
                 startDate: body.startDate,
                 endDate: body.endDate,
                 technicalUser: body.technicalUser,
-                enterpriseId: body.enterpriseId,  // Pass enterprise context
-                enterpriseName: body.enterpriseName,  // Pass enterprise context
+                enterpriseId: body.enterpriseId, // Pass enterprise context
+                enterpriseName: body.enterpriseName, // Pass enterprise context
             };
 
             // ⚠️  DO NOT update assignedUserGroups via PUT endpoint
             // Group assignments should ONLY be updated via POST /users/:id/groups endpoint
             // This prevents frontend temporary IDs from being saved to database
-            console.log('⚠️  Ignoring assignedUserGroups in PUT request (use POST /users/:id/groups instead)');
+            console.log(
+                '⚠️  Ignoring assignedUserGroups in PUT request (use POST /users/:id/groups instead)',
+            );
 
             // Handle password if provided
             if (body.password) {
@@ -6106,7 +6393,9 @@ class UserManagementController {
                 body.accountName,
             );
         } else {
-            console.log('✅ Updating user in Systiva table (no account context)');
+            console.log(
+                '✅ Updating user in Systiva table (no account context)',
+            );
             return await userManagement.updateUser(id, body);
         }
     }
@@ -6137,13 +6426,23 @@ class UserManagementController {
         const hasAccountContext = accountId && accountName;
 
         if (hasAccountContext) {
-            console.log(`✅ Deleting user from account table: ${accountName} (${accountId})`);
+            console.log(
+                `✅ Deleting user from account table: ${accountName} (${accountId})`,
+            );
             if (enterpriseId && enterpriseName) {
-                console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
+                console.log(
+                    `   Enterprise context: ${enterpriseName} (${enterpriseId})`,
+                );
             }
-            await userManagement.deleteUserFromAccountTable(id, accountId, accountName);
+            await userManagement.deleteUserFromAccountTable(
+                id,
+                accountId,
+                accountName,
+            );
         } else {
-            console.log('✅ Deleting user from Systiva table (no account context)');
+            console.log(
+                '✅ Deleting user from Systiva table (no account context)',
+            );
             await userManagement.deleteUser(id);
         }
 
@@ -6185,9 +6484,14 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                console.log(`✅ Looking for user in account table: ${accountName} (${accountId})`);
-                const users = await userManagement.listUsersByAccount(accountId, accountName);
-                user = users.find(u => u.id === id);
+                console.log(
+                    `✅ Looking for user in account table: ${accountName} (${accountId})`,
+                );
+                const users = await userManagement.listUsersByAccount(
+                    accountId,
+                    accountName,
+                );
+                user = users.find((u) => u.id === id);
             } else {
                 console.log('✅ Looking for user in Systiva table');
                 user = await userManagement.getUser(id);
@@ -6218,10 +6522,18 @@ class UserManagementController {
                 // Bulk assignment (replace all)
                 console.log('📋 Bulk group assignment:', body.groupIds);
                 requestedGroupIds = body.groupIds;
-            } else if (body.assignedUserGroups && Array.isArray(body.assignedUserGroups)) {
+            } else if (
+                body.assignedUserGroups &&
+                Array.isArray(body.assignedUserGroups)
+            ) {
                 // Frontend format
-                console.log('📋 assignedUserGroups format:', body.assignedUserGroups);
-                requestedGroupIds = body.assignedUserGroups.map((g: any) => g.id || g);
+                console.log(
+                    '📋 assignedUserGroups format:',
+                    body.assignedUserGroups,
+                );
+                requestedGroupIds = body.assignedUserGroups.map(
+                    (g: any) => g.id || g,
+                );
             } else {
                 return {
                     success: false,
@@ -6230,10 +6542,16 @@ class UserManagementController {
             }
 
             // ✅ VALIDATE AND PRIORITIZE ACCOUNT-SPECIFIC GROUPS
-            console.log(`\n🔍 Validating ${requestedGroupIds.length} requested group(s)...`);
+            console.log(
+                `\n🔍 Validating ${requestedGroupIds.length} requested group(s)...`,
+            );
             const validatedGroupIds: string[] = [];
             const warnings: string[] = [];
-            const replacements: Array<{original: string, replacement: string, groupName: string}> = [];
+            const replacements: Array<{
+                original: string;
+                replacement: string;
+                groupName: string;
+            }> = [];
 
             for (const groupId of requestedGroupIds) {
                 const validation = await userManagement.validateGroupScope(
@@ -6248,47 +6566,70 @@ class UserManagementController {
                     console.log(`✅ Group ${groupId} is valid for this scope`);
                     validatedGroupIds.push(groupId);
                 } else {
-                    console.warn(`⚠️  Group ${groupId} validation failed: ${validation.warning}`);
+                    console.warn(
+                        `⚠️  Group ${groupId} validation failed: ${validation.warning}`,
+                    );
                     warnings.push(validation.warning || 'Validation failed');
 
                     // If it's a Systiva group in account context, try to find account-specific alternative
-                    if (validation.scopeType === 'systiva' && validation.group && hasAccountContext) {
-                        console.log(`🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`);
-
-                        const alternative = await userManagement.findAccountSpecificGroupByName(
-                            validation.group.name,
-                            accountId!,
-                            accountName!,
-                            enterpriseId,
-                            enterpriseName,
+                    if (
+                        validation.scopeType === 'systiva' &&
+                        validation.group &&
+                        hasAccountContext
+                    ) {
+                        console.log(
+                            `🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`,
                         );
 
+                        const alternative =
+                            await userManagement.findAccountSpecificGroupByName(
+                                validation.group.name,
+                                accountId!,
+                                accountName!,
+                                enterpriseId,
+                                enterpriseName,
+                            );
+
                         if (alternative) {
-                            console.log(`✅ Found account-specific alternative: ${alternative.name} (${alternative.id})`);
+                            console.log(
+                                `✅ Found account-specific alternative: ${alternative.name} (${alternative.id})`,
+                            );
                             validatedGroupIds.push(alternative.id);
                             replacements.push({
                                 original: groupId,
                                 replacement: alternative.id,
                                 groupName: alternative.name,
                             });
-                            warnings.push(`Replaced Systiva group "${validation.group.name}" with account-specific version (${alternative.id})`);
+                            warnings.push(
+                                `Replaced Systiva group "${validation.group.name}" with account-specific version (${alternative.id})`,
+                            );
                         } else {
-                            console.error(`❌ No account-specific alternative found for "${validation.group.name}"`);
-                            warnings.push(`Group "${validation.group.name}" (${groupId}) is Systiva-level with no account-specific alternative. Skipped.`);
+                            console.error(
+                                `❌ No account-specific alternative found for "${validation.group.name}"`,
+                            );
+                            warnings.push(
+                                `Group "${validation.group.name}" (${groupId}) is Systiva-level with no account-specific alternative. Skipped.`,
+                            );
                         }
                     } else {
-                        console.error(`❌ Group ${groupId} cannot be assigned: ${validation.warning}`);
+                        console.error(
+                            `❌ Group ${groupId} cannot be assigned: ${validation.warning}`,
+                        );
                     }
                 }
             }
 
-            if (validatedGroupIds.length === 0 && requestedGroupIds.length > 0) {
+            if (
+                validatedGroupIds.length === 0 &&
+                requestedGroupIds.length > 0
+            ) {
                 console.error('❌ No valid groups to assign after validation');
                 return {
                     success: false,
                     error: 'No valid groups to assign',
                     warnings,
-                    details: 'All requested groups failed validation. Ensure groups belong to the correct account and enterprise.',
+                    details:
+                        'All requested groups failed validation. Ensure groups belong to the correct account and enterprise.',
                 };
             }
 
@@ -6297,15 +6638,19 @@ class UserManagementController {
             console.log(`   Validated: ${validatedGroupIds.length} groups`);
             console.log(`   Replacements: ${replacements.length}`);
             if (replacements.length > 0) {
-                replacements.forEach(r => {
-                    console.log(`      - ${r.groupName}: ${r.original} → ${r.replacement}`);
+                replacements.forEach((r) => {
+                    console.log(
+                        `      - ${r.groupName}: ${r.original} → ${r.replacement}`,
+                    );
                 });
             }
             console.log('');
 
             // Update user with validated group assignments
             if (hasAccountContext) {
-                console.log(`✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`);
+                console.log(
+                    `✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`,
+                );
                 await userManagement.updateUserInAccountTable(
                     id,
                     {
@@ -6317,20 +6662,24 @@ class UserManagementController {
                     accountName,
                 );
             } else {
-                console.log(`✅ Updating user in Systiva table with ${validatedGroupIds.length} validated group(s)`);
+                console.log(
+                    `✅ Updating user in Systiva table with ${validatedGroupIds.length} validated group(s)`,
+                );
                 await userManagement.updateUser(id, {
                     assignedGroups: validatedGroupIds,
                 });
             }
 
-            console.log(`✅ Successfully assigned ${validatedGroupIds.length} group(s) to user ${id}`);
+            console.log(
+                `✅ Successfully assigned ${validatedGroupIds.length} group(s) to user ${id}`,
+            );
 
             const response: any = {
                 success: true,
                 message: 'Groups assigned successfully',
                 data: {
                     userId: id,
-                    assignedGroups: validatedGroupIds.map(gId => ({ id: gId })),
+                    assignedGroups: validatedGroupIds.map((gId) => ({id: gId})),
                     validatedCount: validatedGroupIds.length,
                     requestedCount: requestedGroupIds.length,
                 },
@@ -6367,14 +6716,17 @@ class UserManagementController {
             };
         }
 
-        console.log('🗑️  DELETE /api/user-management/users/:id/groups called:', {
-            userId: id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-            groupIds: body.groupIds,
-        });
+        console.log(
+            '🗑️  DELETE /api/user-management/users/:id/groups called:',
+            {
+                userId: id,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                groupIds: body.groupIds,
+            },
+        );
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
@@ -6383,12 +6735,19 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                console.log(`✅ Looking for user in account table: ${accountName}`);
+                console.log(
+                    `✅ Looking for user in account table: ${accountName}`,
+                );
                 if (enterpriseId && enterpriseName) {
-                    console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
+                    console.log(
+                        `   Enterprise context: ${enterpriseName} (${enterpriseId})`,
+                    );
                 }
-                const users = await userManagement.listUsersByAccount(accountId, accountName);
-                user = users.find(u => u.id === id);
+                const users = await userManagement.listUsersByAccount(
+                    accountId,
+                    accountName,
+                );
+                user = users.find((u) => u.id === id);
             } else {
                 console.log('✅ Looking for user in Systiva table');
                 user = await userManagement.getUser(id);
@@ -6414,7 +6773,9 @@ class UserManagementController {
                 (groupId) => !body.groupIds.includes(groupId),
             );
 
-            console.log(`📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`);
+            console.log(
+                `📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`,
+            );
 
             // Update user
             if (hasAccountContext) {
@@ -6422,8 +6783,8 @@ class UserManagementController {
                     id,
                     {
                         assignedGroups: updatedGroups,
-                        enterpriseId,      // Preserve enterprise context
-                        enterpriseName     // Preserve enterprise context
+                        enterpriseId, // Preserve enterprise context
+                        enterpriseName, // Preserve enterprise context
                     },
                     accountId,
                     accountName,
@@ -6434,7 +6795,9 @@ class UserManagementController {
                 });
             }
 
-            console.log(`✅ Removed ${body.groupIds.length} group(s) from user ${id}`);
+            console.log(
+                `✅ Removed ${body.groupIds.length} group(s) from user ${id}`,
+            );
 
             return {
                 success: true,
@@ -6479,8 +6842,11 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                const users = await userManagement.listUsersByAccount(accountId, accountName);
-                user = users.find(u => u.id === id);
+                const users = await userManagement.listUsersByAccount(
+                    accountId,
+                    accountName,
+                );
+                user = users.find((u) => u.id === id);
             } else {
                 user = await userManagement.getUser(id);
             }
@@ -6496,13 +6862,13 @@ class UserManagementController {
                 id,
                 accountId,
                 accountName,
-                enterpriseId,      // Pass enterprise context
-                enterpriseName     // Pass enterprise context
+                enterpriseId, // Pass enterprise context
+                enterpriseName, // Pass enterprise context
             );
 
             return {
                 success: true,
-                data: { groups },
+                data: {groups},
             };
         } catch (error: any) {
             console.error('❌ Error getting user groups:', error);
@@ -6536,7 +6902,12 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        const groups = await userManagement.listGroups(accountId, accountName, enterpriseId, enterpriseName);
+        const groups = await userManagement.listGroups(
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
         console.log(`📋 listGroups returning ${groups.length} groups`);
         return groups;
     }
@@ -6554,7 +6925,13 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+        return await userManagement.getGroup(
+            id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
     }
 
     @Get('groups/:id/roles')
@@ -6570,13 +6947,25 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroupRoles(id, accountId, accountName, enterpriseId, enterpriseName);
+        return await userManagement.getGroupRoles(
+            id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
     }
 
     @Post('groups/:id/roles')
     async assignRoleToGroup(
         @Param('id') id: string,
-        @Body() body: {roleId?: string; roleIds?: string[]; roleName?: string; groupId?: string},
+        @Body()
+        body: {
+            roleId?: string;
+            roleIds?: string[];
+            roleName?: string;
+            groupId?: string;
+        },
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
@@ -6598,9 +6987,20 @@ class UserManagementController {
                 enterpriseName,
             });
 
-            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+            const group = await userManagement.getGroup(
+                id,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            );
             if (!group) {
-                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
+                console.error(`❌ Group not found: ${id} with context:`, {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                });
                 return {
                     success: false,
                     error: 'Group not found',
@@ -6625,7 +7025,9 @@ class UserManagementController {
             }
 
             // Add only new roles (avoid duplicates)
-            const newRoles = rolesToAdd.filter(roleId => !currentRoles.includes(roleId));
+            const newRoles = rolesToAdd.filter(
+                (roleId) => !currentRoles.includes(roleId),
+            );
             const updatedRoles = [...currentRoles, ...newRoles];
 
             await userManagement.updateGroup(id, {
@@ -6636,7 +7038,9 @@ class UserManagementController {
                 selectedEnterpriseName: enterpriseName,
             });
 
-            console.log(`✅ Assigned ${newRoles.length} new role(s) to group ${id}. Total roles: ${updatedRoles.length}`);
+            console.log(
+                `✅ Assigned ${newRoles.length} new role(s) to group ${id}. Total roles: ${updatedRoles.length}`,
+            );
 
             return {
                 success: true,
@@ -6672,16 +7076,30 @@ class UserManagementController {
         }
 
         try {
-            console.log(`🗑️  Removing role ${roleId} from group ${id} with context:`, {
+            console.log(
+                `🗑️  Removing role ${roleId} from group ${id} with context:`,
+                {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                },
+            );
+
+            const group = await userManagement.getGroup(
+                id,
                 accountId,
                 accountName,
                 enterpriseId,
                 enterpriseName,
-            });
-
-            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+            );
             if (!group) {
-                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
+                console.error(`❌ Group not found: ${id} with context:`, {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                });
                 return {
                     success: false,
                     error: 'Group not found',
@@ -6701,7 +7119,9 @@ class UserManagementController {
                 selectedEnterpriseName: enterpriseName,
             });
 
-            console.log(`✅ Role ${roleId} removed from group ${id}. Remaining roles: ${updatedRoles.length}`);
+            console.log(
+                `✅ Role ${roleId} removed from group ${id}. Remaining roles: ${updatedRoles.length}`,
+            );
 
             return {
                 success: true,
@@ -6733,7 +7153,7 @@ class UserManagementController {
         // Map frontend field names to backend expected names
         const groupData = {
             ...body,
-            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
+            name: body.groupName || body.name, // Frontend sends 'groupName', backend expects 'name'
             selectedAccountId: body.accountId,
             selectedAccountName: body.accountName,
             selectedEnterpriseId: body.enterpriseId,
@@ -6758,11 +7178,13 @@ class UserManagementController {
         // Map frontend field names to backend expected names
         const updateData = {
             ...body,
-            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
+            name: body.groupName || body.name, // Frontend sends 'groupName', backend expects 'name'
             selectedAccountId: body.accountId || body.selectedAccountId,
             selectedAccountName: body.accountName || body.selectedAccountName,
-            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
-            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
+            selectedEnterpriseId:
+                body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName:
+                body.enterpriseName || body.selectedEnterpriseName,
         };
 
         console.log(`🔄 updateGroup mapped data:`, updateData);
@@ -6790,7 +7212,13 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        await userManagement.deleteGroup(id, accountId, accountName, enterpriseId, enterpriseName);
+        await userManagement.deleteGroup(
+            id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
         return {};
     }
 
@@ -6840,7 +7268,12 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        const roles = await userManagement.listRoles(accountId, accountName, enterpriseId, enterpriseName);
+        const roles = await userManagement.listRoles(
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
         console.log(`📋 listRoles returning ${roles.length} roles`);
         return roles;
     }
@@ -6858,7 +7291,13 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getRole(id, accountId, accountName, enterpriseId, enterpriseName);
+        return await userManagement.getRole(
+            id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
     }
 
     @Post('roles')
@@ -6873,7 +7312,7 @@ class UserManagementController {
         // Map frontend field names to backend expected names (similar to createGroup)
         const roleData = {
             ...body,
-            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
+            name: body.roleName || body.name, // Frontend might send 'roleName', backend expects 'name'
             selectedAccountId: body.accountId,
             selectedAccountName: body.accountName,
             selectedEnterpriseId: body.enterpriseId,
@@ -6898,11 +7337,13 @@ class UserManagementController {
         // Map frontend field names to backend expected names (similar to updateGroup)
         const updateData = {
             ...body,
-            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
+            name: body.roleName || body.name, // Frontend might send 'roleName', backend expects 'name'
             selectedAccountId: body.accountId || body.selectedAccountId,
             selectedAccountName: body.accountName || body.selectedAccountName,
-            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
-            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
+            selectedEnterpriseId:
+                body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName:
+                body.enterpriseName || body.selectedEnterpriseName,
         };
 
         console.log(`🔄 updateRole mapped data:`, updateData);
@@ -6930,7 +7371,13 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        await userManagement.deleteRole(id, accountId, accountName, enterpriseId, enterpriseName);
+        await userManagement.deleteRole(
+            id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
         return {};
     }
 
@@ -6966,7 +7413,9 @@ class GlobalSettingsController {
 
         // If no query parameters provided, return all records
         if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            console.log('📋 getEntities API called - fetching all global settings');
+            console.log(
+                '📋 getEntities API called - fetching all global settings',
+            );
             return await globalSettings.getAllEntities();
         }
 
@@ -7064,10 +7513,7 @@ class GlobalSettingsController {
     }
 
     @Put(':id')
-    async updateEntity(
-        @Param('id') recordId: string,
-        @Body() body: any,
-    ) {
+    async updateEntity(@Param('id') recordId: string, @Body() body: any) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
@@ -7197,10 +7643,11 @@ async function bootstrap() {
         console.log('Storage Mode:', process.env.STORAGE_MODE || 'postgres');
 
         // Check GitHub OAuth configuration
-        if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
-            console.warn(
-                '⚠️  WARNING: GitHub OAuth is not configured!',
-            );
+        if (
+            !process.env.GITHUB_CLIENT_ID ||
+            !process.env.GITHUB_CLIENT_SECRET
+        ) {
+            console.warn('⚠️  WARNING: GitHub OAuth is not configured!');
             console.warn(
                 '   Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables',
             );
