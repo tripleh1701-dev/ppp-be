@@ -1148,7 +1148,8 @@ class AccountsController {
             return {
                 error: 'Failed to list accounts',
                 message: error?.message || 'Unknown error',
-                stack: process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
+                stack:
+                    process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
             };
         }
     }
@@ -1164,7 +1165,10 @@ class AccountsController {
     @Post()
     async create(@Body() body: any) {
         try {
-            console.log('📝 POST /api/accounts - Creating account:', body?.accountName);
+            console.log(
+                '📝 POST /api/accounts - Creating account:',
+                body?.accountName,
+            );
             if (storageMode === 'dynamodb' && accountsDynamoDB) {
                 const result = await accountsDynamoDB.create(body);
                 console.log('✅ Account created:', result?.id);
@@ -7659,7 +7663,7 @@ class GlobalSettingsController {
         ConnectorsController,
     ],
 })
-class AppModule {}
+export class AppModule {}
 
 async function bootstrap() {
     try {
