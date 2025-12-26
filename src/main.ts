@@ -7924,4 +7924,8 @@ async function bootstrap() {
     }
 }
 
-bootstrap();
+// Only run bootstrap when NOT in Lambda environment
+// Lambda uses index.ts handler which creates the app differently
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    bootstrap();
+}

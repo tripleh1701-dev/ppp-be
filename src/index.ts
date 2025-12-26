@@ -70,7 +70,7 @@ async function bootstrapServer(): Promise<any> {
  */
 export const handler = async (event: any, context: any): Promise<any> => {
     console.log('📨 Lambda invoked');
-    console.log('Path:', event.path || event.rawPath);
+    console.log('Original Path:', event.path || event.rawPath);
     console.log(
         'Method:',
         event.httpMethod || event.requestContext?.http?.method,
@@ -80,6 +80,32 @@ export const handler = async (event: any, context: any): Promise<any> => {
     context.callbackWaitsForEmptyEventLoop = false;
 
     try {
+        // Rewrite path: Remove /api/v1/app prefix so NestJS can match routes
+        // API Gateway sends: /api/v1/app/api/accounts
+        // NestJS expects:    /api/accounts
+        let path = event.path || event.rawPath || '';
+
+        // Remove stage prefix if present (e.g., /prod)
+        const stage = event.requestContext?.stage;
+        if (stage && path.startsWith(`/${stage}`)) {
+            path = path.slice(stage.length + 1);
+        }
+
+        // Remove /api/v1/app prefix
+        if (path.startsWith('/api/v1/app')) {
+            path = path.slice('/api/v1/app'.length);
+        }
+
+        // Update the event with the rewritten path
+        if (event.path) {
+            event.path = path;
+        }
+        if (event.rawPath) {
+            event.rawPath = path;
+        }
+
+        console.log('Rewritten Path:', path);
+
         // Bootstrap or get cached server
         const server = await bootstrapServer();
 
