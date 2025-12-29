@@ -116,7 +116,8 @@ if (storageMode === 'dynamodb') {
         enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
         services = new ServicesDynamoDBService(STORAGE_DIR);
         products = new ProductsDynamoDBService(STORAGE_DIR);
-        enterpriseProductsServices = new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
+        enterpriseProductsServices =
+            new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
         accountLicenses = new AccountLicensesDynamoDBService();
         userManagement = new UserManagementDynamoDBService();
         AccessControl_Service = new AccessControl_DynamoDBService();
@@ -134,7 +135,9 @@ if (storageMode === 'dynamodb') {
     enterprises = new EnterprisesService(STORAGE_DIR);
     services = new ServicesService(STORAGE_DIR);
     products = new ProductsService(STORAGE_DIR);
-    enterpriseProductsServices = new EnterpriseProductsServicesService(STORAGE_DIR);
+    enterpriseProductsServices = new EnterpriseProductsServicesService(
+        STORAGE_DIR,
+    );
     environments = new EnvironmentsService(STORAGE_DIR);
 }
 
@@ -1998,6 +2001,8 @@ class UsersController {
     async list(
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         try {
             if (storageMode === 'dynamodb' && userManagement) {
@@ -2010,6 +2015,14 @@ class UsersController {
                     accountName === '' ||
                     accountName.toLowerCase() === 'systiva';
 
+                // Determine if filtering by enterprise
+                const isGlobalEnterprise =
+                    !enterpriseId ||
+                    enterpriseId === '' ||
+                    !enterpriseName ||
+                    enterpriseName === '' ||
+                    enterpriseName.toLowerCase() === 'global';
+
                 let usersFromDB;
                 if (isSystivaAccount) {
                     usersFromDB = await userManagement.listUsers();
@@ -2020,17 +2033,28 @@ class UsersController {
                     );
                 }
 
+                // Filter by enterprise if not Global
+                if (!isGlobalEnterprise && usersFromDB) {
+                    usersFromDB = usersFromDB.filter(
+                        (user: any) =>
+                            !user.enterpriseId ||
+                            user.enterpriseId === enterpriseId ||
+                            user.enterpriseName?.toLowerCase() ===
+                                enterpriseName?.toLowerCase(),
+                    );
+                }
+
                 // Fetch assigned groups for each user
                 const usersWithGroups = await Promise.all(
-                    usersFromDB.map(async (user) => {
+                    usersFromDB.map(async (user: any) => {
                         try {
                             const assignedGroups =
                                 await userManagement.getUserGroups(
                                     user.id,
                                     accountId, // Pass account context
                                     accountName, // Pass account context
-                                    undefined, // enterpriseId (not available in /api/users)
-                                    undefined, // enterpriseName (not available in /api/users)
+                                    enterpriseId, // Pass enterprise context
+                                    enterpriseName, // Pass enterprise context
                                 );
                             return {
                                 ...user,
@@ -4748,13 +4772,15 @@ class RolesController {
         @Query('groupId') groupId?: string,
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         console.log('📋 listRoles API called with:', {
             groupId,
             accountId,
             accountName,
-            accountIdType: typeof accountId,
-            accountNameType: typeof accountName,
+            enterpriseId,
+            enterpriseName,
         });
 
         if (storageMode === 'dynamodb' && userManagement) {
@@ -4770,29 +4796,45 @@ class RolesController {
                 accountName === '' ||
                 accountName.toLowerCase() === 'systiva';
 
-            console.log('📋 isSystivaAccount check:', {
+            // Determine if this is a Global enterprise request
+            const isGlobalEnterprise =
+                !enterpriseId ||
+                enterpriseId === '' ||
+                !enterpriseName ||
+                enterpriseName === '' ||
+                enterpriseName.toLowerCase() === 'global';
+
+            console.log('📋 Filter check:', {
                 isSystivaAccount,
-                checks: {
-                    noAccountId: !accountId,
-                    emptyAccountId: accountId === '',
-                    noAccountName: !accountName,
-                    emptyAccountName: accountName === '',
-                    isSystivaName: accountName?.toLowerCase() === 'systiva',
-                },
+                isGlobalEnterprise,
             });
 
+            let roles;
             if (isSystivaAccount) {
                 console.log('📋 Calling listRoles() for Systiva');
-                return await userManagement.listRoles();
+                roles = await userManagement.listRoles();
             } else {
                 console.log(
                     `📋 Calling listRolesByAccount() for ${accountName}`,
                 );
-                return await userManagement.listRolesByAccount(
+                roles = await userManagement.listRolesByAccount(
                     accountId,
                     accountName,
                 );
             }
+
+            // Filter by enterprise if not Global
+            if (!isGlobalEnterprise && roles) {
+                roles = roles.filter(
+                    (role: any) =>
+                        !role.enterpriseId ||
+                        role.enterpriseId === enterpriseId ||
+                        role.enterpriseName?.toLowerCase() ===
+                            enterpriseName?.toLowerCase(),
+                );
+            }
+
+            return roles;
         } else {
             if (groupId) {
                 return await roles.getRolesForGroup(groupId);
@@ -5257,17 +5299,68 @@ class BreadcrumbController {
 @Controller('api/groups')
 class GroupsController {
     @Get()
-    async list(@Query('search') search?: string) {
+    async list(
+        @Query('search') search?: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode === 'dynamodb' && userManagement) {
-            const allGroups = await userManagement.listGroups();
-            if (!search) return allGroups;
-            const searchLower = search.toLowerCase();
-            return allGroups.filter(
-                (group) =>
-                    group.name.toLowerCase().includes(searchLower) ||
-                    (group.description &&
-                        group.description.toLowerCase().includes(searchLower)),
-            );
+            let allGroups = await userManagement.listGroups();
+
+            // Filter by account if provided (skip for Systiva)
+            const isSystivaAccount =
+                !accountId ||
+                accountId === '' ||
+                !accountName ||
+                accountName === '' ||
+                accountName.toLowerCase() === 'systiva';
+
+            if (!isSystivaAccount) {
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        !group.accountId ||
+                        group.accountId === accountId ||
+                        group.accountName?.toLowerCase() ===
+                            accountName?.toLowerCase(),
+                );
+            }
+
+            // Filter by enterprise if provided (skip for Global)
+            const isGlobalEnterprise =
+                !enterpriseId ||
+                enterpriseId === '' ||
+                !enterpriseName ||
+                enterpriseName === '' ||
+                enterpriseName.toLowerCase() === 'global';
+
+            if (!isGlobalEnterprise) {
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        !group.enterpriseId ||
+                        group.enterpriseId === enterpriseId ||
+                        group.enterpriseName?.toLowerCase() ===
+                            enterpriseName?.toLowerCase() ||
+                        group.entity?.toLowerCase() ===
+                            enterpriseName?.toLowerCase(),
+                );
+            }
+
+            // Apply search filter
+            if (search) {
+                const searchLower = search.toLowerCase();
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        group.name.toLowerCase().includes(searchLower) ||
+                        (group.description &&
+                            group.description
+                                .toLowerCase()
+                                .includes(searchLower)),
+                );
+            }
+
+            return allGroups;
         } else {
             return groups.list(search);
         }
@@ -7802,12 +7895,20 @@ async function bootstrap() {
         // Services are already initialized at module load time
         // This section is kept for backward compatibility and logging
         console.log('Services status for storage mode:', currentStorageMode);
-        console.log('  accountsDynamoDB:', accountsDynamoDB ? 'initialized' : 'not initialized');
-        console.log('  enterprises:', enterprises ? 'initialized' : 'not initialized');
+        console.log(
+            '  accountsDynamoDB:',
+            accountsDynamoDB ? 'initialized' : 'not initialized',
+        );
+        console.log(
+            '  enterprises:',
+            enterprises ? 'initialized' : 'not initialized',
+        );
 
         // Re-initialize services only if not already done (should not happen normally)
         if (currentStorageMode === 'dynamodb' && !accountsDynamoDB) {
-            console.log('⚠️ Re-initializing DynamoDB services in bootstrap (this should not happen)');
+            console.log(
+                '⚠️ Re-initializing DynamoDB services in bootstrap (this should not happen)',
+            );
             accountsDynamoDB = new AccountsDynamoDBService();
             enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
             services = new ServicesDynamoDBService(STORAGE_DIR);
