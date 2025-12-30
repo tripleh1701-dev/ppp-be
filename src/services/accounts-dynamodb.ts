@@ -310,7 +310,8 @@ export class AccountsDynamoDBService {
                         status:
                             item.provisioningState || item.status || 'Active',
                         provisioningState: item.provisioningState || '',
-                        licenses: [],
+                        // Licenses will be populated after mapping
+                        licenses: item.licenses || [],
                         createdAt:
                             item.registeredOn ||
                             item.createdAt ||
