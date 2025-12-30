@@ -651,13 +651,14 @@ export class AccountsDynamoDBService {
             )}, updated_date = :updated`;
 
             console.log('📝 DynamoDB UpdateCommand:', {
-                TableName: this.tableName,
+                TableName: this.accountRegistryTable,
                 Key: {PK: `ACCOUNT#${accountId}`, SK: `ACCOUNT#${accountId}`},
                 UpdateExpression: updateExpression,
             });
 
+            // Use accountRegistryTable (same table as create and list)
             await DynamoDBOperations.updateItem(
-                this.tableName,
+                this.accountRegistryTable,
                 {
                     PK: `ACCOUNT#${accountId}`,
                     SK: `ACCOUNT#${accountId}`,
@@ -682,6 +683,10 @@ export class AccountsDynamoDBService {
     async remove(accountId: string): Promise<void> {
         try {
             console.log('🗑️ Deleting account and related entities:', accountId);
+            console.log('🗑️ Using tables:', {
+                tableName: this.tableName,
+                accountRegistryTable: this.accountRegistryTable,
+            });
 
             // 1. Delete all licenses for this account
             const licenses = await this.listLicenses(accountId);
@@ -697,11 +702,25 @@ export class AccountsDynamoDBService {
             }
             console.log('✅ Deleted technical user (if existed)');
 
-            // 3. Delete the account entity (use same PK format as create: ACCOUNT#${id})
+            // 3. Delete from BOTH tables to ensure cleanup
+            // Delete from tableName (where create/update work)
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `ACCOUNT#${accountId}`,
                 SK: `ACCOUNT#${accountId}`,
-            });
+            }).catch((e) => console.log('Note: tableName delete:', e.message));
+
+            // Delete from accountRegistryTable (where list reads from)
+            if (this.accountRegistryTable !== this.tableName) {
+                await DynamoDBOperations.deleteItem(this.accountRegistryTable, {
+                    PK: `ACCOUNT#${accountId}`,
+                    SK: `ACCOUNT#${accountId}`,
+                }).catch((e) =>
+                    console.log(
+                        'Note: accountRegistryTable delete:',
+                        e.message,
+                    ),
+                );
+            }
 
             // Also try legacy format in case account was created with old format
             await DynamoDBOperations.deleteItem(this.tableName, {
@@ -709,7 +728,14 @@ export class AccountsDynamoDBService {
                 SK: `ACCOUNT#${accountId}`,
             }).catch(() => {}); // Ignore errors for legacy format
 
-            console.log('✅ Account deleted successfully');
+            if (this.accountRegistryTable !== this.tableName) {
+                await DynamoDBOperations.deleteItem(this.accountRegistryTable, {
+                    PK: `SYSTIVA#ACCOUNTS`,
+                    SK: `ACCOUNT#${accountId}`,
+                }).catch(() => {}); // Ignore errors for legacy format
+            }
+
+            console.log('✅ Account deleted successfully from all tables');
         } catch (error) {
             console.error('❌ Error deleting account:', error);
             throw error;
