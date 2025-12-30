@@ -79,6 +79,12 @@ try {
 // Initialize storage mode from environment variables immediately
 // This must happen before services are used by controllers
 const storageMode: string = process.env.STORAGE_MODE || 'dynamodb';
+
+// Infrastructure provisioning API URL (for account onboarding/offboarding)
+// This should be set via environment variable in deployment
+const INFRA_PROVISIONING_API_BASE_URL =
+    process.env.INFRA_PROVISIONING_API_URL || '';
+
 console.log('🔧 Storage mode (from env):', storageMode);
 console.log('🔧 Environment variables at load time:', {
     STORAGE_MODE: process.env.STORAGE_MODE,
@@ -86,6 +92,9 @@ console.log('🔧 Environment variables at load time:', {
     WORKSPACE: process.env.WORKSPACE,
     ACCOUNT_REGISTRY_TABLE_NAME: process.env.ACCOUNT_REGISTRY_TABLE_NAME,
     DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+    INFRA_PROVISIONING_API_URL: INFRA_PROVISIONING_API_BASE_URL
+        ? '***configured***'
+        : 'NOT SET',
 });
 
 // Providers (plain classes)
@@ -1340,6 +1349,100 @@ class AccountsController {
             }
 
             console.log(
+                '✅ Account saved to database:',
+                savedAccount?.id || accountId,
+            );
+
+            // Trigger infrastructure provisioning via external API (if configured)
+            let infraProvisioningResult: any = null;
+
+            if (!INFRA_PROVISIONING_API_BASE_URL) {
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - skipping infrastructure provisioning',
+                );
+                infraProvisioningResult = {
+                    skipped: true,
+                    message: 'Infrastructure provisioning API not configured',
+                };
+            } else {
+                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/onboard`;
+
+                try {
+                    console.log(
+                        '🔧 Triggering infrastructure provisioning:',
+                        infraApiUrl,
+                    );
+
+                    // Build payload for infrastructure API
+                    const infraPayload = {
+                        accountName: body.accountName,
+                        subscriptionTier: body.subscriptionTier,
+                        email: body.email || body.adminEmail || '',
+                        firstName: body.firstName || '',
+                        lastName: body.lastName || '',
+                        adminUsername: body.adminUsername || 'admin',
+                        adminEmail: body.adminEmail || body.email || '',
+                        adminPassword: body.adminPassword || '',
+                        createdBy: body.createdBy || 'admin',
+                    };
+
+                    const infraResponse = await axios.post(
+                        infraApiUrl,
+                        infraPayload,
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            timeout: 30000, // 30 second timeout
+                        },
+                    );
+
+                    infraProvisioningResult = infraResponse.data;
+                    console.log(
+                        '✅ Infrastructure provisioning initiated:',
+                        infraProvisioningResult,
+                    );
+
+                    // Update account with provisioning status if returned
+                    if (
+                        infraProvisioningResult?.data?.accountId &&
+                        storageMode === 'dynamodb' &&
+                        accountsDynamoDB
+                    ) {
+                        // Update account with infrastructure provisioning details
+                        await accountsDynamoDB.update(
+                            String(savedAccount?.id || accountId),
+                            {
+                                infraAccountId:
+                                    infraProvisioningResult.data.accountId,
+                                provisioningState:
+                                    infraProvisioningResult.data
+                                        .provisioningState || 'creating',
+                                stepFunctionExecutionArn:
+                                    infraProvisioningResult.data
+                                        .stepFunctionExecutionArn,
+                                stepFunctionStatus:
+                                    infraProvisioningResult.data
+                                        .stepFunctionStatus,
+                            } as any,
+                        );
+                    }
+                } catch (infraError: any) {
+                    console.error(
+                        '⚠️ Infrastructure provisioning failed (account saved but infra not provisioned):',
+                        infraError?.response?.data || infraError.message,
+                    );
+                    // Don't fail the request - account is saved, infra provisioning can be retried
+                    infraProvisioningResult = {
+                        error: 'Infrastructure provisioning failed',
+                        message:
+                            infraError?.response?.data?.msg ||
+                            infraError.message,
+                    };
+                }
+            }
+
+            console.log(
                 '✅ Account onboarded successfully:',
                 savedAccount?.id || accountId,
             );
@@ -1347,7 +1450,10 @@ class AccountsController {
             return res.status(HttpStatus.CREATED).json({
                 result: 'success',
                 msg: 'Account onboarded successfully',
-                data: savedAccount || accountData,
+                data: {
+                    ...(savedAccount || accountData),
+                    infraProvisioning: infraProvisioningResult,
+                },
                 accountId: savedAccount?.id || accountId,
             });
         } catch (error: any) {
@@ -1355,6 +1461,115 @@ class AccountsController {
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 result: 'failed',
                 msg: `Failed to onboard account: ${error.message}`,
+            });
+        }
+    }
+
+    /**
+     * Offboard (delete) an account
+     * DELETE /api/accounts/offboard?accountId=xxx
+     *
+     * This triggers infrastructure deprovisioning via external API
+     * and removes the account from the database
+     */
+    @Delete('offboard')
+    async offboard(@Query('accountId') accountId: string, @Res() res: any) {
+        try {
+            if (!accountId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: 'accountId query parameter is required',
+                });
+            }
+
+            console.log('🗑️ Offboarding account:', accountId);
+
+            // Get account details before deletion
+            let account: any = null;
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                account = await accountsDynamoDB.get(accountId);
+            }
+
+            if (!account) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    result: 'failed',
+                    msg: `Account not found: ${accountId}`,
+                });
+            }
+
+            // Trigger infrastructure deprovisioning via external API (if configured)
+            let infraDeprovisioningResult: any = null;
+
+            if (!INFRA_PROVISIONING_API_BASE_URL) {
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - skipping infrastructure deprovisioning',
+                );
+                infraDeprovisioningResult = {
+                    skipped: true,
+                    message: 'Infrastructure deprovisioning API not configured',
+                };
+            } else {
+                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
+
+                try {
+                    console.log(
+                        '🔧 Triggering infrastructure deprovisioning:',
+                        infraApiUrl,
+                    );
+
+                    const infraResponse = await axios.delete(
+                        `${infraApiUrl}?accountId=${accountId}`,
+                        {
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            timeout: 30000, // 30 second timeout
+                        },
+                    );
+
+                    infraDeprovisioningResult = infraResponse.data;
+                    console.log(
+                        '✅ Infrastructure deprovisioning initiated:',
+                        infraDeprovisioningResult,
+                    );
+                } catch (infraError: any) {
+                    console.error(
+                        '⚠️ Infrastructure deprovisioning failed:',
+                        infraError?.response?.data || infraError.message,
+                    );
+                    // Continue with database deletion even if infra deprovisioning fails
+                    infraDeprovisioningResult = {
+                        error: 'Infrastructure deprovisioning failed',
+                        message:
+                            infraError?.response?.data?.msg ||
+                            infraError.message,
+                    };
+                }
+            }
+
+            // Delete from database
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                await accountsDynamoDB.remove(accountId);
+            } else {
+                await accounts.remove(Number(accountId));
+            }
+
+            console.log('✅ Account offboarded successfully:', accountId);
+
+            return res.status(HttpStatus.OK).json({
+                result: 'success',
+                msg: 'Account offboarded successfully',
+                data: {
+                    accountId: accountId,
+                    deletedAt: new Date().toISOString(),
+                    infraDeprovisioning: infraDeprovisioningResult,
+                },
+            });
+        } catch (error: any) {
+            console.error('❌ Error offboarding account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to offboard account: ${error.message}`,
             });
         }
     }
