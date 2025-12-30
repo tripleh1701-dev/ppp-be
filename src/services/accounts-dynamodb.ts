@@ -354,10 +354,19 @@ export class AccountsDynamoDBService {
         try {
             console.log('🔍 Getting account:', accountId);
 
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#ACCOUNTS`,
+            // Try new format first: PK = ACCOUNT#${id}
+            let item = await DynamoDBOperations.getItem(this.tableName, {
+                PK: `ACCOUNT#${accountId}`,
                 SK: `ACCOUNT#${accountId}`,
             });
+
+            // Fallback to legacy format: PK = SYSTIVA#ACCOUNTS
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: `SYSTIVA#ACCOUNTS`,
+                    SK: `ACCOUNT#${accountId}`,
+                });
+            }
 
             if (!item) {
                 console.log('❌ Account not found:', accountId);
@@ -643,14 +652,14 @@ export class AccountsDynamoDBService {
 
             console.log('📝 DynamoDB UpdateCommand:', {
                 TableName: this.tableName,
-                Key: {PK: `SYSTIVA#ACCOUNTS`, SK: `ACCOUNT#${accountId}`},
+                Key: {PK: `ACCOUNT#${accountId}`, SK: `ACCOUNT#${accountId}`},
                 UpdateExpression: updateExpression,
             });
 
             await DynamoDBOperations.updateItem(
                 this.tableName,
                 {
-                    PK: `SYSTIVA#ACCOUNTS`,
+                    PK: `ACCOUNT#${accountId}`,
                     SK: `ACCOUNT#${accountId}`,
                 },
                 updateExpression,
@@ -688,11 +697,17 @@ export class AccountsDynamoDBService {
             }
             console.log('✅ Deleted technical user (if existed)');
 
-            // 3. Delete the account entity
+            // 3. Delete the account entity (use same PK format as create: ACCOUNT#${id})
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: `ACCOUNT#${accountId}`,
+                SK: `ACCOUNT#${accountId}`,
+            });
+
+            // Also try legacy format in case account was created with old format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `SYSTIVA#ACCOUNTS`,
                 SK: `ACCOUNT#${accountId}`,
-            });
+            }).catch(() => {}); // Ignore errors for legacy format
 
             console.log('✅ Account deleted successfully');
         } catch (error) {
