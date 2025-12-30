@@ -702,37 +702,57 @@ export class AccountsDynamoDBService {
             }
             console.log('✅ Deleted technical user (if existed)');
 
-            // 3. Delete from BOTH tables to ensure cleanup
-            // Delete from tableName (where create/update work)
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `ACCOUNT#${accountId}`,
-                SK: `ACCOUNT#${accountId}`,
-            }).catch((e) => console.log('Note: tableName delete:', e.message));
+            // 3. Find the actual account in DynamoDB by scanning for it
+            // This handles all PK formats since accounts can be stored with different PKs
+            const allItems = await DynamoDBOperations.scanItems(
+                this.accountRegistryTable,
+            );
+            const accountItems = (allItems || []).filter(
+                (item: any) =>
+                    item &&
+                    (item.accountId === accountId || item.id === accountId),
+            );
 
-            // Delete from accountRegistryTable (where list reads from)
-            if (this.accountRegistryTable !== this.tableName) {
-                await DynamoDBOperations.deleteItem(this.accountRegistryTable, {
-                    PK: `ACCOUNT#${accountId}`,
-                    SK: `ACCOUNT#${accountId}`,
-                }).catch((e) =>
+            console.log(
+                `🔍 Found ${accountItems.length} items matching accountId: ${accountId}`,
+            );
+
+            // 4. Delete each matching item using its actual PK/SK
+            for (const item of accountItems) {
+                if (item.PK && item.SK) {
                     console.log(
-                        'Note: accountRegistryTable delete:',
-                        e.message,
-                    ),
-                );
+                        `🗑️ Deleting item with PK: ${item.PK}, SK: ${item.SK}`,
+                    );
+                    await DynamoDBOperations.deleteItem(
+                        this.accountRegistryTable,
+                        {
+                            PK: item.PK,
+                            SK: item.SK,
+                        },
+                    ).catch((e) =>
+                        console.log('Note: delete error:', e.message),
+                    );
+                }
             }
 
-            // Also try legacy format in case account was created with old format
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#ACCOUNTS`,
-                SK: `ACCOUNT#${accountId}`,
-            }).catch(() => {}); // Ignore errors for legacy format
+            // 5. Also try standard formats as fallback
+            const pkFormats = [
+                {PK: `ACCOUNT#${accountId}`, SK: `ACCOUNT#${accountId}`},
+                {PK: `SYSTIVA#ACCOUNTS`, SK: `ACCOUNT#${accountId}`},
+            ];
 
-            if (this.accountRegistryTable !== this.tableName) {
-                await DynamoDBOperations.deleteItem(this.accountRegistryTable, {
-                    PK: `SYSTIVA#ACCOUNTS`,
-                    SK: `ACCOUNT#${accountId}`,
-                }).catch(() => {}); // Ignore errors for legacy format
+            for (const key of pkFormats) {
+                await DynamoDBOperations.deleteItem(
+                    this.accountRegistryTable,
+                    key,
+                ).catch(() => {}); // Ignore errors
+
+                if (this.tableName !== this.accountRegistryTable) {
+                    await DynamoDBOperations.deleteItem(
+                        this.tableName,
+                        key,
+                    ).catch(() => {}); // Ignore errors
+                }
             }
 
             console.log('✅ Account deleted successfully from all tables');
