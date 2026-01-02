@@ -1307,69 +1307,15 @@ class AccountsController {
                 });
             }
 
-            // Generate account ID (YYYYMMDD format with random suffix if needed)
+            console.log('🚀 Onboarding new account:', body.accountName);
+
             const now = new Date();
-            const dateStr = now.toISOString().slice(0, 10).replace(/-/g, '');
-            const randomSuffix = Math.floor(Math.random() * 99)
-                .toString()
-                .padStart(2, '0');
-            const accountId = `${dateStr.slice(0, 6)}${randomSuffix}`;
-
-            // Build account data - required fields
-            const accountData: any = {
-                id: accountId,
-                accountId: accountId,
-                accountName: body.accountName,
-                masterAccount: body.masterAccount,
-                subscriptionTier: body.subscriptionTier,
-                provisioningState: 'active',
-                status: 'ACTIVE',
-                createdAt: now.toISOString(),
-                updatedAt: now.toISOString(),
-                createdBy: body.createdBy || 'admin',
-            };
-
-            // Add optional fields if provided
-            if (body.email) accountData.email = body.email;
-            if (body.firstName) accountData.firstName = body.firstName;
-            if (body.lastName) accountData.lastName = body.lastName;
-            if (body.adminUsername)
-                accountData.adminUsername = body.adminUsername;
-            if (body.adminEmail) accountData.adminEmail = body.adminEmail;
-            if (body.adminPassword)
-                accountData.adminPassword = body.adminPassword;
-            if (body.addressDetails)
-                accountData.addressDetails = body.addressDetails;
-            if (body.technicalUser)
-                accountData.technicalUser = body.technicalUser;
-
-            console.log('🚀 Onboarding new account:', accountData.accountName);
-
-            // Save to DynamoDB or PostgreSQL
-            let savedAccount;
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                savedAccount = await accountsDynamoDB.create(accountData);
-            } else {
-                savedAccount = await accounts.create(accountData);
-            }
-
-            console.log(
-                '✅ Account saved to database:',
-                savedAccount?.id || accountId,
-            );
-
-            // Trigger infrastructure provisioning via external API (if configured)
             let infraProvisioningResult: any = null;
+            let savedAccount: any = null;
 
-            if (!INFRA_PROVISIONING_API_BASE_URL) {
-                console.log(
-                    '⚠️ INFRA_PROVISIONING_API_URL not configured - skipping infrastructure provisioning',
-                );
-                infraProvisioningResult = {
-                    skipped: true,
-                    message: 'Infrastructure provisioning API not configured',
-                };
-            } else {
+            // If infrastructure API is configured, let it handle persistence
+            // to avoid duplicate entries in DynamoDB
+            if (INFRA_PROVISIONING_API_BASE_URL) {
                 const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/onboard`;
 
                 try {
@@ -1431,36 +1377,39 @@ class AccountsController {
                         infraProvisioningResult,
                     );
 
-                    // Update account with provisioning status if returned
-                    if (
-                        infraProvisioningResult?.data?.accountId &&
-                        storageMode === 'dynamodb' &&
-                        accountsDynamoDB
-                    ) {
-                        // Update account with infrastructure provisioning details
-                        await accountsDynamoDB.update(
-                            String(savedAccount?.id || accountId),
-                            {
-                                infraAccountId:
-                                    infraProvisioningResult.data.accountId,
-                                provisioningState:
-                                    infraProvisioningResult.data
-                                        .provisioningState || 'creating',
-                                stepFunctionExecutionArn:
-                                    infraProvisioningResult.data
-                                        .stepFunctionExecutionArn,
-                                stepFunctionStatus:
-                                    infraProvisioningResult.data
-                                        .stepFunctionStatus,
-                            } as any,
-                        );
+                    // Use the account created by infra API as the source of truth
+                    if (infraProvisioningResult?.data) {
+                        savedAccount = {
+                            id: infraProvisioningResult.data.accountId,
+                            accountId: infraProvisioningResult.data.accountId,
+                            accountName:
+                                infraProvisioningResult.data.accountName ||
+                                body.accountName,
+                            masterAccount: body.masterAccount,
+                            subscriptionTier:
+                                infraProvisioningResult.data.subscriptionTier ||
+                                body.subscriptionTier,
+                            email: infraProvisioningResult.data.email,
+                            firstName: infraProvisioningResult.data.firstName,
+                            lastName: infraProvisioningResult.data.lastName,
+                            provisioningState:
+                                infraProvisioningResult.data.provisioningState,
+                            stepFunctionExecutionArn:
+                                infraProvisioningResult.data
+                                    .stepFunctionExecutionArn,
+                            createdAt:
+                                infraProvisioningResult.data.registeredOn ||
+                                now.toISOString(),
+                            updatedAt:
+                                infraProvisioningResult.data.lastModified ||
+                                now.toISOString(),
+                        };
                     }
                 } catch (infraError: any) {
                     console.error(
-                        '⚠️ Infrastructure provisioning failed (account saved but infra not provisioned):',
+                        '⚠️ Infrastructure provisioning failed:',
                         infraError?.response?.data || infraError.message,
                     );
-                    // Don't fail the request - account is saved, infra provisioning can be retried
                     infraProvisioningResult = {
                         error: 'Infrastructure provisioning failed',
                         message:
@@ -1468,21 +1417,79 @@ class AccountsController {
                             infraError.message,
                     };
                 }
+            } else {
+                // Infra API not configured - save locally to DynamoDB
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - saving locally only',
+                );
+
+                // Generate account ID
+                const dateStr = now
+                    .toISOString()
+                    .slice(0, 10)
+                    .replace(/-/g, '');
+                const randomSuffix = Math.floor(Math.random() * 99)
+                    .toString()
+                    .padStart(2, '0');
+                const accountId = `${dateStr.slice(0, 6)}${randomSuffix}`;
+
+                // Build account data
+                const accountData: any = {
+                    id: accountId,
+                    accountId: accountId,
+                    accountName: body.accountName,
+                    masterAccount: body.masterAccount,
+                    subscriptionTier: body.subscriptionTier,
+                    provisioningState: 'active',
+                    status: 'ACTIVE',
+                    createdAt: now.toISOString(),
+                    updatedAt: now.toISOString(),
+                    createdBy: body.createdBy || 'admin',
+                };
+
+                // Add optional fields if provided
+                if (body.email) accountData.email = body.email;
+                if (body.firstName) accountData.firstName = body.firstName;
+                if (body.lastName) accountData.lastName = body.lastName;
+                if (body.adminUsername)
+                    accountData.adminUsername = body.adminUsername;
+                if (body.adminEmail) accountData.adminEmail = body.adminEmail;
+                if (body.addressDetails)
+                    accountData.addressDetails = body.addressDetails;
+                if (body.technicalUser)
+                    accountData.technicalUser = body.technicalUser;
+
+                // Save to DynamoDB or PostgreSQL
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    savedAccount = await accountsDynamoDB.create(accountData);
+                } else {
+                    savedAccount = await accounts.create(accountData);
+                }
+
+                console.log(
+                    '✅ Account saved to local database:',
+                    savedAccount?.id,
+                );
+
+                infraProvisioningResult = {
+                    skipped: true,
+                    message:
+                        'Infrastructure provisioning API not configured - saved locally',
+                };
             }
 
-            console.log(
-                '✅ Account onboarded successfully:',
-                savedAccount?.id || accountId,
-            );
+            const finalAccountId =
+                savedAccount?.id || savedAccount?.accountId || 'unknown';
+            console.log('✅ Account onboarded successfully:', finalAccountId);
 
             return res.status(HttpStatus.CREATED).json({
                 result: 'success',
                 msg: 'Account onboarded successfully',
                 data: {
-                    ...(savedAccount || accountData),
+                    ...savedAccount,
                     infraProvisioning: infraProvisioningResult,
                 },
-                accountId: savedAccount?.id || accountId,
+                accountId: finalAccountId,
             });
         } catch (error: any) {
             console.error('❌ Error onboarding account:', error);
@@ -1520,31 +1527,10 @@ class AccountsController {
 
             console.log('🗑️ Offboarding account:', accountId);
 
-            // Get account details before deletion
-            let account: any = null;
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                account = await accountsDynamoDB.get(accountId);
-            }
-
-            if (!account) {
-                return res.status(HttpStatus.NOT_FOUND).json({
-                    result: 'failed',
-                    msg: `Account not found: ${accountId}`,
-                });
-            }
-
-            // Trigger infrastructure deprovisioning via external API (if configured)
             let infraDeprovisioningResult: any = null;
 
-            if (!INFRA_PROVISIONING_API_BASE_URL) {
-                console.log(
-                    '⚠️ INFRA_PROVISIONING_API_URL not configured - skipping infrastructure deprovisioning',
-                );
-                infraDeprovisioningResult = {
-                    skipped: true,
-                    message: 'Infrastructure deprovisioning API not configured',
-                };
-            } else {
+            // If infrastructure API is configured, let it handle the deletion
+            if (INFRA_PROVISIONING_API_BASE_URL) {
                 const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
 
                 try {
@@ -1592,13 +1578,37 @@ class AccountsController {
                             infraError.message,
                     };
                 }
-            }
-
-            // Delete from database
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                await accountsDynamoDB.remove(accountId);
             } else {
-                await accounts.remove(Number(accountId));
+                // Infra API not configured - delete locally
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - deleting locally only',
+                );
+
+                // Get account details before deletion
+                let account: any = null;
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    account = await accountsDynamoDB.get(accountId);
+                }
+
+                if (!account) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        result: 'failed',
+                        msg: `Account not found: ${accountId}`,
+                    });
+                }
+
+                // Delete from local database
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    await accountsDynamoDB.remove(accountId);
+                } else {
+                    await accounts.remove(Number(accountId));
+                }
+
+                infraDeprovisioningResult = {
+                    skipped: true,
+                    message:
+                        'Infrastructure deprovisioning API not configured - deleted locally',
+                };
             }
 
             console.log('✅ Account offboarded successfully:', accountId);
