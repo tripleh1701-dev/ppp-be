@@ -11,6 +11,7 @@ import {
     Param,
     Body,
     Query,
+    Req,
     Res,
     HttpStatus,
     Patch,
@@ -1272,8 +1273,12 @@ class AccountsController {
      * Optional fields: addressDetails, technicalUser, email, firstName, lastName, etc.
      */
     @Post('onboard')
-    async onboard(@Body() body: any, @Res() res: any) {
+    async onboard(@Body() body: any, @Req() req: any, @Res() res: any) {
         try {
+            // Get authorization header to forward to infrastructure API
+            const authHeader =
+                req.headers?.authorization || req.headers?.Authorization || '';
+
             // Validate required fields
             const requiredFields = [
                 'accountName',
@@ -1386,13 +1391,24 @@ class AccountsController {
                         createdBy: body.createdBy || 'admin',
                     };
 
+                    // Build headers - forward auth token if present
+                    const infraHeaders: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                    };
+                    if (authHeader) {
+                        infraHeaders['Authorization'] = authHeader;
+                        console.log(
+                            '🔐 Forwarding authorization header to infra API',
+                        );
+                    } else {
+                        console.log('⚠️ No authorization header to forward');
+                    }
+
                     const infraResponse = await axios.post(
                         infraApiUrl,
                         infraPayload,
                         {
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
+                            headers: infraHeaders,
                             timeout: 30000, // 30 second timeout
                         },
                     );
@@ -1473,8 +1489,16 @@ class AccountsController {
      * and removes the account from the database
      */
     @Delete('offboard')
-    async offboard(@Query('accountId') accountId: string, @Res() res: any) {
+    async offboard(
+        @Query('accountId') accountId: string,
+        @Req() req: any,
+        @Res() res: any,
+    ) {
         try {
+            // Get authorization header to forward to infrastructure API
+            const authHeader =
+                req.headers?.authorization || req.headers?.Authorization || '';
+
             if (!accountId) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     result: 'failed',
@@ -1517,12 +1541,23 @@ class AccountsController {
                         infraApiUrl,
                     );
 
+                    // Build headers - forward auth token if present
+                    const infraHeaders: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                    };
+                    if (authHeader) {
+                        infraHeaders['Authorization'] = authHeader;
+                        console.log(
+                            '🔐 Forwarding authorization header to infra API',
+                        );
+                    } else {
+                        console.log('⚠️ No authorization header to forward');
+                    }
+
                     const infraResponse = await axios.delete(
                         `${infraApiUrl}?accountId=${accountId}`,
                         {
-                            headers: {
-                                'Content-Type': 'application/json',
-                            },
+                            headers: infraHeaders,
                             timeout: 30000, // 30 second timeout
                         },
                     );
