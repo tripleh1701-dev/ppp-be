@@ -1528,8 +1528,9 @@ class AccountsController {
             console.log('🗑️ Offboarding account:', accountId);
 
             let infraDeprovisioningResult: any = null;
+            let infraApiSuccess = false;
 
-            // If infrastructure API is configured, let it handle the deletion
+            // Try infrastructure API first if configured
             if (INFRA_PROVISIONING_API_BASE_URL) {
                 const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
 
@@ -1561,6 +1562,7 @@ class AccountsController {
                     );
 
                     infraDeprovisioningResult = infraResponse.data;
+                    infraApiSuccess = true;
                     console.log(
                         '✅ Infrastructure deprovisioning initiated:',
                         infraDeprovisioningResult,
@@ -1570,44 +1572,76 @@ class AccountsController {
                         '⚠️ Infrastructure deprovisioning failed:',
                         infraError?.response?.data || infraError.message,
                     );
-                    // Continue with database deletion even if infra deprovisioning fails
                     infraDeprovisioningResult = {
                         error: 'Infrastructure deprovisioning failed',
                         message:
                             infraError?.response?.data?.msg ||
                             infraError.message,
                     };
+
+                    // Infra API failed - mark account as "deletion_failed" for manual review
+                    // This is better than orphaning infrastructure
+                    try {
+                        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                            await accountsDynamoDB.update(accountId, {
+                                status: 'deletion_failed',
+                                provisioningState: 'deletion_failed',
+                                deletionError:
+                                    infraError?.response?.data?.msg ||
+                                    infraError.message,
+                                deletionAttemptedAt: new Date().toISOString(),
+                            } as any);
+                            console.log(
+                                '📝 Account marked as deletion_failed for manual review',
+                            );
+                        }
+                    } catch (updateError: any) {
+                        console.error(
+                            '⚠️ Failed to update account status:',
+                            updateError.message,
+                        );
+                    }
+
+                    // Return failure so user knows deletion didn't complete
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                        result: 'failed',
+                        msg: 'Infrastructure deprovisioning failed. Account marked for manual cleanup.',
+                        data: {
+                            accountId: accountId,
+                            infraDeprovisioning: infraDeprovisioningResult,
+                            status: 'deletion_failed',
+                        },
+                    });
                 }
             } else {
-                // Infra API not configured - delete locally
+                // Infra API not configured - delete locally only
                 console.log(
                     '⚠️ INFRA_PROVISIONING_API_URL not configured - deleting locally only',
                 );
 
-                // Get account details before deletion
-                let account: any = null;
-                if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                    account = await accountsDynamoDB.get(accountId);
-                }
-
-                if (!account) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
+                try {
+                    if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                        await accountsDynamoDB.remove(accountId);
+                        console.log('✅ Account deleted from local DynamoDB');
+                    } else {
+                        await accounts.remove(Number(accountId));
+                        console.log('✅ Account deleted from local storage');
+                    }
+                } catch (deleteError: any) {
+                    console.error(
+                        '❌ Local deletion failed:',
+                        deleteError.message,
+                    );
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                         result: 'failed',
-                        msg: `Account not found: ${accountId}`,
+                        msg: `Failed to delete account: ${deleteError.message}`,
                     });
-                }
-
-                // Delete from local database
-                if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                    await accountsDynamoDB.remove(accountId);
-                } else {
-                    await accounts.remove(Number(accountId));
                 }
 
                 infraDeprovisioningResult = {
                     skipped: true,
                     message:
-                        'Infrastructure deprovisioning API not configured - deleted locally',
+                        'Infrastructure API not configured - deleted locally only',
                 };
             }
 
