@@ -1379,17 +1379,29 @@ class AccountsController {
                     );
 
                     // Build payload for infrastructure API
+                    // Generate default email if not provided (infra API requires email)
+                    const sanitizedAccountName = body.accountName
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]/g, '');
+                    const defaultEmail = `admin@${sanitizedAccountName}.local`;
+
                     const infraPayload = {
                         accountName: body.accountName,
                         subscriptionTier: body.subscriptionTier,
-                        email: body.email || body.adminEmail || '',
-                        firstName: body.firstName || '',
-                        lastName: body.lastName || '',
+                        email: body.email || body.adminEmail || defaultEmail,
+                        firstName: body.firstName || 'Admin',
+                        lastName: body.lastName || body.accountName,
                         adminUsername: body.adminUsername || 'admin',
-                        adminEmail: body.adminEmail || body.email || '',
-                        adminPassword: body.adminPassword || '',
+                        adminEmail:
+                            body.adminEmail || body.email || defaultEmail,
+                        adminPassword: body.adminPassword || 'TempPass123!',
                         createdBy: body.createdBy || 'admin',
                     };
+
+                    console.log('📦 Infrastructure payload:', {
+                        ...infraPayload,
+                        adminPassword: '***hidden***',
+                    });
 
                     // Build headers - forward auth token if present
                     const infraHeaders: Record<string, string> = {
