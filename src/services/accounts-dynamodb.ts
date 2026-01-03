@@ -123,8 +123,32 @@ export class AccountsDynamoDBService {
 
             console.log(`✅ Found ${accounts.length} accounts`);
 
+            // Fetch licenses for each account (if not already on the item)
+            const accountsWithLicenses = await Promise.all(
+                accounts.map(async (account) => {
+                    try {
+                        // Skip if account already has licenses array populated
+                        if (account.licenses && account.licenses.length > 0) {
+                            console.log(`📋 Account ${account.accountName} already has ${account.licenses.length} licenses`);
+                            return account;
+                        }
+
+                        // Fetch licenses separately for this account
+                        const licenses = await this.listLicenses(account.id || account.accountId);
+                        console.log(`📋 Fetched ${licenses.length} licenses for account ${account.accountName}`);
+                        return {
+                            ...account,
+                            licenses: licenses,
+                        };
+                    } catch (error) {
+                        console.warn(`⚠️ Could not fetch licenses for account ${account.accountName}:`, error);
+                        return account;
+                    }
+                })
+            );
+
             // Sort by account name and return
-            return accounts.sort((a, b) =>
+            return accountsWithLicenses.sort((a, b) =>
                 (a.accountName || '').localeCompare(b.accountName || ''),
             );
         } catch (error) {
@@ -398,6 +422,12 @@ export class AccountsDynamoDBService {
                 technicalUser = null;
             }
 
+            // Build technicalUsers array from stored data or single technicalUser
+            let technicalUsers = item.technicalUsers || [];
+            if (technicalUsers.length === 0 && (item.technicalUser || technicalUser)) {
+                technicalUsers = [item.technicalUser || technicalUser].filter(Boolean);
+            }
+
             return {
                 id: item.id || accountId,
                 accountName: item.account_name || item.accountName || '',
@@ -407,9 +437,13 @@ export class AccountsDynamoDBService {
                 country: item.country || '',
                 addressLine1: item.address_line1 || item.addressLine1 || '',
                 addresses: item.addresses || [],
-                // Note: technicalUsers are fetched separately via user management API with technical_user=true filter
+                technicalUsers: technicalUsers,
                 technicalUsername:
-                    item.technical_username || technicalUser?.username || '',
+                    item.technical_username ||
+                    item.technicalUsername ||
+                    technicalUser?.username ||
+                    technicalUsers[0]?.adminUsername ||
+                    '',
                 technicalUserId:
                     item.technical_user_id || technicalUser?.id || '',
                 licenses: licenses || [],
@@ -485,9 +519,14 @@ export class AccountsDynamoDBService {
                 address: (accountData as any).address || '',
                 country: accountData.country || '',
                 addressLine1: accountData.addressLine1 || '',
+                // Store both single and array formats for compatibility
                 addressDetails: (accountData as any).addresses?.[0] || null,
                 technicalUser: (accountData as any).technicalUsers?.[0] || null,
+                // Store full arrays for complete data
+                addresses: (accountData as any).addresses || [],
+                technicalUsers: (accountData as any).technicalUsers || [],
                 adminUsername: technicalUsername || '',
+                technicalUsername: technicalUsername || '',
                 email: (accountData as any).email || '',
                 firstName: (accountData as any).firstName || '',
                 lastName: (accountData as any).lastName || '',
@@ -613,8 +652,19 @@ export class AccountsDynamoDBService {
                 expressionAttributeValues[':addresses'] = updates.addresses;
             }
 
-            // Note: Technical users are stored as separate user entities with technical_user=true flag
-            // They are not stored as an array on the account object
+            // Handle technicalUsers array
+            if ((updates as any).technicalUsers !== undefined) {
+                updateFields.push('technicalUsers = :technicalUsers');
+                expressionAttributeValues[':technicalUsers'] = (updates as any).technicalUsers;
+                // Also update the first technical user for backward compatibility
+                if ((updates as any).technicalUsers?.length > 0) {
+                    updateFields.push('technicalUser = :technicalUser');
+                    expressionAttributeValues[':technicalUser'] = (updates as any).technicalUsers[0];
+                    updateFields.push('technicalUsername = :technicalUsername');
+                    expressionAttributeValues[':technicalUsername'] =
+                        (updates as any).technicalUsers[0]?.adminUsername || '';
+                }
+            }
 
             // Handle licenses separately - update/create/delete as separate entities
             if (
