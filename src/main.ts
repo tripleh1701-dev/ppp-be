@@ -1379,9 +1379,11 @@ class AccountsController {
 
                     // Use the account created by infra API as the source of truth
                     if (infraProvisioningResult?.data) {
+                        const infraAccountId = infraProvisioningResult.data.accountId;
+
                         savedAccount = {
-                            id: infraProvisioningResult.data.accountId,
-                            accountId: infraProvisioningResult.data.accountId,
+                            id: infraAccountId,
+                            accountId: infraAccountId,
                             accountName:
                                 infraProvisioningResult.data.accountName ||
                                 body.accountName,
@@ -1403,7 +1405,47 @@ class AccountsController {
                             updatedAt:
                                 infraProvisioningResult.data.lastModified ||
                                 now.toISOString(),
+                            // Include arrays from frontend request
+                            addresses: body.addresses || [],
+                            technicalUsers: body.technicalUsers || [],
+                            licenses: body.licenses || [],
                         };
+
+                        // Update the account in DynamoDB with additional fields
+                        // (addresses, technicalUsers, licenses) that infra API doesn't handle
+                        if (
+                            storageMode === 'dynamodb' &&
+                            accountsDynamoDB &&
+                            infraAccountId
+                        ) {
+                            try {
+                                console.log(
+                                    '📝 Updating account with additional details:',
+                                    infraAccountId,
+                                );
+                                await accountsDynamoDB.update(infraAccountId, {
+                                    addresses: body.addresses || [],
+                                    technicalUsers: body.technicalUsers || [],
+                                    licenses: body.licenses || [],
+                                    // Also store address details in flat format
+                                    addressLine1: body.addressDetails?.addressLine1 || '',
+                                    addressLine2: body.addressDetails?.addressLine2 || '',
+                                    city: body.addressDetails?.city || '',
+                                    state: body.addressDetails?.state || '',
+                                    country: body.addressDetails?.country || '',
+                                    // Technical user info
+                                    technicalUsername: body.technicalUser?.adminUsername || '',
+                                } as any);
+                                console.log(
+                                    '✅ Account updated with addresses, technicalUsers, licenses',
+                                );
+                            } catch (updateError: any) {
+                                console.error(
+                                    '⚠️ Failed to update account with additional fields:',
+                                    updateError.message,
+                                );
+                            }
+                        }
                     }
                 } catch (infraError: any) {
                     console.error(
@@ -1458,6 +1500,25 @@ class AccountsController {
                     accountData.addressDetails = body.addressDetails;
                 if (body.technicalUser)
                     accountData.technicalUser = body.technicalUser;
+
+                // Add arrays for full data persistence
+                accountData.addresses = body.addresses || [];
+                accountData.technicalUsers = body.technicalUsers || [];
+                accountData.licenses = body.licenses || [];
+
+                // Flatten address details for easier querying
+                if (body.addressDetails) {
+                    accountData.addressLine1 = body.addressDetails.addressLine1 || '';
+                    accountData.addressLine2 = body.addressDetails.addressLine2 || '';
+                    accountData.city = body.addressDetails.city || '';
+                    accountData.state = body.addressDetails.state || '';
+                    accountData.country = body.addressDetails.country || '';
+                }
+
+                // Technical user info for display
+                if (body.technicalUser) {
+                    accountData.technicalUsername = body.technicalUser.adminUsername || '';
+                }
 
                 // Save to DynamoDB or PostgreSQL
                 if (storageMode === 'dynamodb' && accountsDynamoDB) {
