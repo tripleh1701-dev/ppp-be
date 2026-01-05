@@ -1379,7 +1379,8 @@ class AccountsController {
 
                     // Use the account created by infra API as the source of truth
                     if (infraProvisioningResult?.data) {
-                        const infraAccountId = infraProvisioningResult.data.accountId;
+                        const infraAccountId =
+                            infraProvisioningResult.data.accountId;
 
                         savedAccount = {
                             id: infraAccountId,
@@ -1428,13 +1429,16 @@ class AccountsController {
                                     technicalUsers: body.technicalUsers || [],
                                     licenses: body.licenses || [],
                                     // Also store address details in flat format
-                                    addressLine1: body.addressDetails?.addressLine1 || '',
-                                    addressLine2: body.addressDetails?.addressLine2 || '',
+                                    addressLine1:
+                                        body.addressDetails?.addressLine1 || '',
+                                    addressLine2:
+                                        body.addressDetails?.addressLine2 || '',
                                     city: body.addressDetails?.city || '',
                                     state: body.addressDetails?.state || '',
                                     country: body.addressDetails?.country || '',
                                     // Technical user info
-                                    technicalUsername: body.technicalUser?.adminUsername || '',
+                                    technicalUsername:
+                                        body.technicalUser?.adminUsername || '',
                                 } as any);
                                 console.log(
                                     '✅ Account updated with addresses, technicalUsers, licenses',
@@ -1508,8 +1512,10 @@ class AccountsController {
 
                 // Flatten address details for easier querying
                 if (body.addressDetails) {
-                    accountData.addressLine1 = body.addressDetails.addressLine1 || '';
-                    accountData.addressLine2 = body.addressDetails.addressLine2 || '';
+                    accountData.addressLine1 =
+                        body.addressDetails.addressLine1 || '';
+                    accountData.addressLine2 =
+                        body.addressDetails.addressLine2 || '';
                     accountData.city = body.addressDetails.city || '';
                     accountData.state = body.addressDetails.state || '';
                     accountData.country = body.addressDetails.country || '';
@@ -1517,7 +1523,8 @@ class AccountsController {
 
                 // Technical user info for display
                 if (body.technicalUser) {
-                    accountData.technicalUsername = body.technicalUser.adminUsername || '';
+                    accountData.technicalUsername =
+                        body.technicalUser.adminUsername || '';
                 }
 
                 // Save to DynamoDB or PostgreSQL
@@ -1628,6 +1635,38 @@ class AccountsController {
                         '✅ Infrastructure deprovisioning initiated:',
                         infraDeprovisioningResult,
                     );
+                    // Infrastructure API succeeded - now delete from DynamoDB
+                    try {
+                        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                            await accountsDynamoDB.remove(accountId);
+                            console.log(
+                                '✅ Account deleted from DynamoDB after successful infra deprovisioning',
+                            );
+                        } else {
+                            await accounts.remove(Number(accountId));
+                            console.log(
+                                '✅ Account deleted from local storage after successful infra deprovisioning',
+                            );
+                        }
+                    } catch (deleteError: any) {
+                        console.error(
+                            '❌ DynamoDB deletion failed after infra deprovisioning:',
+                            deleteError.message,
+                        );
+                        // Infra was deleted but DB wasn't - mark for manual cleanup
+                        return res
+                            .status(HttpStatus.INTERNAL_SERVER_ERROR)
+                            .json({
+                                result: 'partial_failure',
+                                msg: 'Infrastructure was deprovisioned but database deletion failed. Manual cleanup required.',
+                                data: {
+                                    accountId: accountId,
+                                    infraDeprovisioning:
+                                        infraDeprovisioningResult,
+                                    dbError: deleteError.message,
+                                },
+                            });
+                    }
                 } catch (infraError: any) {
                     console.error(
                         '⚠️ Infrastructure deprovisioning failed:',
