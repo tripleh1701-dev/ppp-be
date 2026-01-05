@@ -55,35 +55,12 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
-import {fetchGitHubRepositories, fetchGitHubBranches} from './utils/githubApiClient';
 import {CognitoAuthService} from './services/cognitoAuth';
 
 // Cognito auth service instance
 const cognitoAuth = new CognitoAuthService();
 
 dotenv.config();
-
-const MIN_CONNECTIVITY_TEST_MS = 2500;
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-function validateOutboundUrl(urlStr: string, fieldName: string): URL {
-    let url: URL;
-    try {
-        url = new URL(urlStr);
-    } catch {
-        throw new Error(`Invalid ${fieldName}`);
-    }
-
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-        throw new Error(`Invalid ${fieldName}`);
-    }
-
-    const hostname = (url.hostname || '').toLowerCase();
-    if (!hostname) throw new Error(`Invalid ${fieldName}`);
-
-    return url;
-}
 
 const STORAGE_DIR = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
@@ -534,39 +511,8 @@ APP_BASE_URL=${appBaseUrl}`,
         @Query('enterpriseId') enterpriseId?: string,
         @Query('enterpriseName') enterpriseName?: string,
         @Query('workstream') workstream?: string,
-        @Query('product') product?: string,
-        @Query('service') service?: string,
         @Query('userId') userId?: string,
-        @Query('credentialName') credentialName?: string,
-        @Query('connectorName') connectorName?: string,
     ) {
-        // Log received query parameters
-        console.log('🔑 [OAuth Callback] Received query parameters:', {
-            hasCode: !!code,
-            hasState: !!state,
-            accountId: accountId,
-            accountName: accountName,
-            enterpriseId: enterpriseId,
-            enterpriseName: enterpriseName,
-            workstream: workstream,
-            product: product,
-            service: service,
-            userId: userId,
-            credentialName: credentialName,
-            connectorName: connectorName,
-            allQueryParams: {
-                code,
-                state,
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-                userId,
-            },
-        });
         try {
             // Handle OAuth errors from GitHub
             if (error) {
@@ -755,49 +701,19 @@ APP_BASE_URL=${appBaseUrl}`,
 
             // Store the access token securely
             try {
-                console.log('💾 [OAuth Callback] Storing token with parameters:', {
+                await this.githubOAuthService.storeAccessToken({
                     userId: userId,
                     accountId: accountId,
                     accountName: accountName,
                     enterpriseId: enterpriseId,
                     enterpriseName: enterpriseName,
                     workstream: workstream,
-                    product: product,
-                    service: service,
-                    hasAccessToken: !!access_token,
-                    tokenType: token_type || 'bearer',
-                    scope: scope,
-                });
-
-                const storedToken = await this.githubOAuthService.storeAccessToken({
-                    userId: userId,
-                    accountId: accountId,
-                    accountName: accountName,
-                    enterpriseId: enterpriseId,
-                    enterpriseName: enterpriseName,
-                    workstream: workstream,
-                    product: product,
-                    service: service,
-                    credentialName: credentialName,
-                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
                 });
-
-                console.log('✅ [OAuth Callback] Token stored successfully:', {
-                    id: storedToken.id,
-                    accountId: storedToken.accountId,
-                    enterpriseId: storedToken.enterpriseId,
-                });
             } catch (storageError) {
-                console.error('❌ [OAuth Callback] Failed to store access token:', storageError);
-                console.error('❌ [OAuth Callback] Storage error details:', {
-                    message: (storageError as any)?.message,
-                    stack: (storageError as any)?.stack,
-                    accountId: accountId,
-                    enterpriseId: enterpriseId,
-                });
+                console.error('Failed to store access token:', storageError);
                 // Continue - token exchange was successful even if storage fails
             }
 
@@ -884,56 +800,15 @@ class OAuthTokenController {
     async exchangeToken(
         @Res() res: any,
         @Body() body: any,
-        @Query('accountId') queryAccountId?: string,
-        @Query('accountName') queryAccountName?: string,
-        @Query('enterpriseId') queryEnterpriseId?: string,
-        @Query('enterpriseName') queryEnterpriseName?: string,
-        @Query('workstream') queryWorkstream?: string,
-        @Query('product') queryProduct?: string,
-        @Query('service') queryService?: string,
-        @Query('userId') queryUserId?: string,
-        @Query('credentialName') queryCredentialName?: string,
-        @Query('connectorName') queryConnectorName?: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('userId') userId?: string,
     ) {
         try {
-            const {
-                code,
-                redirectUri: customRedirectUri,
-                accountId: bodyAccountId,
-                accountName: bodyAccountName,
-                enterpriseId: bodyEnterpriseId,
-                enterpriseName: bodyEnterpriseName,
-                workstream: bodyWorkstream,
-                product: bodyProduct,
-                service: bodyService,
-                userId: bodyUserId,
-                credentialName: bodyCredentialName,
-                connectorName: bodyConnectorName,
-            } = body;
-
-            // Use body parameters first, fallback to query parameters
-            const accountId = bodyAccountId || queryAccountId;
-            const accountName = bodyAccountName || queryAccountName;
-            const enterpriseId = bodyEnterpriseId || queryEnterpriseId;
-            const enterpriseName = bodyEnterpriseName || queryEnterpriseName;
-            const workstream = bodyWorkstream || queryWorkstream;
-            const product = bodyProduct || queryProduct;
-            const service = bodyService || queryService;
-            const userId = bodyUserId || queryUserId;
-            const credentialName = bodyCredentialName || queryCredentialName;
-            const connectorName = bodyConnectorName || queryConnectorName;
-
-            console.log('💾 [OAuth Token Exchange] Received parameters:', {
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-                userId,
-                hasCode: !!code,
-            });
+            const {code, redirectUri: customRedirectUri} = body;
 
             if (!code) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
@@ -1000,48 +875,19 @@ class OAuthTokenController {
 
             // Store the access token securely
             try {
-                console.log('💾 [OAuth Token Exchange] Storing token with parameters:', {
-                    userId,
-                    accountId,
-                    accountName,
-                    enterpriseId,
-                    enterpriseName,
-                    workstream,
-                    product,
-                    service,
-                    credentialName,
-                    connectorName,
-                    hasAccessToken: !!access_token,
-                    tokenType: token_type || 'bearer',
-                    scope,
-                });
-
-                const storedToken = await this.githubOAuthService.storeAccessToken({
+                await this.githubOAuthService.storeAccessToken({
                     userId: userId,
                     accountId: accountId,
                     accountName: accountName,
                     enterpriseId: enterpriseId,
                     enterpriseName: enterpriseName,
                     workstream: workstream,
-                    product: product,
-                    service: service,
-                    credentialName: credentialName,
-                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
                 });
-
-                console.log('✅ [OAuth Token Exchange] Token stored successfully:', {
-                    id: storedToken.id,
-                    accountId: storedToken.accountId,
-                    enterpriseId: storedToken.enterpriseId,
-                    workstream: storedToken.workstream,
-                    product: storedToken.product,
-                    service: storedToken.service,
-                });
             } catch (storageError) {
-                console.error('❌ [OAuth Token Exchange] Failed to store access token:', storageError);
+                console.error('Failed to store access token:', storageError);
                 // Continue even if storage fails - token exchange was successful
             }
 
@@ -1066,346 +912,6 @@ class OAuthTokenController {
 }
 
 // ============================================================================
-// GITHUB REPOSITORIES ENDPOINT
-// ============================================================================
-// Endpoint: GET /api/github/repos
-// Purpose: Fetch GitHub repositories using OAuth authentication tokens
-// ============================================================================
-
-@Controller('api/github')
-class GitHubController {
-    private githubOAuthService: GitHubOAuthService;
-
-    constructor() {
-        this.githubOAuthService = new GitHubOAuthService();
-    }
-
-    /**
-     * GET /api/github/repos
-     * Fetches GitHub repositories for a given username using OAuth authentication
-     * 
-     * Query Parameters:
-     * - credentialName: Name of the credential (optional if connectorName provided)
-     * - connectorName: Name of the connector (optional if credentialName provided)
-     * - username: GitHub username (required)
-     * - accountId: Account ID (required)
-     * - enterpriseId: Enterprise ID (required)
-     */
-    @Get('repos')
-    async getRepositories(
-        @Res() res: any,
-        @Query('credentialName') credentialName?: string,
-        @Query('connectorName') connectorName?: string,
-        @Query('username') username?: string,
-        @Query('accountId') accountId?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-        @Query('workstream') workstream?: string,
-        @Query('product') product?: string,
-        @Query('service') service?: string,
-    ) {
-        try {
-            // Validate required parameters
-            if (!username) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'username parameter is required',
-                });
-            }
-
-            if (!accountId || !enterpriseId) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'accountId and enterpriseId parameters are required',
-                });
-            }
-
-            // Validate that either credentialName or connectorName is provided
-            if (!credentialName && !connectorName) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Either credentialName or connectorName must be provided',
-                });
-            }
-
-            if (credentialName && connectorName) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
-                });
-            }
-
-            // Validate username format (basic validation)
-            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(username)) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Invalid GitHub username format',
-                });
-            }
-
-            console.log(`[GitHub Repos API] Fetching repos for username: ${username}`);
-            console.log(`[GitHub Repos API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
-
-            // Retrieve OAuth token from database
-            let oauthToken;
-            try {
-                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
-                    credentialName: credentialName || undefined,
-                    connectorName: connectorName || undefined,
-                    accountId: accountId,
-                    enterpriseId: enterpriseId,
-                    accountName: accountName,
-                    enterpriseName: enterpriseName,
-                    workstream: workstream,
-                    product: product,
-                    service: service,
-                });
-            } catch (error: any) {
-                console.error('[GitHub Repos API] Error retrieving OAuth token:', error);
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    message: 'Error retrieving OAuth token from database',
-                    error: error.message,
-                });
-            }
-
-            if (!oauthToken) {
-                return res.status(HttpStatus.NOT_FOUND).json({
-                    success: false,
-                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
-                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
-                });
-            }
-
-            // Check if token is expired
-            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
-                return res.status(HttpStatus.UNAUTHORIZED).json({
-                    success: false,
-                    message: 'OAuth token has expired. Please re-authenticate.',
-                    expiresAt: oauthToken.expiresAt,
-                });
-            }
-
-            console.log(`[GitHub Repos API] OAuth token retrieved successfully`);
-
-            // Fetch repositories from GitHub API
-            let repositories;
-            try {
-                repositories = await fetchGitHubRepositories(
-                    username,
-                    oauthToken.accessToken,
-                    oauthToken.tokenType,
-                );
-                console.log(`[GitHub Repos API] Successfully fetched ${repositories.length} repositories`);
-            } catch (error: any) {
-                console.error('[GitHub Repos API] Error fetching repositories from GitHub:', error);
-
-                // Handle specific GitHub API errors
-                if (error.message.includes('401') || error.message.includes('403')) {
-                    return res.status(HttpStatus.UNAUTHORIZED).json({
-                        success: false,
-                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
-                        error: error.message,
-                    });
-                }
-
-                if (error.message.includes('404')) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
-                        success: false,
-                        message: `GitHub user "${username}" not found`,
-                        error: error.message,
-                    });
-                }
-
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    message: 'Error fetching repositories from GitHub API',
-                    error: error.message,
-                });
-            }
-
-            // Return repositories
-            return res.status(HttpStatus.OK).json(repositories);
-        } catch (error: any) {
-            console.error('[GitHub Repos API] Unexpected error:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                message: 'Internal server error',
-                error: error.message,
-            });
-        }
-    }
-
-    /**
-     * GET /api/github/branches
-     * Fetches GitHub repository branches for a given owner/repo using OAuth authentication
-     * 
-     * Query Parameters:
-     * - credentialName: Name of the credential (optional if connectorName provided)
-     * - connectorName: Name of the connector (optional if credentialName provided)
-     * - owner: GitHub repository owner (required)
-     * - repo: GitHub repository name (required)
-     * - accountId: Account ID (required)
-     * - enterpriseId: Enterprise ID (required)
-     */
-    @Get('branches')
-    async getBranches(
-        @Res() res: any,
-        @Query('credentialName') credentialName?: string,
-        @Query('connectorName') connectorName?: string,
-        @Query('owner') owner?: string,
-        @Query('repo') repo?: string,
-        @Query('accountId') accountId?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-        @Query('workstream') workstream?: string,
-        @Query('product') product?: string,
-        @Query('service') service?: string,
-    ) {
-        try {
-            // Validate required parameters
-            if (!owner || !repo) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'owner and repo parameters are required',
-                });
-            }
-
-            if (!accountId || !enterpriseId) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'accountId and enterpriseId parameters are required',
-                });
-            }
-
-            // Validate that either credentialName or connectorName is provided
-            if (!credentialName && !connectorName) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Either credentialName or connectorName must be provided',
-                });
-            }
-
-            if (credentialName && connectorName) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
-                });
-            }
-
-            // Validate owner and repo format (basic validation)
-            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(owner)) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Invalid GitHub owner format',
-                });
-            }
-
-            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,100}$/.test(repo)) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    message: 'Invalid GitHub repository name format',
-                });
-            }
-
-            console.log(`[GitHub Branches API] Fetching branches for owner: ${owner}, repo: ${repo}`);
-            console.log(`[GitHub Branches API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
-
-            // Retrieve OAuth token from database
-            let oauthToken;
-            try {
-                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
-                    credentialName: credentialName || undefined,
-                    connectorName: connectorName || undefined,
-                    accountId: accountId,
-                    enterpriseId: enterpriseId,
-                    accountName: accountName,
-                    enterpriseName: enterpriseName,
-                    workstream: workstream,
-                    product: product,
-                    service: service,
-                });
-            } catch (error: any) {
-                console.error('[GitHub Branches API] Error retrieving OAuth token:', error);
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    message: 'Error retrieving OAuth token from database',
-                    error: error.message,
-                });
-            }
-
-            if (!oauthToken) {
-                return res.status(HttpStatus.NOT_FOUND).json({
-                    success: false,
-                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
-                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
-                });
-            }
-
-            // Check if token is expired
-            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
-                return res.status(HttpStatus.UNAUTHORIZED).json({
-                    success: false,
-                    message: 'OAuth token has expired. Please re-authenticate.',
-                    expiresAt: oauthToken.expiresAt,
-                });
-            }
-
-            console.log(`[GitHub Branches API] OAuth token retrieved successfully`);
-
-            // Fetch branches from GitHub API
-            let branches;
-            try {
-                branches = await fetchGitHubBranches(
-                    owner,
-                    repo,
-                    oauthToken.accessToken,
-                    oauthToken.tokenType,
-                );
-                console.log(`[GitHub Branches API] Successfully fetched ${branches.length} branches`);
-            } catch (error: any) {
-                console.error('[GitHub Branches API] Error fetching branches from GitHub:', error);
-
-                // Handle specific GitHub API errors
-                if (error.message.includes('401') || error.message.includes('403')) {
-                    return res.status(HttpStatus.UNAUTHORIZED).json({
-                        success: false,
-                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
-                        error: error.message,
-                    });
-                }
-
-                if (error.message.includes('404')) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
-                        success: false,
-                        message: `GitHub repository "${owner}/${repo}" not found or not accessible`,
-                        error: error.message,
-                    });
-                }
-
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    message: 'Error fetching branches from GitHub API',
-                    error: error.message,
-                });
-            }
-
-            // Return branches (frontend expects array with 'name' field)
-            return res.status(HttpStatus.OK).json(branches);
-        } catch (error: any) {
-            console.error('[GitHub Branches API] Unexpected error:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                message: 'Internal server error',
-                error: error.message,
-            });
-        }
-    }
-}
-
-// ============================================================================
 // JIRA CONNECTIVITY TEST ENDPOINT
 // ============================================================================
 // Endpoint: POST /api/connectors/jira/test-connection
@@ -1414,12 +920,6 @@ class GitHubController {
 
 @Controller('api/connectors')
 class ConnectorsController {
-    private githubOAuthService: GitHubOAuthService;
-
-    constructor() {
-        this.githubOAuthService = new GitHubOAuthService();
-    }
-
     /**
      * POST /api/connectors/jira/test-connection
      *
@@ -1682,98 +1182,8 @@ class ConnectorsController {
             });
         }
     }
+}
 
-    /**
-     * POST /api/connectors/github/test-connection
-     * 
-     * Tests GitHub connectivity using OAuth authentication:
-     * - Supports Account URLs (e.g., https://github.com/Vipin-Gup) - NEW
-     * - Supports Repository URLs (e.g., https://github.com/owner/repo.git) - EXISTING
-     * - Looks up OAuth token by credentialName and account/enterprise context
-     * - Calls GitHub API to verify account or repository access
-     * 
-     * Request Body (Account URL):
-     * {
-     *   "connectorName": "GitHub",
-     *   "url": "https://github.com/Vipin-Gup",
-     *   "urlType": "Account",
-     *   "connectionType": "HTTP",
-     *   "authenticationType": "OAuth",
-     *   "credentialName": "Github_Cred_Fin",
-     *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
-     *   "accountName": "Accenture Digital",
-     *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
-     *   "enterpriseName": "SAP",
-     *   "workstream": "Fin_Acc_SAP",
-     *   "product": "DevOps",
-     *   "service": "Extension"
-     * }
-     * 
-     * Request Body (Repository URL):
-     * {
-     *   "connectorName": "GitHub",
-     *   "url": "https://github.com/tripleh1701-dev/ppp-fe.git",
-     *   "urlType": "Repository",
-     *   "connectionType": "HTTP",
-     *   "authenticationType": "OAuth",
-     *   "credentialName": "Github_Cred_Fin",
-     *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
-     *   "accountName": "Accenture Digital",
-     *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
-     *   "enterpriseName": "SAP",
-     *   "workstream": "Fin_Acc_SAP"
-     * }
-     * 
-     * Response:
-     * {
-     *   "success": true,
-     *   "status": "success",
-     *   "connected": true,
-     *   "message": "Successfully connected to GitHub account \"Vipin-Gup\"",
-     *   "userInfo": {
-     *     "login": "...",
-     *     "name": "...",
-     *     "email": "..."
-     *   }
-     * }
-     */
-    @Post('github/test-connection')
-    async testGitHubConnection(
-        @Res() res: any,
-        @Body() body: any,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-        @Query('workstream') workstream?: string,
-        @Query('product') product?: string,
-        @Query('service') service?: string,
-    ) {
-        try {
-            // Extract credentials from request body or query params
-            const {
-                url,
-                credentialName,
-                authenticationType,
-                urlType,
-                connectionType,
-                accountId: bodyAccountId,
-                accountName: bodyAccountName,
-                enterpriseId: bodyEnterpriseId,
-                enterpriseName: bodyEnterpriseName,
-                workstream: bodyWorkstream,
-                product: bodyProduct,
-                service: bodyService,
-            } = body;
-
-            // Use body values first, fall back to query params
-            const finalAccountId = bodyAccountId || accountId;
-            const finalAccountName = bodyAccountName || accountName;
-            const finalEnterpriseId = bodyEnterpriseId || enterpriseId;
-            const finalEnterpriseName = bodyEnterpriseName || enterpriseName;
-            const finalWorkstream = bodyWorkstream || workstream;
-            const finalProduct = bodyProduct || product;
-            const finalService = bodyService || service;
 @Controller('api/accounts')
 class AccountsController {
     @Get()
@@ -1799,36 +1209,14 @@ class AccountsController {
         }
     }
 
-            // Log received data for debugging
-            console.log('🧪 [GitHub Test] Received request:', {
-                hasUrl: !!url,
-                hasCredentialName: !!credentialName,
-                authenticationType: authenticationType,
-                urlType: urlType,
-                connectionType: connectionType,
-                hasAccountId: !!finalAccountId,
-                hasEnterpriseId: !!finalEnterpriseId,
-                hasWorkstream: !!finalWorkstream,
-                hasProduct: !!finalProduct,
-                hasService: !!finalService,
-                originalUrl: url,
-                bodyKeys: Object.keys(body),
-            });
+    @Get(':id')
+    async get(@Param('id') id: string) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            return await accountsDynamoDB.get(id); // String ID for DynamoDB
+        }
+        return await accounts.get(Number(id)); // Number ID for PostgreSQL
+    }
 
-            // Validate required fields
-            const missingFields: string[] = [];
-            if (!url) missingFields.push('url');
-            if (!credentialName) missingFields.push('credentialName');
-            
-            // Validate authentication type
-            if (authenticationType && authenticationType !== 'OAuth') {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'GitHub test-connection endpoint only supports OAuth authentication',
-                });
-            }
     @Post()
     async create(@Body() body: any) {
         try {
@@ -1851,57 +1239,32 @@ class AccountsController {
         }
     }
 
-            if (missingFields.length > 0) {
-                const errorMessage = `Missing required fields: ${missingFields.join(', ')}`;
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: errorMessage,
-                    missingFields: missingFields,
-                });
-            }
+    @Put()
+    async update(@Body() body: any) {
+        const {id, ...rest} = body || {};
+        if (!id) return {error: 'id required'};
 
-            // Validate accountId and enterpriseId for OAuth
-            if (!finalAccountId || !finalEnterpriseId) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'accountId and enterpriseId are required for OAuth authentication',
-                });
-            }
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            const updated = await accountsDynamoDB.update(id, rest); // String ID for DynamoDB
+            if (!updated) return {error: 'Not found'};
+            return updated;
+        }
 
-            // Normalize URL
-            let normalizedUrl = url ? url.trim() : '';
-            if (!normalizedUrl) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Missing required field: url',
-                });
-            }
+        const updated = await accounts.update(Number(id), rest); // Number ID for PostgreSQL
+        if (!updated) return {error: 'Not found'};
+        return updated;
+    }
 
-            // Determine URL type if not explicitly provided (for backward compatibility)
-            const detectedUrlType = urlType || this.detectGitHubUrlType(normalizedUrl);
-            
-            console.log('🔍 [GitHub Test] URL type detection:', {
-                provided: urlType,
-                detected: detectedUrlType,
-                url: normalizedUrl,
-            });
+    @Delete(':id')
+    async remove(@Param('id') id: string) {
+        if (storageMode === 'dynamodb' && accountsDynamoDB) {
+            await accountsDynamoDB.remove(id); // String ID for DynamoDB
+            return {};
+        }
+        await accounts.remove(Number(id)); // Number ID for PostgreSQL
+        return {};
+    }
 
-            // Extract product and service from body if provided
-            console.log('🔑 [GitHub Test] Looking up OAuth token with parameters:', {
-                accountId: finalAccountId,
-                accountName: finalAccountName,
-                enterpriseId: finalEnterpriseId,
-                enterpriseName: finalEnterpriseName,
-                workstream: finalWorkstream,
-                product: finalProduct,
-                service: finalService,
-            });
     /**
      * Onboard a new account
      * POST /api/accounts/onboard
@@ -2400,496 +1763,6 @@ class AccountsController {
                 msg: `Failed to offboard account: ${error.message}`,
             });
         }
-    }
-
-    // Technical User endpoints
-    @Post(':accountId/technical-users')
-    async createTechnicalUser(
-        @Param('accountId') accountId: string,
-        @Body() body: any,
-    ) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.createTechnicalUser(accountId, body);
-        }
-        return {error: 'Technical users only supported in DynamoDB mode'};
-    }
-
-            const oauthToken = await this.githubOAuthService.getAccessToken({
-                accountId: finalAccountId,
-                accountName: finalAccountName,
-                enterpriseId: finalEnterpriseId,
-                enterpriseName: finalEnterpriseName,
-                workstream: finalWorkstream,
-                product: finalProduct,
-                service: finalService,
-            });
-
-            if (!oauthToken) {
-                console.error('❌ [GitHub Test] OAuth token lookup failed. Parameters used:', {
-                    accountId: finalAccountId,
-                    accountName: finalAccountName,
-                    enterpriseId: finalEnterpriseId,
-                    enterpriseName: finalEnterpriseName,
-                    workstream: finalWorkstream,
-                    product: finalProduct,
-                    service: finalService,
-                });
-                return res.status(HttpStatus.UNAUTHORIZED).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'OAuth token not found. Please ensure OAuth is configured in Manage Credentials.',
-                });
-            }
-
-            console.log('✅ [GitHub Test] OAuth token found (length):', oauthToken.length);
-
-            // Route to appropriate test function based on URL type
-            if (detectedUrlType === 'Account') {
-                return await this.testGitHubAccountConnectivity(
-                    res,
-                    normalizedUrl,
-                    oauthToken,
-                );
-            } else {
-                // Repository URL (existing logic)
-                return await this.testGitHubRepositoryConnectivity(
-                    res,
-                    normalizedUrl,
-                    oauthToken,
-                );
-            }
-        } catch (error: any) {
-            // This catch block handles unexpected errors during validation
-            console.error('❌ [GitHub Test] Unexpected error during validation:', error);
-
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: 'An unexpected error occurred while processing the request',
-                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-            });
-        }
-    }
-
-    /**
-     * Detect GitHub URL type (Account or Repository)
-     */
-    private detectGitHubUrlType(url: string): 'Account' | 'Repository' {
-        try {
-            // Check if it's an SSH URL (always repository)
-            if (url.startsWith('git@')) {
-                return 'Repository';
-            }
-
-            // Parse HTTP/HTTPS URL
-            const urlObj = new URL(url);
-            if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
-                const pathParts = urlObj.pathname.split('/').filter((p) => p);
-                // Account URL: https://github.com/username (1 part)
-                // Repository URL: https://github.com/owner/repo (2+ parts)
-                if (pathParts.length === 1) {
-                    return 'Account';
-                } else if (pathParts.length >= 2) {
-                    return 'Repository';
-                }
-            }
-        } catch (error) {
-            console.error('❌ [GitHub Test] Error detecting URL type:', error);
-        }
-        
-        // Default to Repository for backward compatibility
-        return 'Repository';
-    }
-
-    /**
-     * Test GitHub Account URL connectivity with OAuth
-     */
-    private async testGitHubAccountConnectivity(
-        res: any,
-        accountUrl: string,
-        oauthToken: string,
-    ) {
-        try {
-            // Extract account username from URL
-            // Example: https://github.com/Vipin-Gup -> Vipin-Gup
-            const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
-            if (!urlMatch || !urlMatch[1]) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Invalid GitHub Account URL format. Expected: https://github.com/USERNAME',
-                });
-            }
-
-            const accountUsername = urlMatch[1];
-
-            console.log('👤 [GitHub Test] Testing Account URL:', {
-                originalUrl: accountUrl,
-                username: accountUsername,
-            });
-
-            // Test connectivity by making an authenticated API call to GitHub
-            // Use GitHub REST API v3: GET /users/{username}
-            const githubApiUrl = `https://api.github.com/users/${accountUsername}`;
-
-            console.log('🌐 [GitHub Test] Calling GitHub API:', githubApiUrl);
-
-            const response = await axios.get(githubApiUrl, {
-                headers: {
-                    Authorization: `Bearer ${oauthToken}`,
-                    Accept: 'application/vnd.github.v3+json',
-                    'User-Agent': 'DevOps-Automate-Backend',
-                },
-                timeout: 10000, // 10 second timeout
-            });
-
-            console.log('✅ [GitHub Test] GitHub API response status:', response.status);
-            console.log('📦 [GitHub Test] GitHub user info:', {
-                login: response.data.login,
-                name: response.data.name,
-                email: response.data.email,
-                publicRepos: response.data.public_repos,
-            });
-
-            // Verify that the account exists and is accessible
-            if (response.status >= 200 && response.status < 300) {
-                const userData = response.data;
-                if (userData.login && userData.login.toLowerCase() === accountUsername.toLowerCase()) {
-                    return res.status(HttpStatus.OK).json({
-                        success: true,
-                        status: 'success',
-                        connected: true,
-                        message: `Successfully connected to GitHub account "${accountUsername}"`,
-                        userInfo: {
-                            login: userData.login,
-                            name: userData.name,
-                            email: userData.email,
-                            avatarUrl: userData.avatar_url,
-                            publicRepos: userData.public_repos,
-                            followers: userData.followers,
-                            following: userData.following,
-                        },
-                    });
-                }
-            }
-
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: 'Unable to verify GitHub account connectivity',
-            });
-        } catch (error: any) {
-            console.error('❌ [GitHub Test] Error testing Account connectivity:', error);
-
-            // Handle different types of errors
-            let errorMessage = 'Failed to connect to GitHub account';
-            let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
-
-            if (error.response) {
-                statusCode = error.response.status;
-
-                if (statusCode === HttpStatus.UNAUTHORIZED) {
-                    errorMessage =
-                        'OAuth token is invalid or expired. Please re-authenticate in Manage Credentials.';
-                } else if (statusCode === HttpStatus.NOT_FOUND) {
-                    const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
-                    const username = urlMatch ? urlMatch[1] : 'unknown';
-                    errorMessage = `GitHub account "${username}" not found. Please verify the account URL.`;
-                } else {
-                    const errorData = error.response.data || {};
-                    errorMessage = `GitHub API error: ${errorData.message || error.response.statusText}`;
-                }
-
-                console.error('📛 [GitHub Test] GitHub API error response:', {
-                    status: error.response.status,
-                    statusText: error.response.statusText,
-                    data: error.response.data,
-                });
-            } else if (error.request) {
-                errorMessage =
-                    'No response from GitHub server. Please check the URL and network connectivity.';
-                console.error('📛 [GitHub Test] No response received:', error.request);
-            } else if (error.code === 'ECONNREFUSED') {
-                errorMessage = 'Connection refused. Please check network connectivity.';
-            } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-                errorMessage =
-                    'Connection timeout. Please check the GitHub URL and network connectivity.';
-            } else {
-                errorMessage = error.message || 'Unknown error occurred while testing connectivity';
-            }
-
-            return res.status(statusCode).json({
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: errorMessage,
-                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-            });
-        }
-    }
-
-    /**
-     * Test GitHub Repository URL connectivity with OAuth
-     */
-    private async testGitHubRepositoryConnectivity(
-        res: any,
-        repoUrl: string,
-        oauthToken: string,
-    ) {
-        try {
-            // Validate URL format and extract repository information
-            // Support formats:
-            // - https://github.com/owner/repo.git
-            // - https://github.com/owner/repo
-            // - git@github.com:owner/repo.git
-            // - git@github.com:owner/repo
-            let repoOwner: string | null = null;
-            let repoName: string | null = null;
-            let isSSHUrl = false;
-
-            // Check if it's an SSH URL (git@github.com:owner/repo.git)
-            if (repoUrl.startsWith('git@')) {
-                isSSHUrl = true;
-                // Parse SSH URL: git@github.com:owner/repo.git
-                const sshMatch = repoUrl.match(/^git@([^:]+):(.+)$/);
-                if (sshMatch) {
-                    const hostname = sshMatch[1];
-                    const repoPath = sshMatch[2];
-
-                    if (hostname === 'github.com' || hostname.includes('github')) {
-                        const pathParts = repoPath.split('/').filter((p: string) => p);
-                        if (pathParts.length >= 2) {
-                            repoOwner = pathParts[0];
-                            repoName = pathParts[1].replace(/\.git$/, '');
-                        }
-                    }
-                }
-            } else {
-                // Parse HTTP/HTTPS URL
-                try {
-                    const urlObj = new URL(repoUrl);
-                    if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
-                        const pathParts = urlObj.pathname.split('/').filter((p) => p);
-                        if (pathParts.length >= 2) {
-                            repoOwner = pathParts[0];
-                            repoName = pathParts[1].replace(/\.git$/, '');
-                        }
-                    }
-                } catch (error) {
-                    console.error('❌ [GitHub Test] Error parsing URL:', error);
-                }
-            }
-
-            if (!repoOwner || !repoName) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Invalid GitHub repository URL. Expected format: https://github.com/owner/repo or git@github.com:owner/repo.git',
-                });
-            }
-
-            console.log('🔗 [GitHub Test] Extracted repository info:', {
-                original: repoUrl,
-                isSSHUrl: isSSHUrl,
-                owner: repoOwner,
-                repo: repoName,
-            });
-
-            // Test GitHub connection using OAuth token
-            // First, verify the token works by calling GitHub user API
-            try {
-                // Get authenticated user info
-                const userResponse = await axios.get('https://api.github.com/user', {
-                    headers: {
-                        Authorization: `Bearer ${oauthToken}`,
-                        Accept: 'application/vnd.github.v3+json',
-                        'User-Agent': 'DevOps-Automate-Backend',
-                    },
-                    timeout: 10000, // 10 second timeout
-                });
-
-                console.log('✅ [GitHub Test] GitHub user API response status:', userResponse.status);
-                console.log('📦 [GitHub Test] GitHub user info:', {
-                    login: userResponse.data.login,
-                    name: userResponse.data.name,
-                    email: userResponse.data.email,
-                });
-
-                // Verify repository access
-                const repoApiUrl = `https://api.github.com/repos/${repoOwner}/${repoName}`;
-                console.log('🌐 [GitHub Test] Testing repository access:', repoApiUrl);
-
-                const repoResponse = await axios.get(repoApiUrl, {
-                    headers: {
-                        Authorization: `Bearer ${oauthToken}`,
-                        Accept: 'application/vnd.github.v3+json',
-                        'User-Agent': 'DevOps-Automate-Backend',
-                    },
-                    timeout: 10000,
-                });
-
-                console.log('✅ [GitHub Test] Repository access verified:', {
-                    repo: repoResponse.data.full_name,
-                    private: repoResponse.data.private,
-                    defaultBranch: repoResponse.data.default_branch,
-                });
-
-                // If we get successful responses, connection is successful
-                if (
-                    userResponse.status >= 200 &&
-                    userResponse.status < 300 &&
-                    repoResponse.status >= 200 &&
-                    repoResponse.status < 300
-                ) {
-                    return res.status(HttpStatus.OK).json({
-                        success: true,
-                        status: 'success',
-                        connected: true,
-                        message: 'Successfully connected to GitHub',
-                        userInfo: {
-                            login: userResponse.data.login,
-                            name: userResponse.data.name,
-                            email: userResponse.data.email,
-                            avatarUrl: userResponse.data.avatar_url,
-                        },
-                        repositoryInfo: {
-                            fullName: repoResponse.data.full_name,
-                            private: repoResponse.data.private,
-                            defaultBranch: repoResponse.data.default_branch,
-                            url: repoResponse.data.html_url,
-                        },
-                    });
-                } else {
-                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: `Unexpected response status: User=${userResponse.status}, Repo=${repoResponse.status}`,
-                    });
-                }
-            } catch (error: any) {
-                console.error('❌ [GitHub Test] Error testing Repository connectivity:', error);
-
-                // Handle different types of errors
-                let errorMessage = 'Failed to connect to GitHub repository';
-                let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
-
-                if (error.response) {
-                    statusCode = error.response.status;
-
-                    if (statusCode === HttpStatus.UNAUTHORIZED) {
-                        errorMessage =
-                            'Authentication failed. OAuth token may be invalid or expired. Please re-authorize.';
-                    } else if (statusCode === HttpStatus.FORBIDDEN) {
-                        errorMessage =
-                            'Access forbidden. OAuth token does not have permission to access this repository.';
-                    } else if (statusCode === HttpStatus.NOT_FOUND) {
-                        if (error.response.config?.url?.includes('/repos/')) {
-                            errorMessage = `Repository not found: ${repoOwner}/${repoName}. Please check the URL and repository access permissions.`;
-                        } else {
-                            errorMessage = 'GitHub resource not found. Please check the URL.';
-                        }
-                    } else {
-                        errorMessage = `GitHub API error: ${error.response.status} - ${error.response.statusText}`;
-                    }
-
-                    console.error('📛 [GitHub Test] GitHub API error response:', {
-                        status: error.response.status,
-                        statusText: error.response.statusText,
-                        data: error.response.data,
-                        url: error.response.config?.url,
-                    });
-                } else if (error.request) {
-                    errorMessage =
-                        'No response from GitHub server. Please check the URL and network connectivity.';
-                    console.error('📛 [GitHub Test] No response received:', error.request);
-                } else if (error.code === 'ECONNREFUSED') {
-                    errorMessage = 'Connection refused. Please check network connectivity.';
-                } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
-                    errorMessage =
-                        'Connection timeout. Please check the GitHub URL and network connectivity.';
-                } else {
-                    errorMessage = error.message || 'Unknown error occurred while testing connectivity';
-                }
-
-                return res.status(statusCode).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: errorMessage,
-                    error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-                });
-            }
-        } catch (error: any) {
-            // This catch block handles unexpected errors during validation
-            console.error('❌ [GitHub Test] Unexpected error during validation:', error);
-
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: 'An unexpected error occurred while processing the request',
-                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-            });
-        }
-    }
-}
-
-@Controller('api/accounts')
-class AccountsController {
-    @Get()
-    async list() {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.list();
-        }
-        return await accounts.list();
-    }
-
-    @Get(':id')
-    async get(@Param('id') id: string) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.get(id); // String ID for DynamoDB
-        }
-        return await accounts.get(Number(id)); // Number ID for PostgreSQL
-    }
-
-    @Post()
-    async create(@Body() body: any) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.create(body);
-        }
-        return await accounts.create(body);
-    }
-
-    @Put()
-    async update(@Body() body: any) {
-        const {id, ...rest} = body || {};
-        if (!id) return {error: 'id required'};
-
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            const updated = await accountsDynamoDB.update(id, rest); // String ID for DynamoDB
-            if (!updated) return {error: 'Not found'};
-            return updated;
-        }
-
-        const updated = await accounts.update(Number(id), rest); // Number ID for PostgreSQL
-        if (!updated) return {error: 'Not found'};
-        return updated;
-    }
-
-    @Delete(':id')
-    async remove(@Param('id') id: string) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            await accountsDynamoDB.remove(id); // String ID for DynamoDB
-            return {};
-        }
-        await accounts.remove(Number(id)); // Number ID for PostgreSQL
-        return {};
     }
 
     // Technical User endpoints
@@ -3526,326 +2399,6 @@ class PipelineCanvasController {
         }
         return {success: true};
     }
-
-    @Get('search/by-name')
-    async searchByName(
-        @Query('name') name: string,
-        @Res() res: any,
-@Controller('api/users')
-class UsersController {
-    @Get()
-    async list(
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
-        try {
-            if (!name) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
-                });
-            }
-
-            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
-                // Get all pipelines and filter by name
-                const allPipelines = await pipelineCanvasDynamoDB.list();
-                const matchingPipelines = allPipelines.filter(
-                    (pipeline) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    found: matchingPipelines.length > 0,
-                    count: matchingPipelines.length,
-                    pipelines: matchingPipelines,
-                });
-            } else {
-                // For non-DynamoDB mode
-                const allPipelines = await pipelineCanvas.list();
-                const matchingPipelines = allPipelines.filter(
-                    (pipeline: any) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    found: matchingPipelines.length > 0,
-                    count: matchingPipelines.length,
-                    pipelines: matchingPipelines,
-                });
-            }
-        } catch (error: any) {
-            console.error('Error searching pipeline by name:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                error: error.message || 'Failed to search pipeline',
-            });
-        }
-    }
-
-    @Get('check/yaml')
-    async checkYamlContent(
-        @Query('name') name: string,
-        @Res() res: any,
-    ) {
-        try {
-            if (!name) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
-                });
-            }
-
-            let matchingPipelines: any[] = [];
-
-            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
-                // Get all pipelines and filter by name
-                const allPipelines = await pipelineCanvasDynamoDB.list();
-                matchingPipelines = allPipelines.filter(
-                    (pipeline) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-            } else {
-                // For non-DynamoDB mode
-                const allPipelines = await pipelineCanvas.list();
-                matchingPipelines = allPipelines.filter(
-                    (pipeline: any) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-            }
-
-            if (matchingPipelines.length === 0) {
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    pipelineExists: false,
-                    pipelineName: name,
-                    message: `Pipeline "${name}" not found in database`,
-                });
-            }
-
-            // Check YAML content for each matching pipeline
-            const results = matchingPipelines.map((pipeline) => {
-                const hasYaml = !!pipeline.yamlContent;
-                const yamlLength = pipeline.yamlContent
-                    ? pipeline.yamlContent.length
-                    : 0;
-                const yamlPreview = pipeline.yamlContent
-                    ? pipeline.yamlContent.substring(0, 200) + '...'
-                    : null;
-
-                return {
-                    id: pipeline.id,
-                    pipelineName: pipeline.pipelineName,
-                    hasYamlContent: hasYaml,
-                    yamlContentLength: yamlLength,
-                    yamlContentPreview: yamlPreview,
-                    accountId: pipeline.accountId,
-                    accountName: pipeline.accountName,
-                    enterpriseId: pipeline.enterpriseId,
-                    enterpriseName: pipeline.enterpriseName,
-                    createdAt: pipeline.createdAt,
-                    updatedAt: pipeline.updatedAt,
-                };
-            });
-
-            const hasYamlCount = results.filter((r) => r.hasYamlContent).length;
-            const noYamlCount = results.length - hasYamlCount;
-
-            return res.status(HttpStatus.OK).json({
-                success: true,
-                pipelineExists: true,
-                pipelineName: name,
-                totalMatches: results.length,
-                summary: {
-                    pipelinesWithYaml: hasYamlCount,
-                    pipelinesWithoutYaml: noYamlCount,
-                },
-                pipelines: results,
-                confirmation: hasYamlCount > 0
-                    ? `✅ YAML content EXISTS for pipeline "${name}" (${hasYamlCount} pipeline(s) with YAML)`
-                    : `❌ YAML content DOES NOT EXIST for pipeline "${name}" (${noYamlCount} pipeline(s) found but no YAML content)`,
-            });
-        } catch (error: any) {
-            console.error('Error checking YAML content:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                error: error.message || 'Failed to check YAML content',
-            });
-        }
-    }
-
-    @Get('yaml/by-name')
-    async getYamlByName(
-        @Query('name') name: string,
-        @Res() res: any,
-    ) {
-        try {
-            if (!name) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
-                });
-            }
-
-            let matchingPipelines: any[] = [];
-
-            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
-                // Get all pipelines and filter by name
-                const allPipelines = await pipelineCanvasDynamoDB.list();
-                matchingPipelines = allPipelines.filter(
-                    (pipeline) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-            } else {
-                // For non-DynamoDB mode
-                const allPipelines = await pipelineCanvas.list();
-                matchingPipelines = allPipelines.filter(
-                    (pipeline: any) =>
-                        pipeline.pipelineName?.toLowerCase() ===
-                        name.toLowerCase(),
-                );
-            }
-
-            if (matchingPipelines.length === 0) {
-                return res.status(HttpStatus.NOT_FOUND).json({
-                    success: false,
-                    error: `Pipeline "${name}" not found in database`,
-                });
-            }
-
-            // If multiple pipelines found, return all with their YAML
-            // If single pipeline found, return just that one
-            const results = matchingPipelines.map((pipeline) => ({
-                id: pipeline.id,
-                pipelineName: pipeline.pipelineName,
-                accountId: pipeline.accountId,
-                accountName: pipeline.accountName,
-                enterpriseId: pipeline.enterpriseId,
-                enterpriseName: pipeline.enterpriseName,
-                createdAt: pipeline.createdAt,
-                updatedAt: pipeline.updatedAt,
-                hasYamlContent: !!pipeline.yamlContent,
-                yamlContent: pipeline.yamlContent || null,
-                yamlContentLength: pipeline.yamlContent
-                    ? pipeline.yamlContent.length
-                    : 0,
-            }));
-
-            // If only one pipeline, return simplified response
-            if (results.length === 1) {
-                const pipeline = results[0];
-                if (!pipeline.hasYamlContent) {
-                    return res.status(HttpStatus.OK).json({
-                        success: true,
-                        pipelineName: name,
-                        hasYamlContent: false,
-                        message: `Pipeline "${name}" exists but has no YAML content`,
-                        pipeline: {
-                            id: pipeline.id,
-                            pipelineName: pipeline.pipelineName,
-                            accountId: pipeline.accountId,
-                            accountName: pipeline.accountName,
-                            enterpriseId: pipeline.enterpriseId,
-                            enterpriseName: pipeline.enterpriseName,
-                        },
-                    });
-                }
-
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    pipelineName: name,
-                    hasYamlContent: true,
-                    yamlContent: pipeline.yamlContent,
-                    yamlContentLength: pipeline.yamlContentLength,
-                    pipeline: {
-                        id: pipeline.id,
-                        pipelineName: pipeline.pipelineName,
-                        accountId: pipeline.accountId,
-                        accountName: pipeline.accountName,
-                        enterpriseId: pipeline.enterpriseId,
-                        enterpriseName: pipeline.enterpriseName,
-                        createdAt: pipeline.createdAt,
-                        updatedAt: pipeline.updatedAt,
-                    },
-                });
-            }
-
-            // Multiple pipelines found
-            return res.status(HttpStatus.OK).json({
-                success: true,
-                pipelineName: name,
-                totalMatches: results.length,
-                message: `Found ${results.length} pipeline(s) with name "${name}"`,
-                pipelines: results,
-            });
-        } catch (error: any) {
-            console.error('Error fetching YAML by name:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                error: error.message || 'Failed to fetch YAML content',
-            });
-        }
-    }
-
-    @Get('debug/yaml-content')
-    async getAllYamlContent(@Res() res: any) {
-        try {
-            if (storageMode !== 'dynamodb' || !pipelineCanvasDynamoDB) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    error: 'YAML content debug endpoint only available in DynamoDB mode',
-                });
-            }
-
-            // Get all pipelines
-            const pipelines = await pipelineCanvasDynamoDB.list();
-
-            // Format response with YAML content
-            const pipelinesWithYaml = pipelines.map((pipeline) => ({
-                id: pipeline.id,
-                pipelineName: pipeline.pipelineName,
-                accountId: pipeline.accountId,
-                accountName: pipeline.accountName,
-                enterpriseId: pipeline.enterpriseId,
-                enterpriseName: pipeline.enterpriseName,
-                createdAt: pipeline.createdAt,
-                updatedAt: pipeline.updatedAt,
-                hasYamlContent: !!pipeline.yamlContent,
-                yamlContentLength: pipeline.yamlContent
-                    ? pipeline.yamlContent.length
-                    : 0,
-                yamlContent: pipeline.yamlContent || null,
-            }));
-
-            // Count pipelines with and without YAML
-            const withYaml = pipelinesWithYaml.filter((p) => p.hasYamlContent)
-                .length;
-            const withoutYaml = pipelinesWithYaml.length - withYaml;
-
-            return res.status(HttpStatus.OK).json({
-                success: true,
-                summary: {
-                    totalPipelines: pipelinesWithYaml.length,
-                    pipelinesWithYaml: withYaml,
-                    pipelinesWithoutYaml: withoutYaml,
-                },
-                pipelines: pipelinesWithYaml,
-            });
-        } catch (error: any) {
-            console.error('Error fetching YAML content:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                success: false,
-                error: error.message || 'Failed to fetch YAML content',
-            });
-        }
-    }
 }
 
 @Controller('api/users')
@@ -3854,6 +2407,8 @@ class UsersController {
     async list(
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         try {
             if (storageMode === 'dynamodb' && userManagement) {
@@ -3866,13 +2421,6 @@ class UsersController {
                     accountName === '' ||
                     accountName.toLowerCase() === 'systiva';
 
-                let usersFromDB;
-                if (isSystivaAccount) {
-                    usersFromDB = await userManagement.listUsers();
-                } else {
-                    usersFromDB = await userManagement.listUsersByAccount(
-                        accountId,
-                        accountName,
                 // Determine if filtering by enterprise
                 const isGlobalEnterprise =
                     !enterpriseId ||
@@ -6630,13 +5178,15 @@ class RolesController {
         @Query('groupId') groupId?: string,
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         console.log('📋 listRoles API called with:', {
             groupId,
             accountId,
             accountName,
-            accountIdType: typeof accountId,
-            accountNameType: typeof accountName,
+            enterpriseId,
+            enterpriseName,
         });
 
         if (storageMode === 'dynamodb' && userManagement) {
@@ -6652,29 +5202,45 @@ class RolesController {
                 accountName === '' ||
                 accountName.toLowerCase() === 'systiva';
 
-            console.log('📋 isSystivaAccount check:', {
+            // Determine if this is a Global enterprise request
+            const isGlobalEnterprise =
+                !enterpriseId ||
+                enterpriseId === '' ||
+                !enterpriseName ||
+                enterpriseName === '' ||
+                enterpriseName.toLowerCase() === 'global';
+
+            console.log('📋 Filter check:', {
                 isSystivaAccount,
-                checks: {
-                    noAccountId: !accountId,
-                    emptyAccountId: accountId === '',
-                    noAccountName: !accountName,
-                    emptyAccountName: accountName === '',
-                    isSystivaName: accountName?.toLowerCase() === 'systiva',
-                },
+                isGlobalEnterprise,
             });
 
+            let roles;
             if (isSystivaAccount) {
                 console.log('📋 Calling listRoles() for Systiva');
-                return await userManagement.listRoles();
+                roles = await userManagement.listRoles();
             } else {
                 console.log(
                     `📋 Calling listRolesByAccount() for ${accountName}`,
                 );
-                return await userManagement.listRolesByAccount(
+                roles = await userManagement.listRolesByAccount(
                     accountId,
                     accountName,
                 );
             }
+
+            // Filter by enterprise if not Global
+            if (!isGlobalEnterprise && roles) {
+                roles = roles.filter(
+                    (role: any) =>
+                        !role.enterpriseId ||
+                        role.enterpriseId === enterpriseId ||
+                        role.enterpriseName?.toLowerCase() ===
+                            enterpriseName?.toLowerCase(),
+                );
+            }
+
+            return roles;
         } else {
             if (groupId) {
                 return await roles.getRolesForGroup(groupId);
@@ -6777,22 +5343,36 @@ class RolesController {
         if (!searchTerm) {
             return await this.list(undefined, accountId, accountName);
         }
-        
+
         if (storageMode === 'dynamodb' && userManagement) {
-            const allRoles = accountId && accountName 
-                ? await userManagement.listRolesByAccount(accountId, accountName)
-                : await userManagement.listRoles();
-            
-            const filtered = allRoles.filter((role: any) => 
-                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            const allRoles =
+                accountId && accountName
+                    ? await userManagement.listRolesByAccount(
+                          accountId,
+                          accountName,
+                      )
+                    : await userManagement.listRoles();
+
+            const filtered = allRoles.filter(
+                (role: any) =>
+                    role.name
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()) ||
+                    role.description
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()),
             );
             return filtered;
         } else {
             const allRoles = await roles.list();
-            const filtered = allRoles.filter((role: any) => 
-                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
+            const filtered = allRoles.filter(
+                (role: any) =>
+                    role.name
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()) ||
+                    role.description
+                        ?.toLowerCase()
+                        .includes(searchTerm.toLowerCase()),
             );
             return filtered;
         }
@@ -6833,7 +5413,7 @@ class RolesController {
                 // Get all users and filter by roles through their assigned groups
                 const allUsers = await userManagement.listUsers();
                 const allGroups = await userManagement.listGroups();
-                
+
                 // Find groups that have this role
                 const groupsWithRole = allGroups.filter(
                     (group) =>
@@ -6841,14 +5421,16 @@ class RolesController {
                         group.assignedRoles.includes(roleId),
                 );
                 const groupIds = groupsWithRole.map((g) => g.id);
-                
+
                 // Find users that belong to those groups
                 const roleUsers = allUsers.filter(
                     (user) =>
                         user.assignedGroups &&
-                        user.assignedGroups.some((gId: string) => groupIds.includes(gId)),
+                        user.assignedGroups.some((gId: string) =>
+                            groupIds.includes(gId),
+                        ),
                 );
-                
+
                 return res.status(HttpStatus.OK).json({
                     success: true,
                     data: {users: roleUsers},
@@ -6937,7 +5519,7 @@ class RolesController {
                 await userManagement.updateGroup(groupId, {
                     assignedRoles: updatedRoles,
                 });
-                
+
                 return res.status(HttpStatus.NO_CONTENT).send();
             } else {
                 await roles.removeRoleFromGroup(groupId, roleId);
@@ -7123,17 +5705,68 @@ class BreadcrumbController {
 @Controller('api/groups')
 class GroupsController {
     @Get()
-    async list(@Query('search') search?: string) {
+    async list(
+        @Query('search') search?: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
         if (storageMode === 'dynamodb' && userManagement) {
-            const allGroups = await userManagement.listGroups();
-            if (!search) return allGroups;
-            const searchLower = search.toLowerCase();
-            return allGroups.filter(
-                (group) =>
-                    group.name.toLowerCase().includes(searchLower) ||
-                    (group.description &&
-                        group.description.toLowerCase().includes(searchLower)),
-            );
+            let allGroups = await userManagement.listGroups();
+
+            // Filter by account if provided (skip for Systiva)
+            const isSystivaAccount =
+                !accountId ||
+                accountId === '' ||
+                !accountName ||
+                accountName === '' ||
+                accountName.toLowerCase() === 'systiva';
+
+            if (!isSystivaAccount) {
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        !group.accountId ||
+                        group.accountId === accountId ||
+                        group.accountName?.toLowerCase() ===
+                            accountName?.toLowerCase(),
+                );
+            }
+
+            // Filter by enterprise if provided (skip for Global)
+            const isGlobalEnterprise =
+                !enterpriseId ||
+                enterpriseId === '' ||
+                !enterpriseName ||
+                enterpriseName === '' ||
+                enterpriseName.toLowerCase() === 'global';
+
+            if (!isGlobalEnterprise) {
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        !group.enterpriseId ||
+                        group.enterpriseId === enterpriseId ||
+                        group.enterpriseName?.toLowerCase() ===
+                            enterpriseName?.toLowerCase() ||
+                        group.entity?.toLowerCase() ===
+                            enterpriseName?.toLowerCase(),
+                );
+            }
+
+            // Apply search filter
+            if (search) {
+                const searchLower = search.toLowerCase();
+                allGroups = allGroups.filter(
+                    (group: any) =>
+                        group.name.toLowerCase().includes(searchLower) ||
+                        (group.description &&
+                            group.description
+                                .toLowerCase()
+                                .includes(searchLower)),
+                );
+            }
+
+            return allGroups;
         } else {
             return groups.list(search);
         }
@@ -7235,55 +5868,6 @@ class BuildsController {
 
             if (storageMode === 'dynamodb' && buildsDynamoDB) {
                 return await buildsDynamoDB.list(
-        @Query('groupId') groupId?: string,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
-        console.log('📋 listRoles API called with:', {
-            groupId,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        });
-
-        if (storageMode === 'dynamodb' && userManagement) {
-            if (groupId) {
-                return await userManagement.getGroupRoles(groupId);
-            }
-
-            // Determine if this is a Systiva account request
-            const isSystivaAccount =
-                !accountId ||
-                accountId === '' ||
-                !accountName ||
-                accountName === '' ||
-                accountName.toLowerCase() === 'systiva';
-
-            // Determine if this is a Global enterprise request
-            const isGlobalEnterprise =
-                !enterpriseId ||
-                enterpriseId === '' ||
-                !enterpriseName ||
-                enterpriseName === '' ||
-                enterpriseName.toLowerCase() === 'global';
-
-            console.log('📋 Filter check:', {
-                isSystivaAccount,
-                isGlobalEnterprise,
-            });
-
-            let roles;
-            if (isSystivaAccount) {
-                console.log('📋 Calling listRoles() for Systiva');
-                roles = await userManagement.listRoles();
-            } else {
-                console.log(
-                    `📋 Calling listRolesByAccount() for ${accountName}`,
-                );
-                roles = await userManagement.listRolesByAccount(
                     accountId,
                     accountName,
                     enterpriseId,
@@ -7294,23 +5878,6 @@ class BuildsController {
         } catch (error: any) {
             console.error('Error listing builds:', error);
             throw error;
-            // Filter by enterprise if not Global
-            if (!isGlobalEnterprise && roles) {
-                roles = roles.filter(
-                    (role: any) =>
-                        !role.enterpriseId ||
-                        role.enterpriseId === enterpriseId ||
-                        role.enterpriseName?.toLowerCase() ===
-                            enterpriseName?.toLowerCase(),
-                );
-            }
-
-            return roles;
-        } else {
-            if (groupId) {
-                return await roles.getRolesForGroup(groupId);
-            }
-            return await roles.list();
         }
     }
 
@@ -7436,46 +6003,6 @@ class BuildExecutionsController {
         @Query('accountName') accountName: string,
         @Query('buildId') buildId: string,
     ) {
-        if (!searchTerm) {
-            return await this.list(undefined, accountId, accountName);
-        }
-
-        if (storageMode === 'dynamodb' && userManagement) {
-            const allRoles =
-                accountId && accountName
-                    ? await userManagement.listRolesByAccount(
-                          accountId,
-                          accountName,
-                      )
-                    : await userManagement.listRoles();
-
-            const filtered = allRoles.filter(
-                (role: any) =>
-                    role.name
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()) ||
-                    role.description
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()),
-            );
-            return filtered;
-        } else {
-            const allRoles = await roles.list();
-            const filtered = allRoles.filter(
-                (role: any) =>
-                    role.name
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()) ||
-                    role.description
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()),
-            );
-            return filtered;
-        }
-    }
-
-    @Get(':roleId/groups')
-    async getRoleGroups(@Param('roleId') roleId: string, @Res() res: any) {
         try {
             if (!accountId || !accountName || !buildId) {
                 throw new Error(
@@ -7517,37 +6044,6 @@ class BuildExecutionsController {
                     accountName,
                     buildId,
                 );
-            if (storageMode === 'dynamodb' && userManagement) {
-                // Get all users and filter by roles through their assigned groups
-                const allUsers = await userManagement.listUsers();
-                const allGroups = await userManagement.listGroups();
-
-                // Find groups that have this role
-                const groupsWithRole = allGroups.filter(
-                    (group) =>
-                        group.assignedRoles &&
-                        group.assignedRoles.includes(roleId),
-                );
-                const groupIds = groupsWithRole.map((g) => g.id);
-
-                // Find users that belong to those groups
-                const roleUsers = allUsers.filter(
-                    (user) =>
-                        user.assignedGroups &&
-                        user.assignedGroups.some((gId: string) =>
-                            groupIds.includes(gId),
-                        ),
-                );
-
-                return res.status(HttpStatus.OK).json({
-                    success: true,
-                    data: {users: roleUsers},
-                });
-            } else {
-                // Legacy implementation
-                return res.status(HttpStatus.NOT_IMPLEMENTED).json({
-                    error: 'Role users listing not implemented for this storage mode',
-                });
             }
 
             return null;
@@ -7625,16 +6121,6 @@ class BuildExecutionsController {
 
             if (storageMode === 'dynamodb' && buildExecutionsDynamoDB) {
                 return await buildExecutionsDynamoDB.create(executionData);
-                const currentRoles = group.assignedRoles || [];
-                const updatedRoles = currentRoles.filter((r) => r !== roleId);
-                await userManagement.updateGroup(groupId, {
-                    assignedRoles: updatedRoles,
-                });
-
-                return res.status(HttpStatus.NO_CONTENT).send();
-            } else {
-                await roles.removeRoleFromGroup(groupId, roleId);
-                return res.status(HttpStatus.NO_CONTENT).send();
             }
 
             throw new Error('DynamoDB storage not available');
@@ -7741,71 +6227,6 @@ class PipelineYamlController {
     @Get()
     async getAll() {
         return await pipelineYaml.getAll();
-    async list(
-        @Query('search') search?: string,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
-        if (storageMode === 'dynamodb' && userManagement) {
-            let allGroups = await userManagement.listGroups();
-
-            // Filter by account if provided (skip for Systiva)
-            const isSystivaAccount =
-                !accountId ||
-                accountId === '' ||
-                !accountName ||
-                accountName === '' ||
-                accountName.toLowerCase() === 'systiva';
-
-            if (!isSystivaAccount) {
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        !group.accountId ||
-                        group.accountId === accountId ||
-                        group.accountName?.toLowerCase() ===
-                            accountName?.toLowerCase(),
-                );
-            }
-
-            // Filter by enterprise if provided (skip for Global)
-            const isGlobalEnterprise =
-                !enterpriseId ||
-                enterpriseId === '' ||
-                !enterpriseName ||
-                enterpriseName === '' ||
-                enterpriseName.toLowerCase() === 'global';
-
-            if (!isGlobalEnterprise) {
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        !group.enterpriseId ||
-                        group.enterpriseId === enterpriseId ||
-                        group.enterpriseName?.toLowerCase() ===
-                            enterpriseName?.toLowerCase() ||
-                        group.entity?.toLowerCase() ===
-                            enterpriseName?.toLowerCase(),
-                );
-            }
-
-            // Apply search filter
-            if (search) {
-                const searchLower = search.toLowerCase();
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        group.name.toLowerCase().includes(searchLower) ||
-                        (group.description &&
-                            group.description
-                                .toLowerCase()
-                                .includes(searchLower)),
-                );
-            }
-
-            return allGroups;
-        } else {
-            return groups.list(search);
-        }
     }
 
     @Post(':templateId')
@@ -7839,80 +6260,30 @@ class EnvironmentsController {
     @Get()
     async getAll(
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            return {
-                error:
-                    'accountId, accountName, enterpriseId, and enterpriseName are required',
-            };
-        }
-
-        // DynamoDB: use context-aware query to avoid full table scans and enforce context.
-        if (storageMode === 'dynamodb' && environments?.getAllForContext) {
-            return await environments.getAllForContext({
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-            });
-        }
-
         const allEnvironments = await environments.getAll();
 
         // Filter by accountId and enterpriseId if provided
         let filtered = allEnvironments;
-        filtered = filtered.filter((env: any) => env.accountId === accountId);
-        filtered = filtered.filter(
-            (env: any) => env.enterpriseId === enterpriseId,
-        );
-        filtered = filtered.filter((env: any) => env.accountName === accountName);
-        filtered = filtered.filter(
-            (env: any) => env.enterpriseName === enterpriseName,
-        );
+        if (accountId) {
+            filtered = filtered.filter(
+                (env: any) => env.accountId === accountId,
+            );
+        }
+        if (enterpriseId) {
+            filtered = filtered.filter(
+                (env: any) => env.enterpriseId === enterpriseId,
+            );
+        }
 
         return filtered;
     }
 
     @Get(':id')
-    async getById(
-        @Param('id') id: string,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            return {
-                error:
-                    'accountId, accountName, enterpriseId, and enterpriseName are required',
-            };
-        }
-
-        let environment: any = null;
-
-        if (storageMode === 'dynamodb' && environments?.getByIdForContext) {
-            environment = await environments.getByIdForContext(id, {
-                accountId,
-                accountName,
-            });
-        } else {
-            environment = await environments.getById(id);
-        }
-
+    async getById(@Param('id') id: string) {
+        const environment = await environments.getById(id);
         if (!environment) {
-            return {error: 'Environment not found', status: 404};
-        }
-
-        // Enforce context match
-        if (
-            environment.accountId !== accountId ||
-            environment.accountName !== accountName ||
-            environment.enterpriseId !== enterpriseId ||
-            environment.enterpriseName !== enterpriseName
-        ) {
             return {error: 'Environment not found', status: 404};
         }
         return environment;
@@ -7920,52 +6291,12 @@ class EnvironmentsController {
 
     @Post()
     async create(@Body() body: any) {
-        const {
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        } = body || {};
-
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            return {
-                error:
-                    'accountId, accountName, enterpriseId, and enterpriseName are required',
-            };
-        }
         return await environments.create(body);
     }
 
     @Put(':id')
-    async update(
-        @Param('id') id: string,
-        @Body() body: any,
-        @Query('accountId') queryAccountId?: string,
-        @Query('accountName') queryAccountName?: string,
-        @Query('enterpriseId') queryEnterpriseId?: string,
-        @Query('enterpriseName') queryEnterpriseName?: string,
-    ) {
-        const accountId = body?.accountId || queryAccountId;
-        const accountName = body?.accountName || queryAccountName;
-        const enterpriseId = body?.enterpriseId || queryEnterpriseId;
-        const enterpriseName = body?.enterpriseName || queryEnterpriseName;
-
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            return {
-                error:
-                    'accountId, accountName, enterpriseId, and enterpriseName are required',
-            };
-        }
-
-        const payload = {
-            ...(body || {}),
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        };
-
-        const updated = await environments.update(id, payload);
+    async update(@Param('id') id: string, @Body() body: any) {
+        const updated = await environments.update(id, body);
         if (!updated) {
             return {error: 'Environment not found', status: 404};
         }
@@ -7973,864 +6304,12 @@ class EnvironmentsController {
     }
 
     @Delete(':id')
-    async delete(
-        @Param('id') id: string,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            return {
-                error:
-                    'accountId, accountName, enterpriseId, and enterpriseName are required',
-            };
-        }
-
-        // DynamoDB: delete by PK/SK (no scan)
-        if (storageMode === 'dynamodb' && environments?.deleteForContext) {
-            const deleted = await environments.deleteForContext(id, {
-                accountId,
-                accountName,
-            });
-            if (!deleted) {
-                return {error: 'Environment not found', status: 404};
-            }
-            return {success: true};
-        }
-
-        // Non-dynamodb: enforce context by checking record first
-        const existing = await environments.getById(id);
-        if (
-            !existing ||
-            existing.accountId !== accountId ||
-            existing.accountName !== accountName ||
-            existing.enterpriseId !== enterpriseId ||
-            existing.enterpriseName !== enterpriseName
-        ) {
-            return {error: 'Environment not found', status: 404};
-        }
-
+    async delete(@Param('id') id: string) {
         const deleted = await environments.delete(id);
         if (!deleted) {
             return {error: 'Environment not found', status: 404};
         }
         return {success: true};
-    }
-
-    /**
-     * POST /api/environments/cloudfoundry/test-connection
-     *
-     * Frontend sends context + hostUrl + credentialName + auth details.
-     * Backend must NOT lookup credentials; it uses payload directly.
-     */
-    @Post('cloudfoundry/test-connection')
-    async testCloudFoundryConnection(@Res() res: any, @Body() body: any) {
-        const startedAt = Date.now();
-        const finish = async (statusCode: number, payload: any) => {
-            const elapsed = Date.now() - startedAt;
-            if (elapsed < MIN_CONNECTIVITY_TEST_MS) {
-                await sleep(MIN_CONNECTIVITY_TEST_MS - elapsed);
-            }
-            return res.status(statusCode).json(payload);
-        };
-
-        try {
-            const {
-                // context
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-
-                // target
-                credentialName,
-                hostUrl,
-
-                // auth
-                authenticationType,
-                oauth2ClientId,
-                oauth2ClientSecret,
-                oauth2TokenUrl,
-                username,
-                apiKey,
-            } = body || {};
-
-            // Validate required context fields
-            const requiredFields: Array<[string, any]> = [
-                ['accountId', accountId],
-                ['accountName', accountName],
-                ['enterpriseId', enterpriseId],
-                ['enterpriseName', enterpriseName],
-                ['workstream', workstream],
-                ['product', product],
-                ['service', service],
-                ['credentialName', credentialName],
-                ['hostUrl', hostUrl],
-                ['authenticationType', authenticationType],
-            ];
-            for (const [name, value] of requiredFields) {
-                if (typeof value !== 'string' || value.trim().length === 0) {
-                    return await finish(HttpStatus.BAD_REQUEST, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: `Missing ${name}`,
-                    });
-                }
-            }
-
-            // Validate URLs + SSRF guardrails
-            let host: URL;
-            try {
-                host = validateOutboundUrl(hostUrl, 'hostUrl');
-            } catch (e: any) {
-                return await finish(HttpStatus.BAD_REQUEST, {
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: e?.message || 'Invalid hostUrl',
-                });
-            }
-
-            const authType = String(authenticationType).trim();
-
-            // Log (no secrets)
-            console.log('🧪 [Env CF Test] Received request:', {
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-                credentialName,
-                authenticationType: authType,
-                hostUrl: host.toString(),
-                hostHostname: host.hostname,
-                hasUsername: !!username,
-                apiKeyLength: typeof apiKey === 'string' ? apiKey.length : 0,
-                hasOauth2ClientId: !!oauth2ClientId,
-                oauth2ClientSecretLength:
-                    typeof oauth2ClientSecret === 'string'
-                        ? oauth2ClientSecret.length
-                        : 0,
-                oauth2TokenUrlHostname:
-                    typeof oauth2TokenUrl === 'string'
-                        ? (() => {
-                              try {
-                                  return new URL(oauth2TokenUrl).hostname;
-                              } catch {
-                                  return null;
-                              }
-                          })()
-                        : null,
-            });
-
-            const axiosClient = axios.create({
-                timeout: 10_000,
-                maxRedirects: 0,
-                validateStatus: () => true, // we will handle status codes ourselves
-            });
-
-            // OAuth2 client credentials
-            if (authType === 'OAuth2') {
-                if (
-                    typeof oauth2ClientId !== 'string' ||
-                    oauth2ClientId.trim().length === 0
-                ) {
-                    return await finish(HttpStatus.BAD_REQUEST, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: 'Missing oauth2ClientId',
-                    });
-                }
-                if (
-                    typeof oauth2ClientSecret !== 'string' ||
-                    oauth2ClientSecret.trim().length === 0
-                ) {
-                    return await finish(HttpStatus.BAD_REQUEST, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: 'Missing oauth2ClientSecret',
-                    });
-                }
-                if (
-                    typeof oauth2TokenUrl !== 'string' ||
-                    oauth2TokenUrl.trim().length === 0
-                ) {
-                    return await finish(HttpStatus.BAD_REQUEST, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: 'Missing oauth2TokenUrl',
-                    });
-                }
-
-                let tokenUrl: URL;
-                try {
-                    tokenUrl = validateOutboundUrl(oauth2TokenUrl, 'oauth2TokenUrl');
-                } catch (e: any) {
-                    return await finish(HttpStatus.BAD_REQUEST, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: e?.message || 'Invalid oauth2TokenUrl',
-                    });
-                }
-
-                // Token request (form-urlencoded)
-                const form = new URLSearchParams();
-                form.set('grant_type', 'client_credentials');
-                form.set('client_id', oauth2ClientId);
-                form.set('client_secret', oauth2ClientSecret);
-
-                const tokenResp = await axiosClient.post(tokenUrl.toString(), form, {
-                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                });
-
-                console.log('🧪 [Env CF Test] OAuth2 token response:', {
-                    status: tokenResp.status,
-                    tokenHost: tokenUrl.hostname,
-                });
-
-                if (tokenResp.status < 200 || tokenResp.status >= 300) {
-                    return await finish(HttpStatus.OK, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: `OAuth2 token request failed (status ${tokenResp.status})`,
-                    });
-                }
-
-                const accessToken = (tokenResp.data as any)?.access_token;
-                if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
-                    return await finish(HttpStatus.OK, {
-                        success: false,
-                        status: 'failed',
-                        connected: false,
-                        message: 'OAuth2 token response missing access_token',
-                    });
-                }
-
-                const hostResp = await axiosClient.get(host.toString(), {
-                    headers: {Authorization: `Bearer ${accessToken}`},
-                });
-
-                console.log('🧪 [Env CF Test] Host response:', {
-                    status: hostResp.status,
-                    host: host.hostname,
-                });
-
-                if (hostResp.status >= 200 && hostResp.status < 300) {
-                    return await finish(HttpStatus.OK, {
-                        success: true,
-                        status: 'success',
-                        connected: true,
-                        message: 'Connection successful',
-                    });
-                }
-
-                return await finish(HttpStatus.OK, {
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: `Host request failed (status ${hostResp.status})`,
-                });
-            }
-
-            // Basic-style auth (default)
-            if (typeof username !== 'string' || username.trim().length === 0) {
-                return await finish(HttpStatus.BAD_REQUEST, {
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Missing username',
-                });
-            }
-            if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-                return await finish(HttpStatus.BAD_REQUEST, {
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Missing apiKey',
-                });
-            }
-
-            const basic = Buffer.from(`${username}:${apiKey}`, 'utf8').toString('base64');
-            const hostResp = await axiosClient.get(host.toString(), {
-                headers: {Authorization: `Basic ${basic}`},
-            });
-
-            console.log('🧪 [Env CF Test] Host response:', {
-                status: hostResp.status,
-                host: host.hostname,
-            });
-
-            if (hostResp.status >= 200 && hostResp.status < 300) {
-                return await finish(HttpStatus.OK, {
-                    success: true,
-                    status: 'success',
-                    connected: true,
-                    message: 'Connection successful',
-                });
-            }
-
-            return await finish(HttpStatus.OK, {
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: `Host request failed (status ${hostResp.status})`,
-            });
-        } catch (error: any) {
-            console.error('❌ [Env CF Test] Unexpected error:', {
-                message: error?.message,
-                name: error?.name,
-            });
-            return await finish(HttpStatus.INTERNAL_SERVER_ERROR, {
-                success: false,
-                status: 'failed',
-                connected: false,
-                message: `Connection failed: ${error?.message || 'Unexpected error'}`,
-            });
-        }
-    }
-}
-
-@Controller('api/integration-artifacts')
-class IntegrationArtifactsController {
-    /**
-     * POST /api/integration-artifacts/fetch-packages
-     *
-     * Fetches Integration Packages and their artifacts from SAP Cloud Platform Integration (CPI)
-     * based on authentication credentials provided by the frontend.
-     *
-     * For each package returned, makes 3 parallel API calls to fetch:
-     * - IntegrationDesigntimeArtifacts
-     * - ValueMappingDesigntimeArtifacts
-     * - ScriptCollectionDesigntimeArtifacts
-     *
-     * Request Body:
-     * {
-     *   "apiUrl": "https://.../api/v1/IntegrationPackages",
-     *   "authenticationType": "OAuth2" | "Basic" | "Username and API Key",
-     *   "accountId": "string",
-     *   "accountName": "string",
-     *   "enterpriseId": "string",
-     *   "enterpriseName": "string",
-     *   "workstream": "string",
-     *   "product": "string",
-     *   "service": "string",
-     *   "environmentName": "string",
-     *   "credentialName": "string",
-     *   // OAuth2 fields:
-     *   "oauth2ClientId": "string",
-     *   "oauth2ClientSecret": "string",
-     *   "oauth2TokenUrl": "string",
-     *   // Basic Auth fields:
-     *   "username": "string",
-     *   "apiKey": "string"
-     * }
-     *
-     * Response:
-     * {
-     *   "success": true,
-     *   "data": [
-     *     {
-     *       "Name": "MyIntegrationPackage",
-     *       "Version": "1.0.0",
-     *       "Id": "package-id-123",
-     *       "IntegrationDesigntimeArtifacts": [
-     *         { "Name": "MyIFlow", "Version": "1.0.0", "Id": "iflow-id-456" }
-     *       ],
-     *       "ValueMappingDesigntimeArtifacts": [
-     *         { "Name": "MyValueMapping", "Version": "1.0.0", "Id": "vm-id-789" }
-     *       ],
-     *       "ScriptCollectionDesigntimeArtifacts": [
-     *         { "Name": "MyScriptCollection", "Version": "1.0.0", "Id": "sc-id-012" }
-     *       ]
-     *     }
-     *   ],
-     *   "count": 1
-     * }
-     */
-    @Post('fetch-packages')
-    async fetchPackages(@Res() res: any, @Body() body: any) {
-        try {
-            const {
-                apiUrl,
-                authenticationType,
-                oauth2ClientId,
-                oauth2ClientSecret,
-                oauth2TokenUrl,
-                username,
-                apiKey,
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-                environmentName,
-                credentialName,
-            } = body || {};
-
-            console.log('📡 [IntegrationArtifacts] Received request:', {
-                apiUrl,
-                authenticationType,
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                workstream,
-                product,
-                service,
-                environmentName,
-                credentialName,
-                hasOAuth2Credentials: !!(oauth2ClientId && oauth2ClientSecret),
-                hasBasicCredentials: !!(username && apiKey),
-            });
-
-            // Validate required fields
-            if (!apiUrl) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'API URL is required',
-                });
-            }
-
-            if (!authenticationType) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'Authentication type is required',
-                });
-            }
-
-            // Validate URL format
-            try {
-                const urlObj = new URL(apiUrl);
-                if (!['http:', 'https:'].includes(urlObj.protocol)) {
-                    return res.status(HttpStatus.BAD_REQUEST).json({
-                        success: false,
-                        error: 'API URL must use http or https protocol',
-                    });
-                }
-            } catch (urlError) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: 'Invalid API URL format',
-                });
-            }
-
-            // Get authentication headers based on authentication type
-            let authHeaders: Record<string, string> = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-            };
-
-            if (authenticationType === 'OAuth2') {
-                // Validate OAuth2 fields
-                if (!oauth2ClientId || !oauth2ClientSecret || !oauth2TokenUrl) {
-                    return res.status(HttpStatus.BAD_REQUEST).json({
-                        success: false,
-                        error: 'OAuth2 credentials are incomplete. Client ID, Client Secret, and Token URL are required.',
-                    });
-                }
-
-                // Validate OAuth2 token URL
-                try {
-                    const tokenUrlObj = new URL(oauth2TokenUrl);
-                    if (!['http:', 'https:'].includes(tokenUrlObj.protocol)) {
-                        return res.status(HttpStatus.BAD_REQUEST).json({
-                            success: false,
-                            error: 'OAuth2 Token URL must use http or https protocol',
-                        });
-                    }
-                } catch (urlError) {
-                    return res.status(HttpStatus.BAD_REQUEST).json({
-                        success: false,
-                        error: 'Invalid OAuth2 Token URL format',
-                    });
-                }
-
-                console.log('🔑 [IntegrationArtifacts] Getting OAuth2 token from:', {
-                    tokenUrl: oauth2TokenUrl,
-                    clientId: oauth2ClientId,
-                    hasClientSecret: !!oauth2ClientSecret,
-                });
-
-                // Step 1: Get OAuth2 access token
-                const accessToken = await this.getOAuth2Token(
-                    oauth2ClientId,
-                    oauth2ClientSecret,
-                    oauth2TokenUrl,
-                );
-
-                if (!accessToken) {
-                    return res.status(HttpStatus.UNAUTHORIZED).json({
-                        success: false,
-                        error: 'Failed to obtain OAuth2 access token',
-                    });
-                }
-
-                // Step 2: Set Authorization header with Bearer token
-                authHeaders['Authorization'] = `Bearer ${accessToken}`;
-            } else if (
-                authenticationType === 'Basic' ||
-                authenticationType === 'Username and API Key'
-            ) {
-                // Validate Basic Auth fields
-                if (!username || !apiKey) {
-                    return res.status(HttpStatus.BAD_REQUEST).json({
-                        success: false,
-                        error: 'Username and API Key are required for Basic authentication',
-                    });
-                }
-
-                // Create Basic Auth header
-                const credentials = Buffer.from(`${username}:${apiKey}`).toString(
-                    'base64',
-                );
-                authHeaders['Authorization'] = `Basic ${credentials}`;
-            } else {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    error: `Unsupported authentication type: ${authenticationType}`,
-                });
-            }
-
-            console.log('🌐 [IntegrationArtifacts] Fetching packages from:', {
-                apiUrl,
-                authenticationType,
-                hasAuthHeader: !!authHeaders['Authorization'],
-            });
-
-            // Step 3: Make GET request to fetch Integration Packages
-            const response = await axios.get(apiUrl, {
-                headers: authHeaders,
-                timeout: 30000, // 30 seconds timeout
-            });
-
-            console.log('✅ [IntegrationArtifacts] API response received:', {
-                status: response.status,
-                dataType: typeof response.data,
-                isArray: Array.isArray(response.data),
-            });
-
-            // Step 4: Parse and transform the response
-            let packages: any[] = [];
-            if (Array.isArray(response.data)) {
-                packages = response.data;
-            } else if (response.data?.d?.results) {
-                packages = response.data.d.results;
-            } else if (response.data?.results) {
-                packages = response.data.results;
-            } else if (response.data?.d) {
-                packages = Array.isArray(response.data.d)
-                    ? response.data.d
-                    : [response.data.d];
-            } else {
-                packages = [];
-            }
-
-            console.log(`📦 [IntegrationArtifacts] Found ${packages.length} packages`);
-
-            // Step 5: Extract base URL for constructing artifact URLs
-            // Keep the full path including /IntegrationPackages
-            const baseUrlObj = new URL(apiUrl);
-            const baseUrl = `${baseUrlObj.protocol}//${baseUrlObj.host}${baseUrlObj.pathname}`;
-
-            // Step 6: Extract Name, Version, and Id from packages
-            const transformedPackages = packages.map((pkg: any) => {
-                return {
-                    Name: pkg.Name || pkg.name || pkg.Id || pkg.id || 'Unknown',
-                    Version:
-                        pkg.Version ||
-                        pkg.version ||
-                        pkg.VersionId ||
-                        pkg.versionId ||
-                        'Unknown',
-                    Id: pkg.Id || pkg.id || pkg.Name || pkg.name || null,
-                };
-            });
-
-            // Step 7: For each package, fetch artifacts in parallel and build nested structure
-            const packagesWithArtifacts = await Promise.all(
-                transformedPackages.map(async (pkg: any) => {
-                    const packageId = pkg.Id;
-                    const packageName = pkg.Name;
-                    const packageVersion = pkg.Version;
-
-                    if (!packageId) {
-                        console.warn(
-                            `⚠️ [IntegrationArtifacts] Package missing Id field, skipping artifact fetch:`,
-                            pkg,
-                        );
-                        return {
-                            Name: packageName,
-                            Version: packageVersion,
-                            Id: null,
-                            IntegrationDesigntimeArtifacts: [],
-                            ValueMappingDesigntimeArtifacts: [],
-                            ScriptCollectionDesigntimeArtifacts: [],
-                        };
-                    }
-
-                    // Construct the 3 artifact URLs
-                    const artifactUrls = [
-                        `${baseUrl}('${packageId}')/IntegrationDesigntimeArtifacts`,
-                        `${baseUrl}('${packageId}')/ValueMappingDesigntimeArtifacts`,
-                        `${baseUrl}('${packageId}')/ScriptCollectionDesigntimeArtifacts`,
-                    ];
-
-                    console.log(
-                        `🔍 [IntegrationArtifacts] Fetching artifacts for package: ${packageName} (${packageId})`,
-                    );
-
-                    // Fetch all 3 artifact types in parallel for this package
-                    const [integrationArtifacts, valueMappingArtifacts, scriptCollectionArtifacts] =
-                        await Promise.all([
-                            // Fetch IntegrationDesigntimeArtifacts (IFLOW)
-                            this.fetchArtifacts(
-                                artifactUrls[0],
-                                authHeaders,
-                                packageName,
-                                'IntegrationDesigntimeArtifacts',
-                            ),
-                            // Fetch ValueMappingDesigntimeArtifacts (VALUE MAPPING)
-                            this.fetchArtifacts(
-                                artifactUrls[1],
-                                authHeaders,
-                                packageName,
-                                'ValueMappingDesigntimeArtifacts',
-                            ),
-                            // Fetch ScriptCollectionDesigntimeArtifacts (SCRIPT COLLECTION)
-                            this.fetchArtifacts(
-                                artifactUrls[2],
-                                authHeaders,
-                                packageName,
-                                'ScriptCollectionDesigntimeArtifacts',
-                            ),
-                        ]);
-
-                    console.log(
-                        `✅ [IntegrationArtifacts] Package ${packageName} - IFLOW: ${integrationArtifacts.length}, VALUE MAPPING: ${valueMappingArtifacts.length}, SCRIPT COLLECTION: ${scriptCollectionArtifacts.length}`,
-                    );
-
-                    return {
-                        Name: packageName,
-                        Version: packageVersion,
-                        Id: packageId,
-                        IntegrationDesigntimeArtifacts: integrationArtifacts,
-                        ValueMappingDesigntimeArtifacts: valueMappingArtifacts,
-                        ScriptCollectionDesigntimeArtifacts: scriptCollectionArtifacts,
-                    };
-                }),
-            );
-
-            console.log(
-                `✅ [IntegrationArtifacts] Total packages with artifacts: ${packagesWithArtifacts.length}`,
-            );
-
-            // Step 8: Return success response with nested structure
-            return res.status(HttpStatus.OK).json({
-                success: true,
-                data: packagesWithArtifacts,
-                count: packagesWithArtifacts.length,
-            });
-        } catch (error: any) {
-            console.error('❌ [IntegrationArtifacts] Error fetching packages:', {
-                message: error?.message,
-                name: error?.name,
-                hasResponse: !!error?.response,
-                responseStatus: error?.response?.status,
-            });
-
-            // Handle specific error cases
-            if (error.response) {
-                // API returned an error response
-                const errorMessage =
-                    error.response.data?.error?.message?.value ||
-                    error.response.data?.error?.message ||
-                    error.response.data?.message ||
-                    `API request failed with status ${error.response.status}`;
-
-                console.error('❌ [IntegrationArtifacts] API error response:', {
-                    status: error.response.status,
-                    error: errorMessage,
-                });
-
-                return res.status(error.response.status || HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    error: errorMessage,
-                    details: error.response.data,
-                });
-            } else if (error.request) {
-                // Request was made but no response received
-                console.error('❌ [IntegrationArtifacts] No response received');
-                return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
-                    success: false,
-                    error: 'No response received from the API. Please check the API URL and network connectivity.',
-                });
-            } else {
-                // Error in request setup
-                console.error('❌ [IntegrationArtifacts] Request setup error:', error.message);
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    success: false,
-                    error:
-                        error.message ||
-                        'An unexpected error occurred while fetching integration packages',
-                });
-            }
-        }
-    }
-
-    /**
-     * Get OAuth2 access token using client credentials flow
-     */
-    private async getOAuth2Token(
-        clientId: string,
-        clientSecret: string,
-        tokenUrl: string,
-    ): Promise<string | null> {
-        try {
-            console.log('🔑 [IntegrationArtifacts] Requesting OAuth2 token:', {
-                tokenUrl,
-                clientId,
-                hasClientSecret: !!clientSecret,
-            });
-
-            const response = await axios.post(
-                tokenUrl,
-                new URLSearchParams({
-                    grant_type: 'client_credentials',
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                }),
-                {
-                    headers: {
-                        'Content-Type': 'application/x-www-form-urlencoded',
-                        'Accept': 'application/json',
-                    },
-                    timeout: 30000, // 30 seconds timeout
-                },
-            );
-
-            console.log('✅ [IntegrationArtifacts] OAuth2 token response received:', {
-                status: response.status,
-                hasAccessToken: !!(response.data?.access_token || response.data?.accessToken || response.data?.token),
-            });
-
-            // Extract access token from response
-            // Different OAuth2 providers may return tokens in different formats
-            const accessToken =
-                response.data.access_token ||
-                response.data.accessToken ||
-                response.data.token;
-
-            if (!accessToken) {
-                console.error('❌ [IntegrationArtifacts] Access token not found in OAuth2 response:', {
-                    responseKeys: Object.keys(response.data || {}),
-                });
-                throw new Error('Access token not found in OAuth2 response');
-            }
-
-            console.log('✅ [IntegrationArtifacts] OAuth2 token obtained successfully');
-            return accessToken;
-        } catch (error: any) {
-            console.error('❌ [IntegrationArtifacts] Error obtaining OAuth2 token:', {
-                message: error?.message,
-                name: error?.name,
-                hasResponse: !!error?.response,
-                responseStatus: error?.response?.status,
-            });
-
-            if (error.response) {
-                const errorDescription =
-                    error.response.data?.error_description ||
-                    error.response.data?.error ||
-                    'Unknown error';
-                console.error('❌ [IntegrationArtifacts] OAuth2 error response:', {
-                    status: error.response.status,
-                    error: errorDescription,
-                });
-                throw new Error(
-                    `OAuth2 authentication failed: ${errorDescription}`,
-                );
-            }
-            throw error;
-        }
-    }
-
-    /**
-     * Fetch artifacts from a given URL
-     * @param url - The artifact API URL
-     * @param authHeaders - Authentication headers
-     * @param packageName - Package name for logging
-     * @param artifactType - Type of artifact for logging
-     * @returns Array of artifacts with Name, Version, and Id
-     */
-    private async fetchArtifacts(
-        url: string,
-        authHeaders: Record<string, string>,
-        packageName: string,
-        artifactType: string,
-    ): Promise<Array<{Name: string; Version: string; Id: string | undefined}>> {
-        try {
-            const artifactResponse = await axios.get(url, {
-                headers: authHeaders,
-                timeout: 30000, // 30 seconds timeout
-            });
-
-            // Parse artifact response
-            let artifacts: any[] = [];
-            if (Array.isArray(artifactResponse.data)) {
-                artifacts = artifactResponse.data;
-            } else if (artifactResponse.data?.d?.results) {
-                artifacts = artifactResponse.data.d.results;
-            } else if (artifactResponse.data?.results) {
-                artifacts = artifactResponse.data.results;
-            } else if (artifactResponse.data?.d) {
-                artifacts = Array.isArray(artifactResponse.data.d)
-                    ? artifactResponse.data.d
-                    : [artifactResponse.data.d];
-            }
-
-            // Transform artifacts to extract Name, Version, and Id
-            return artifacts.map((artifact: any) => ({
-                Name:
-                    artifact.Name ||
-                    artifact.name ||
-                    artifact.Id ||
-                    artifact.id ||
-                    'Unknown',
-                Version:
-                    artifact.Version ||
-                    artifact.version ||
-                    artifact.VersionId ||
-                    artifact.versionId ||
-                    'Unknown',
-                Id: artifact.Id || artifact.id,
-            }));
-        } catch (artifactError: any) {
-            // Log error but don't fail the entire request
-            console.error(
-                `❌ [IntegrationArtifacts] Error fetching ${artifactType} for package ${packageName}:`,
-                {
-                    message: artifactError?.message,
-                    status: artifactError?.response?.status,
-                    url,
-                },
-            );
-            // Return empty array if fetch fails
-            return [];
-        }
     }
 }
 
@@ -10696,7 +8175,6 @@ class GlobalSettingsController {
         AuthController,
         OAuthController,
         OAuthTokenController,
-        GitHubController,
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,
@@ -10710,7 +8188,6 @@ class GlobalSettingsController {
         PipelineYamlController,
         PipelineConfigController,
         EnvironmentsController,
-        IntegrationArtifactsController,
         ServicesController,
         ProductsController,
         PipelinesController,
