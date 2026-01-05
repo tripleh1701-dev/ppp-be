@@ -54,6 +54,7 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
+import {fetchGitHubRepositories, fetchGitHubBranches} from './utils/githubApiClient';
 
 dotenv.config();
 
@@ -348,6 +349,8 @@ APP_BASE_URL=${appBaseUrl}`,
         @Query('product') product?: string,
         @Query('service') service?: string,
         @Query('userId') userId?: string,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
     ) {
         // Log received query parameters
         console.log('🔑 [OAuth Callback] Received query parameters:', {
@@ -361,6 +364,8 @@ APP_BASE_URL=${appBaseUrl}`,
             product: product,
             service: service,
             userId: userId,
+            credentialName: credentialName,
+            connectorName: connectorName,
             allQueryParams: {
                 code,
                 state,
@@ -573,6 +578,8 @@ APP_BASE_URL=${appBaseUrl}`,
                     workstream: workstream,
                     product: product,
                     service: service,
+                    credentialName: credentialName,
+                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
@@ -684,6 +691,8 @@ class OAuthTokenController {
         @Query('product') queryProduct?: string,
         @Query('service') queryService?: string,
         @Query('userId') queryUserId?: string,
+        @Query('credentialName') queryCredentialName?: string,
+        @Query('connectorName') queryConnectorName?: string,
     ) {
         try {
             const {
@@ -697,6 +706,8 @@ class OAuthTokenController {
                 product: bodyProduct,
                 service: bodyService,
                 userId: bodyUserId,
+                credentialName: bodyCredentialName,
+                connectorName: bodyConnectorName,
             } = body;
 
             // Use body parameters first, fallback to query parameters
@@ -708,6 +719,8 @@ class OAuthTokenController {
             const product = bodyProduct || queryProduct;
             const service = bodyService || queryService;
             const userId = bodyUserId || queryUserId;
+            const credentialName = bodyCredentialName || queryCredentialName;
+            const connectorName = bodyConnectorName || queryConnectorName;
 
             console.log('💾 [OAuth Token Exchange] Received parameters:', {
                 accountId,
@@ -800,6 +813,8 @@ class OAuthTokenController {
                     workstream,
                     product,
                     service,
+                    credentialName,
+                    connectorName,
                     hasAccessToken: !!access_token,
                     tokenType: token_type || 'bearer',
                     scope,
@@ -814,6 +829,8 @@ class OAuthTokenController {
                     workstream: workstream,
                     product: product,
                     service: service,
+                    credentialName: credentialName,
+                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
@@ -846,6 +863,346 @@ class OAuthTokenController {
                 success: false,
                 message:
                     error.message || 'Failed to exchange authorization code',
+            });
+        }
+    }
+}
+
+// ============================================================================
+// GITHUB REPOSITORIES ENDPOINT
+// ============================================================================
+// Endpoint: GET /api/github/repos
+// Purpose: Fetch GitHub repositories using OAuth authentication tokens
+// ============================================================================
+
+@Controller('api/github')
+class GitHubController {
+    private githubOAuthService: GitHubOAuthService;
+
+    constructor() {
+        this.githubOAuthService = new GitHubOAuthService();
+    }
+
+    /**
+     * GET /api/github/repos
+     * Fetches GitHub repositories for a given username using OAuth authentication
+     * 
+     * Query Parameters:
+     * - credentialName: Name of the credential (optional if connectorName provided)
+     * - connectorName: Name of the connector (optional if credentialName provided)
+     * - username: GitHub username (required)
+     * - accountId: Account ID (required)
+     * - enterpriseId: Enterprise ID (required)
+     */
+    @Get('repos')
+    async getRepositories(
+        @Res() res: any,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
+        @Query('username') username?: string,
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
+    ) {
+        try {
+            // Validate required parameters
+            if (!username) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'username parameter is required',
+                });
+            }
+
+            if (!accountId || !enterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'accountId and enterpriseId parameters are required',
+                });
+            }
+
+            // Validate that either credentialName or connectorName is provided
+            if (!credentialName && !connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Either credentialName or connectorName must be provided',
+                });
+            }
+
+            if (credentialName && connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
+                });
+            }
+
+            // Validate username format (basic validation)
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(username)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub username format',
+                });
+            }
+
+            console.log(`[GitHub Repos API] Fetching repos for username: ${username}`);
+            console.log(`[GitHub Repos API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
+
+            // Retrieve OAuth token from database
+            let oauthToken;
+            try {
+                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
+                    credentialName: credentialName || undefined,
+                    connectorName: connectorName || undefined,
+                    accountId: accountId,
+                    enterpriseId: enterpriseId,
+                    accountName: accountName,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    product: product,
+                    service: service,
+                });
+            } catch (error: any) {
+                console.error('[GitHub Repos API] Error retrieving OAuth token:', error);
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error retrieving OAuth token from database',
+                    error: error.message,
+                });
+            }
+
+            if (!oauthToken) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    success: false,
+                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
+                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
+                });
+            }
+
+            // Check if token is expired
+            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    message: 'OAuth token has expired. Please re-authenticate.',
+                    expiresAt: oauthToken.expiresAt,
+                });
+            }
+
+            console.log(`[GitHub Repos API] OAuth token retrieved successfully`);
+
+            // Fetch repositories from GitHub API
+            let repositories;
+            try {
+                repositories = await fetchGitHubRepositories(
+                    username,
+                    oauthToken.accessToken,
+                    oauthToken.tokenType,
+                );
+                console.log(`[GitHub Repos API] Successfully fetched ${repositories.length} repositories`);
+            } catch (error: any) {
+                console.error('[GitHub Repos API] Error fetching repositories from GitHub:', error);
+
+                // Handle specific GitHub API errors
+                if (error.message.includes('401') || error.message.includes('403')) {
+                    return res.status(HttpStatus.UNAUTHORIZED).json({
+                        success: false,
+                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
+                        error: error.message,
+                    });
+                }
+
+                if (error.message.includes('404')) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        message: `GitHub user "${username}" not found`,
+                        error: error.message,
+                    });
+                }
+
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error fetching repositories from GitHub API',
+                    error: error.message,
+                });
+            }
+
+            // Return repositories
+            return res.status(HttpStatus.OK).json(repositories);
+        } catch (error: any) {
+            console.error('[GitHub Repos API] Unexpected error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message,
+            });
+        }
+    }
+
+    /**
+     * GET /api/github/branches
+     * Fetches GitHub repository branches for a given owner/repo using OAuth authentication
+     * 
+     * Query Parameters:
+     * - credentialName: Name of the credential (optional if connectorName provided)
+     * - connectorName: Name of the connector (optional if credentialName provided)
+     * - owner: GitHub repository owner (required)
+     * - repo: GitHub repository name (required)
+     * - accountId: Account ID (required)
+     * - enterpriseId: Enterprise ID (required)
+     */
+    @Get('branches')
+    async getBranches(
+        @Res() res: any,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
+        @Query('owner') owner?: string,
+        @Query('repo') repo?: string,
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
+    ) {
+        try {
+            // Validate required parameters
+            if (!owner || !repo) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'owner and repo parameters are required',
+                });
+            }
+
+            if (!accountId || !enterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'accountId and enterpriseId parameters are required',
+                });
+            }
+
+            // Validate that either credentialName or connectorName is provided
+            if (!credentialName && !connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Either credentialName or connectorName must be provided',
+                });
+            }
+
+            if (credentialName && connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
+                });
+            }
+
+            // Validate owner and repo format (basic validation)
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(owner)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub owner format',
+                });
+            }
+
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,100}$/.test(repo)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub repository name format',
+                });
+            }
+
+            console.log(`[GitHub Branches API] Fetching branches for owner: ${owner}, repo: ${repo}`);
+            console.log(`[GitHub Branches API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
+
+            // Retrieve OAuth token from database
+            let oauthToken;
+            try {
+                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
+                    credentialName: credentialName || undefined,
+                    connectorName: connectorName || undefined,
+                    accountId: accountId,
+                    enterpriseId: enterpriseId,
+                    accountName: accountName,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    product: product,
+                    service: service,
+                });
+            } catch (error: any) {
+                console.error('[GitHub Branches API] Error retrieving OAuth token:', error);
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error retrieving OAuth token from database',
+                    error: error.message,
+                });
+            }
+
+            if (!oauthToken) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    success: false,
+                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
+                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
+                });
+            }
+
+            // Check if token is expired
+            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    message: 'OAuth token has expired. Please re-authenticate.',
+                    expiresAt: oauthToken.expiresAt,
+                });
+            }
+
+            console.log(`[GitHub Branches API] OAuth token retrieved successfully`);
+
+            // Fetch branches from GitHub API
+            let branches;
+            try {
+                branches = await fetchGitHubBranches(
+                    owner,
+                    repo,
+                    oauthToken.accessToken,
+                    oauthToken.tokenType,
+                );
+                console.log(`[GitHub Branches API] Successfully fetched ${branches.length} branches`);
+            } catch (error: any) {
+                console.error('[GitHub Branches API] Error fetching branches from GitHub:', error);
+
+                // Handle specific GitHub API errors
+                if (error.message.includes('401') || error.message.includes('403')) {
+                    return res.status(HttpStatus.UNAUTHORIZED).json({
+                        success: false,
+                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
+                        error: error.message,
+                    });
+                }
+
+                if (error.message.includes('404')) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        message: `GitHub repository "${owner}/${repo}" not found or not accessible`,
+                        error: error.message,
+                    });
+                }
+
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error fetching branches from GitHub API',
+                    error: error.message,
+                });
+            }
+
+            // Return branches (frontend expects array with 'name' field)
+            return res.status(HttpStatus.OK).json(branches);
+        } catch (error: any) {
+            console.error('[GitHub Branches API] Unexpected error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message,
             });
         }
     }
@@ -1090,15 +1447,36 @@ class ConnectorsController {
      * POST /api/connectors/github/test-connection
      * 
      * Tests GitHub connectivity using OAuth authentication:
+     * - Supports Account URLs (e.g., https://github.com/Vipin-Gup) - NEW
+     * - Supports Repository URLs (e.g., https://github.com/owner/repo.git) - EXISTING
      * - Looks up OAuth token by credentialName and account/enterprise context
-     * - Calls GitHub API to verify repository access
+     * - Calls GitHub API to verify account or repository access
      * 
-     * Request Body:
+     * Request Body (Account URL):
+     * {
+     *   "connectorName": "GitHub",
+     *   "url": "https://github.com/Vipin-Gup",
+     *   "urlType": "Account",
+     *   "connectionType": "HTTP",
+     *   "authenticationType": "OAuth",
+     *   "credentialName": "Github_Cred_Fin",
+     *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
+     *   "accountName": "Accenture Digital",
+     *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
+     *   "enterpriseName": "SAP",
+     *   "workstream": "Fin_Acc_SAP",
+     *   "product": "DevOps",
+     *   "service": "Extension"
+     * }
+     * 
+     * Request Body (Repository URL):
      * {
      *   "connectorName": "GitHub",
      *   "url": "https://github.com/tripleh1701-dev/ppp-fe.git",
-     *   "credentialName": "Github_Cred_Fin",
+     *   "urlType": "Repository",
+     *   "connectionType": "HTTP",
      *   "authenticationType": "OAuth",
+     *   "credentialName": "Github_Cred_Fin",
      *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
      *   "accountName": "Accenture Digital",
      *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
@@ -1111,7 +1489,7 @@ class ConnectorsController {
      *   "success": true,
      *   "status": "success",
      *   "connected": true,
-     *   "message": "Successfully connected to GitHub",
+     *   "message": "Successfully connected to GitHub account \"Vipin-Gup\"",
      *   "userInfo": {
      *     "login": "...",
      *     "name": "...",
@@ -1128,6 +1506,8 @@ class ConnectorsController {
         @Query('enterpriseId') enterpriseId?: string,
         @Query('enterpriseName') enterpriseName?: string,
         @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
     ) {
         try {
             // Extract credentials from request body or query params
@@ -1135,11 +1515,15 @@ class ConnectorsController {
                 url,
                 credentialName,
                 authenticationType,
+                urlType,
+                connectionType,
                 accountId: bodyAccountId,
                 accountName: bodyAccountName,
                 enterpriseId: bodyEnterpriseId,
                 enterpriseName: bodyEnterpriseName,
                 workstream: bodyWorkstream,
+                product: bodyProduct,
+                service: bodyService,
             } = body;
 
             // Use body values first, fall back to query params
@@ -1148,15 +1532,21 @@ class ConnectorsController {
             const finalEnterpriseId = bodyEnterpriseId || enterpriseId;
             const finalEnterpriseName = bodyEnterpriseName || enterpriseName;
             const finalWorkstream = bodyWorkstream || workstream;
+            const finalProduct = bodyProduct || product;
+            const finalService = bodyService || service;
 
             // Log received data for debugging
             console.log('🧪 [GitHub Test] Received request:', {
                 hasUrl: !!url,
                 hasCredentialName: !!credentialName,
                 authenticationType: authenticationType,
+                urlType: urlType,
+                connectionType: connectionType,
                 hasAccountId: !!finalAccountId,
                 hasEnterpriseId: !!finalEnterpriseId,
                 hasWorkstream: !!finalWorkstream,
+                hasProduct: !!finalProduct,
+                hasService: !!finalService,
                 originalUrl: url,
                 bodyKeys: Object.keys(body),
             });
@@ -1165,7 +1555,9 @@ class ConnectorsController {
             const missingFields: string[] = [];
             if (!url) missingFields.push('url');
             if (!credentialName) missingFields.push('credentialName');
-            if (authenticationType !== 'OAuth') {
+            
+            // Validate authentication type
+            if (authenticationType && authenticationType !== 'OAuth') {
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
                     status: 'failed',
@@ -1185,12 +1577,17 @@ class ConnectorsController {
                 });
             }
 
-            // Validate URL format and extract repository information
-            // Support formats:
-            // - https://github.com/owner/repo.git
-            // - https://github.com/owner/repo
-            // - git@github.com:owner/repo.git
-            // - git@github.com:owner/repo
+            // Validate accountId and enterpriseId for OAuth
+            if (!finalAccountId || !finalEnterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'accountId and enterpriseId are required for OAuth authentication',
+                });
+            }
+
+            // Normalize URL
             let normalizedUrl = url ? url.trim() : '';
             if (!normalizedUrl) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
@@ -1201,33 +1598,284 @@ class ConnectorsController {
                 });
             }
 
+            // Determine URL type if not explicitly provided (for backward compatibility)
+            const detectedUrlType = urlType || this.detectGitHubUrlType(normalizedUrl);
+            
+            console.log('🔍 [GitHub Test] URL type detection:', {
+                provided: urlType,
+                detected: detectedUrlType,
+                url: normalizedUrl,
+            });
+
+            // Extract product and service from body if provided
+            console.log('🔑 [GitHub Test] Looking up OAuth token with parameters:', {
+                accountId: finalAccountId,
+                accountName: finalAccountName,
+                enterpriseId: finalEnterpriseId,
+                enterpriseName: finalEnterpriseName,
+                workstream: finalWorkstream,
+                product: finalProduct,
+                service: finalService,
+            });
+
+            const oauthToken = await this.githubOAuthService.getAccessToken({
+                accountId: finalAccountId,
+                accountName: finalAccountName,
+                enterpriseId: finalEnterpriseId,
+                enterpriseName: finalEnterpriseName,
+                workstream: finalWorkstream,
+                product: finalProduct,
+                service: finalService,
+            });
+
+            if (!oauthToken) {
+                console.error('❌ [GitHub Test] OAuth token lookup failed. Parameters used:', {
+                    accountId: finalAccountId,
+                    accountName: finalAccountName,
+                    enterpriseId: finalEnterpriseId,
+                    enterpriseName: finalEnterpriseName,
+                    workstream: finalWorkstream,
+                    product: finalProduct,
+                    service: finalService,
+                });
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'OAuth token not found. Please ensure OAuth is configured in Manage Credentials.',
+                });
+            }
+
+            console.log('✅ [GitHub Test] OAuth token found (length):', oauthToken.length);
+
+            // Route to appropriate test function based on URL type
+            if (detectedUrlType === 'Account') {
+                return await this.testGitHubAccountConnectivity(
+                    res,
+                    normalizedUrl,
+                    oauthToken,
+                );
+            } else {
+                // Repository URL (existing logic)
+                return await this.testGitHubRepositoryConnectivity(
+                    res,
+                    normalizedUrl,
+                    oauthToken,
+                );
+            }
+        } catch (error: any) {
+            // This catch block handles unexpected errors during validation
+            console.error('❌ [GitHub Test] Unexpected error during validation:', error);
+
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'An unexpected error occurred while processing the request',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            });
+        }
+    }
+
+    /**
+     * Detect GitHub URL type (Account or Repository)
+     */
+    private detectGitHubUrlType(url: string): 'Account' | 'Repository' {
+        try {
+            // Check if it's an SSH URL (always repository)
+            if (url.startsWith('git@')) {
+                return 'Repository';
+            }
+
+            // Parse HTTP/HTTPS URL
+            const urlObj = new URL(url);
+            if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
+                const pathParts = urlObj.pathname.split('/').filter((p) => p);
+                // Account URL: https://github.com/username (1 part)
+                // Repository URL: https://github.com/owner/repo (2+ parts)
+                if (pathParts.length === 1) {
+                    return 'Account';
+                } else if (pathParts.length >= 2) {
+                    return 'Repository';
+                }
+            }
+        } catch (error) {
+            console.error('❌ [GitHub Test] Error detecting URL type:', error);
+        }
+        
+        // Default to Repository for backward compatibility
+        return 'Repository';
+    }
+
+    /**
+     * Test GitHub Account URL connectivity with OAuth
+     */
+    private async testGitHubAccountConnectivity(
+        res: any,
+        accountUrl: string,
+        oauthToken: string,
+    ) {
+        try {
+            // Extract account username from URL
+            // Example: https://github.com/Vipin-Gup -> Vipin-Gup
+            const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
+            if (!urlMatch || !urlMatch[1]) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Invalid GitHub Account URL format. Expected: https://github.com/USERNAME',
+                });
+            }
+
+            const accountUsername = urlMatch[1];
+
+            console.log('👤 [GitHub Test] Testing Account URL:', {
+                originalUrl: accountUrl,
+                username: accountUsername,
+            });
+
+            // Test connectivity by making an authenticated API call to GitHub
+            // Use GitHub REST API v3: GET /users/{username}
+            const githubApiUrl = `https://api.github.com/users/${accountUsername}`;
+
+            console.log('🌐 [GitHub Test] Calling GitHub API:', githubApiUrl);
+
+            const response = await axios.get(githubApiUrl, {
+                headers: {
+                    Authorization: `Bearer ${oauthToken}`,
+                    Accept: 'application/vnd.github.v3+json',
+                    'User-Agent': 'DevOps-Automate-Backend',
+                },
+                timeout: 10000, // 10 second timeout
+            });
+
+            console.log('✅ [GitHub Test] GitHub API response status:', response.status);
+            console.log('📦 [GitHub Test] GitHub user info:', {
+                login: response.data.login,
+                name: response.data.name,
+                email: response.data.email,
+                publicRepos: response.data.public_repos,
+            });
+
+            // Verify that the account exists and is accessible
+            if (response.status >= 200 && response.status < 300) {
+                const userData = response.data;
+                if (userData.login && userData.login.toLowerCase() === accountUsername.toLowerCase()) {
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        status: 'success',
+                        connected: true,
+                        message: `Successfully connected to GitHub account "${accountUsername}"`,
+                        userInfo: {
+                            login: userData.login,
+                            name: userData.name,
+                            email: userData.email,
+                            avatarUrl: userData.avatar_url,
+                            publicRepos: userData.public_repos,
+                            followers: userData.followers,
+                            following: userData.following,
+                        },
+                    });
+                }
+            }
+
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'Unable to verify GitHub account connectivity',
+            });
+        } catch (error: any) {
+            console.error('❌ [GitHub Test] Error testing Account connectivity:', error);
+
+            // Handle different types of errors
+            let errorMessage = 'Failed to connect to GitHub account';
+            let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+
+            if (error.response) {
+                statusCode = error.response.status;
+
+                if (statusCode === HttpStatus.UNAUTHORIZED) {
+                    errorMessage =
+                        'OAuth token is invalid or expired. Please re-authenticate in Manage Credentials.';
+                } else if (statusCode === HttpStatus.NOT_FOUND) {
+                    const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
+                    const username = urlMatch ? urlMatch[1] : 'unknown';
+                    errorMessage = `GitHub account "${username}" not found. Please verify the account URL.`;
+                } else {
+                    const errorData = error.response.data || {};
+                    errorMessage = `GitHub API error: ${errorData.message || error.response.statusText}`;
+                }
+
+                console.error('📛 [GitHub Test] GitHub API error response:', {
+                    status: error.response.status,
+                    statusText: error.response.statusText,
+                    data: error.response.data,
+                });
+            } else if (error.request) {
+                errorMessage =
+                    'No response from GitHub server. Please check the URL and network connectivity.';
+                console.error('📛 [GitHub Test] No response received:', error.request);
+            } else if (error.code === 'ECONNREFUSED') {
+                errorMessage = 'Connection refused. Please check network connectivity.';
+            } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                errorMessage =
+                    'Connection timeout. Please check the GitHub URL and network connectivity.';
+            } else {
+                errorMessage = error.message || 'Unknown error occurred while testing connectivity';
+            }
+
+            return res.status(statusCode).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: errorMessage,
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            });
+        }
+    }
+
+    /**
+     * Test GitHub Repository URL connectivity with OAuth
+     */
+    private async testGitHubRepositoryConnectivity(
+        res: any,
+        repoUrl: string,
+        oauthToken: string,
+    ) {
+        try {
+            // Validate URL format and extract repository information
+            // Support formats:
+            // - https://github.com/owner/repo.git
+            // - https://github.com/owner/repo
+            // - git@github.com:owner/repo.git
+            // - git@github.com:owner/repo
             let repoOwner: string | null = null;
             let repoName: string | null = null;
             let isSSHUrl = false;
 
             // Check if it's an SSH URL (git@github.com:owner/repo.git)
-            if (normalizedUrl.startsWith('git@')) {
+            if (repoUrl.startsWith('git@')) {
                 isSSHUrl = true;
                 // Parse SSH URL: git@github.com:owner/repo.git
-                const sshMatch = normalizedUrl.match(/^git@([^:]+):(.+)$/);
+                const sshMatch = repoUrl.match(/^git@([^:]+):(.+)$/);
                 if (sshMatch) {
                     const hostname = sshMatch[1];
                     const repoPath = sshMatch[2];
-                    
+
                     if (hostname === 'github.com' || hostname.includes('github')) {
                         const pathParts = repoPath.split('/').filter((p: string) => p);
                         if (pathParts.length >= 2) {
                             repoOwner = pathParts[0];
                             repoName = pathParts[1].replace(/\.git$/, '');
-                            // Convert SSH URL to HTTP URL for API calls
-                            normalizedUrl = `https://github.com/${repoOwner}/${repoName}`;
                         }
                     }
                 }
             } else {
                 // Parse HTTP/HTTPS URL
                 try {
-                    const urlObj = new URL(normalizedUrl);
+                    const urlObj = new URL(repoUrl);
                     if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
                         const pathParts = urlObj.pathname.split('/').filter((p) => p);
                         if (pathParts.length >= 2) {
@@ -1250,66 +1898,11 @@ class ConnectorsController {
             }
 
             console.log('🔗 [GitHub Test] Extracted repository info:', {
-                original: url,
+                original: repoUrl,
                 isSSHUrl: isSSHUrl,
-                normalizedUrl: normalizedUrl,
                 owner: repoOwner,
                 repo: repoName,
             });
-
-            // Look up OAuth token using account/enterprise context
-            if (!finalAccountId || !finalEnterpriseId) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'Missing accountId or enterpriseId. Required for OAuth token lookup.',
-                });
-            }
-
-            // Extract product and service from body if provided
-            const { product, service } = body;
-
-            console.log('🔑 [GitHub Test] Looking up OAuth token with parameters:', {
-                accountId: finalAccountId,
-                accountName: finalAccountName,
-                enterpriseId: finalEnterpriseId,
-                enterpriseName: finalEnterpriseName,
-                workstream: finalWorkstream,
-                product: product,
-                service: service,
-                accountIdType: typeof finalAccountId,
-                enterpriseIdType: typeof finalEnterpriseId,
-                accountIdLength: finalAccountId?.length,
-                enterpriseIdLength: finalEnterpriseId?.length,
-            });
-
-            const oauthToken = await this.githubOAuthService.getAccessToken({
-                accountId: finalAccountId,
-                accountName: finalAccountName,
-                enterpriseId: finalEnterpriseId,
-                enterpriseName: finalEnterpriseName,
-                workstream: finalWorkstream,
-                product: product,
-                service: service,
-            });
-
-            if (!oauthToken) {
-                console.error('❌ [GitHub Test] OAuth token lookup failed. Parameters used:', {
-                    accountId: finalAccountId,
-                    accountName: finalAccountName,
-                    enterpriseId: finalEnterpriseId,
-                    enterpriseName: finalEnterpriseName,
-                });
-                return res.status(HttpStatus.UNAUTHORIZED).json({
-                    success: false,
-                    status: 'failed',
-                    connected: false,
-                    message: 'OAuth token not found. Please complete OAuth authorization first. Check backend logs for details.',
-                });
-            }
-
-            console.log('✅ [GitHub Test] OAuth token found (length):', oauthToken.length);
 
             // Test GitHub connection using OAuth token
             // First, verify the token works by calling GitHub user API
@@ -1384,10 +1977,10 @@ class ConnectorsController {
                     });
                 }
             } catch (error: any) {
-                console.error('❌ [GitHub Test] Error testing connectivity:', error);
+                console.error('❌ [GitHub Test] Error testing Repository connectivity:', error);
 
                 // Handle different types of errors
-                let errorMessage = 'Failed to connect to GitHub';
+                let errorMessage = 'Failed to connect to GitHub repository';
                 let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
 
                 if (error.response) {
@@ -8797,6 +9390,7 @@ class GlobalSettingsController {
         AuthController,
         OAuthController,
         OAuthTokenController,
+        GitHubController,
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,

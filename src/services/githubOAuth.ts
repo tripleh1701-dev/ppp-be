@@ -14,6 +14,8 @@ export interface GitHubOAuthToken {
     workstream?: string;
     product?: string;
     service?: string;
+    credentialName?: string;
+    connectorName?: string;
     accessToken: string; // Encrypted when stored
     tokenType: string;
     scope?: string;
@@ -31,6 +33,8 @@ export interface StoreTokenParams {
     workstream?: string;
     product?: string;
     service?: string;
+    credentialName?: string;
+    connectorName?: string;
     accessToken: string;
     tokenType?: string;
     scope?: string;
@@ -65,6 +69,8 @@ export class GitHubOAuthService {
             workstream: params.workstream,
             product: params.product,
             service: params.service,
+            credentialName: params.credentialName,
+            connectorName: params.connectorName,
             accessToken: JSON.stringify(encryptedTokenData), // Store encrypted token as JSON string
             tokenType: params.tokenType || 'bearer',
             scope: params.scope,
@@ -161,6 +167,10 @@ export class GitHubOAuthService {
             workstream: tokenData.workstream || null,
             product: tokenData.product || null,
             service: tokenData.service || null,
+            credential_name: tokenData.credentialName || null,
+            credentialName: tokenData.credentialName || null,
+            connector_name: tokenData.connectorName || null,
+            connectorName: tokenData.connectorName || null,
             access_token: tokenData.accessToken,
             accessToken: tokenData.accessToken,
             token_type: tokenData.tokenType,
@@ -224,6 +234,8 @@ export class GitHubOAuthService {
                     workstream VARCHAR(255),
                     product VARCHAR(255),
                     service VARCHAR(255),
+                    credential_name VARCHAR(255),
+                    connector_name VARCHAR(255),
                     access_token TEXT NOT NULL,
                     token_type VARCHAR(50) DEFAULT 'bearer',
                     scope TEXT,
@@ -233,7 +245,7 @@ export class GitHubOAuthService {
                 )
             `);
 
-            // Add product and service columns if they don't exist (for existing tables)
+            // Add product, service, credential_name, and connector_name columns if they don't exist (for existing tables)
             await client.query(`
                 DO $$ 
                 BEGIN
@@ -249,7 +261,29 @@ export class GitHubOAuthService {
                                    AND column_name = 'service') THEN
                         ALTER TABLE systiva.github_oauth_tokens ADD COLUMN service VARCHAR(255);
                     END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_schema = 'systiva' 
+                                   AND table_name = 'github_oauth_tokens' 
+                                   AND column_name = 'credential_name') THEN
+                        ALTER TABLE systiva.github_oauth_tokens ADD COLUMN credential_name VARCHAR(255);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                                   WHERE table_schema = 'systiva' 
+                                   AND table_name = 'github_oauth_tokens' 
+                                   AND column_name = 'connector_name') THEN
+                        ALTER TABLE systiva.github_oauth_tokens ADD COLUMN connector_name VARCHAR(255);
+                    END IF;
                 END $$;
+            `);
+
+            // Create indexes for credential_name and connector_name lookups
+            await client.query(`
+                CREATE INDEX IF NOT EXISTS idx_github_oauth_credential 
+                ON systiva.github_oauth_tokens(credential_name, account_id, enterprise_id)
+            `);
+            await client.query(`
+                CREATE INDEX IF NOT EXISTS idx_github_oauth_connector 
+                ON systiva.github_oauth_tokens(connector_name, account_id, enterprise_id)
             `);
 
             // Create unique index for non-null combinations
@@ -294,8 +328,10 @@ export class GitHubOAuthService {
                          enterprise_name = $7,
                          workstream = $8,
                          product = $9,
-                         service = $10
-                     WHERE id = $11
+                         service = $10,
+                         credential_name = $11,
+                         connector_name = $12
+                     WHERE id = $13
                      RETURNING *`,
                     [
                         tokenData.accessToken,
@@ -308,6 +344,8 @@ export class GitHubOAuthService {
                         tokenData.workstream || null,
                         tokenData.product || null,
                         tokenData.service || null,
+                        tokenData.credentialName || null,
+                        tokenData.connectorName || null,
                         existingToken.rows[0].id,
                     ],
                 );
@@ -316,8 +354,8 @@ export class GitHubOAuthService {
                 result = await client.query(
                     `INSERT INTO systiva.github_oauth_tokens 
                      (id, user_id, account_id, account_name, enterprise_id, enterprise_name, 
-                      workstream, product, service, access_token, token_type, scope, created_at, updated_at, expires_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                      workstream, product, service, credential_name, connector_name, access_token, token_type, scope, created_at, updated_at, expires_at)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                      RETURNING *`,
                     [
                         tokenData.id,
@@ -329,6 +367,8 @@ export class GitHubOAuthService {
                         tokenData.workstream || null,
                         tokenData.product || null,
                         tokenData.service || null,
+                        tokenData.credentialName || null,
+                        tokenData.connectorName || null,
                         tokenData.accessToken,
                         tokenData.tokenType,
                         tokenData.scope || null,
@@ -810,6 +850,219 @@ export class GitHubOAuthService {
             }
 
             console.log('❌ [GitHubOAuth] No token found with any PostgreSQL query strategy');
+            return null;
+        });
+    }
+
+    /**
+     * Retrieve GitHub access token by credentialName or connectorName
+     * Falls back to accountId/enterpriseId lookup if credentialName/connectorName lookup fails
+     */
+    async getAccessTokenByCredentialOrConnector(params: {
+        credentialName?: string;
+        connectorName?: string;
+        accountId: string;
+        enterpriseId: string;
+        accountName?: string;
+        enterpriseName?: string;
+        workstream?: string;
+        product?: string;
+        service?: string;
+    }): Promise<{ accessToken: string; tokenType: string; scope?: string; expiresAt?: string } | null> {
+        const storageMode = getStorageMode();
+
+        let tokenResult: { accessToken: string; tokenType: string; scope?: string; expiresAt?: string } | null = null;
+
+        // First, try to find token by credentialName/connectorName
+        if (storageMode === 'dynamodb') {
+            tokenResult = await this.getTokenByCredentialOrConnectorDynamoDB(params);
+        } else if (storageMode === 'postgres') {
+            tokenResult = await this.getTokenByCredentialOrConnectorPostgres(params);
+        } else {
+            throw new Error('Token retrieval not supported for filesystem mode. Use postgres or dynamodb.');
+        }
+
+        // If not found by credentialName/connectorName, fall back to accountId/enterpriseId lookup
+        // This handles cases where tokens were stored before credentialName/connectorName support was added
+        if (!tokenResult) {
+            console.log('🔍 [GitHubOAuth] Token not found by credential/connector, falling back to accountId/enterpriseId lookup');
+            const fallbackToken = await this.getAccessToken({
+                accountId: params.accountId,
+                accountName: params.accountName,
+                enterpriseId: params.enterpriseId,
+                enterpriseName: params.enterpriseName,
+                workstream: params.workstream,
+                product: params.product,
+                service: params.service,
+            });
+
+            if (fallbackToken) {
+                // Return in the expected format
+                return {
+                    accessToken: fallbackToken,
+                    tokenType: 'bearer',
+                };
+            }
+        }
+
+        return tokenResult;
+    }
+
+    /**
+     * Get token from DynamoDB by credentialName or connectorName
+     */
+    private async getTokenByCredentialOrConnectorDynamoDB(params: {
+        credentialName?: string;
+        connectorName?: string;
+        accountId: string;
+        enterpriseId: string;
+    }): Promise<{ accessToken: string; tokenType: string; scope?: string; expiresAt?: string } | null> {
+        console.log('🔍 [GitHubOAuth] getTokenByCredentialOrConnectorDynamoDB called with params:', params);
+
+        if (!params.credentialName && !params.connectorName) {
+            throw new Error('Either credentialName or connectorName must be provided');
+        }
+
+        // Scan for tokens matching credentialName/connectorName and accountId/enterpriseId
+        try {
+            const allItems = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :entityType',
+                {':entityType': 'GITHUB_OAUTH_TOKEN'},
+            );
+
+            console.log(`🔍 [GitHubOAuth] Scanned ${allItems?.length || 0} total OAuth tokens`);
+
+            if (allItems && allItems.length > 0) {
+                // Filter by credentialName/connectorName and accountId/enterpriseId
+                const matchingItems = allItems.filter((item: any) => {
+                    const itemCredentialName = item.credential_name || item.credentialName;
+                    const itemConnectorName = item.connector_name || item.connectorName;
+                    const itemAccountId = item.account_id || item.accountId;
+                    const itemEnterpriseId = item.enterprise_id || item.enterpriseId;
+
+                    const matchesCredential = params.credentialName && itemCredentialName === params.credentialName;
+                    const matchesConnector = params.connectorName && itemConnectorName === params.connectorName;
+                    const matchesAccountId = itemAccountId === params.accountId;
+                    const matchesEnterpriseId = itemEnterpriseId === params.enterpriseId;
+
+                    return (matchesCredential || matchesConnector) && matchesAccountId && matchesEnterpriseId;
+                });
+
+                console.log(`🔍 [GitHubOAuth] Found ${matchingItems.length} tokens matching credential/connector and account/enterprise`);
+
+                if (matchingItems.length > 0) {
+                    // Get the most recent token
+                    const tokenItem = matchingItems.sort(
+                        (a, b) =>
+                            new Date(b.created_at || b.createdAt || 0).getTime() -
+                            new Date(a.created_at || a.createdAt || 0).getTime(),
+                    )[0];
+
+                    console.log('✅ [GitHubOAuth] Found matching token:', {
+                        id: tokenItem.id,
+                        credentialName: tokenItem.credential_name || tokenItem.credentialName,
+                        connectorName: tokenItem.connector_name || tokenItem.connectorName,
+                        accountId: tokenItem.account_id || tokenItem.accountId,
+                        enterpriseId: tokenItem.enterprise_id || tokenItem.enterpriseId,
+                    });
+
+                    // Decrypt the token
+                    try {
+                        const encryptedTokenData: EncryptedToken = JSON.parse(
+                            tokenItem.access_token || tokenItem.accessToken,
+                        );
+                        const decrypted = decryptToken(encryptedTokenData);
+                        console.log('✅ [GitHubOAuth] Successfully decrypted token');
+                        return {
+                            accessToken: decrypted.token,
+                            tokenType: tokenItem.token_type || tokenItem.tokenType || 'bearer',
+                            scope: tokenItem.scope,
+                            expiresAt: tokenItem.expires_at || tokenItem.expiresAt,
+                        };
+                    } catch (error) {
+                        console.error('❌ [GitHubOAuth] Failed to decrypt token:', error);
+                        return null;
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('❌ [GitHubOAuth] Error during scan:', error);
+        }
+
+        console.log('❌ [GitHubOAuth] No token found for credential/connector');
+        return null;
+    }
+
+    /**
+     * Get token from PostgreSQL by credentialName or connectorName
+     */
+    private async getTokenByCredentialOrConnectorPostgres(params: {
+        credentialName?: string;
+        connectorName?: string;
+        accountId: string;
+        enterpriseId: string;
+    }): Promise<{ accessToken: string; tokenType: string; scope?: string; expiresAt?: string } | null> {
+        return withPg(async (client) => {
+            console.log('🔍 [GitHubOAuth] getTokenByCredentialOrConnectorPostgres called with params:', params);
+
+            if (!params.credentialName && !params.connectorName) {
+                throw new Error('Either credentialName or connectorName must be provided');
+            }
+
+            let query: string;
+            let queryParams: any[];
+
+            if (params.credentialName) {
+                query = `
+                    SELECT access_token, token_type, scope, expires_at
+                    FROM systiva.github_oauth_tokens
+                    WHERE credential_name = $1 
+                      AND account_id = $2 
+                      AND enterprise_id = $3
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                `;
+                queryParams = [params.credentialName, params.accountId, params.enterpriseId];
+            } else {
+                query = `
+                    SELECT access_token, token_type, scope, expires_at
+                    FROM systiva.github_oauth_tokens
+                    WHERE connector_name = $1 
+                      AND account_id = $2 
+                      AND enterprise_id = $3
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                `;
+                queryParams = [params.connectorName, params.accountId, params.enterpriseId];
+            }
+
+            const result = await client.query(query, queryParams);
+
+            console.log(`🔍 [GitHubOAuth] Found ${result.rows?.length || 0} rows`);
+
+            if (result.rows && result.rows.length > 0) {
+                const tokenRow = result.rows[0];
+                console.log('✅ [GitHubOAuth] Found matching token row');
+
+                // Decrypt the token
+                try {
+                    const encryptedTokenData: EncryptedToken = JSON.parse(tokenRow.access_token);
+                    const decrypted = decryptToken(encryptedTokenData);
+                    console.log('✅ [GitHubOAuth] Successfully decrypted token');
+                    return {
+                        accessToken: decrypted.token,
+                        tokenType: tokenRow.token_type || 'bearer',
+                        scope: tokenRow.scope,
+                        expiresAt: tokenRow.expires_at,
+                    };
+                } catch (error) {
+                    console.error('❌ [GitHubOAuth] Failed to decrypt token:', error);
+                    return null;
+                }
+            }
+
+            console.log('❌ [GitHubOAuth] No token found for credential/connector');
             return null;
         });
     }
