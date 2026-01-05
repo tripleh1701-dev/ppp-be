@@ -33,24 +33,28 @@ export function getDynamoDBClient(): DynamoDBClient {
         });
 
         const config: any = {
-            region: process.env.AWS_REGION || 'us-east-1',
+            region: process.env.AWS_REGION || process.env.AWS_REGION_NAME || 'us-east-1',
         };
 
-        // Add credentials if provided via environment variables
-        if (
-            process.env.AWS_ACCESS_KEY_ID &&
-            process.env.AWS_SECRET_ACCESS_KEY
-        ) {
-            config.credentials = {
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-            };
-        }
-
-        // For local DynamoDB development
+        // In Lambda/AWS environment, DO NOT use explicit credentials
+        // The Lambda execution role provides credentials automatically
+        // Only use explicit credentials for local development with DYNAMODB_ENDPOINT
         if (process.env.DYNAMODB_ENDPOINT) {
+            // Local DynamoDB development
             config.endpoint = process.env.DYNAMODB_ENDPOINT;
+
+            // Only add explicit credentials for local development
+            if (
+                process.env.AWS_ACCESS_KEY_ID &&
+                process.env.AWS_SECRET_ACCESS_KEY
+            ) {
+                config.credentials = {
+                    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+                };
+            }
         }
+        // For AWS Lambda, don't set explicit credentials - use IAM role
 
         client = new DynamoDBClient(config);
     }
