@@ -15,6 +15,7 @@ export interface Environment {
     accountId?: string;
     accountName?: string;
     enterpriseId?: string;
+    enterpriseName?: string;
     createdAt?: string;
     updatedAt?: string;
 }
@@ -24,6 +25,50 @@ export class EnvironmentsDynamoDBService {
 
     constructor() {
         this.tableName = 'sys_accounts';
+    }
+
+    private buildAccountPK(accountName: string, accountId: string): string {
+        return `${(accountName || '').toUpperCase()}#${accountId}#ENVIRONMENTS`;
+    }
+
+    async getAllForContext(params: {
+        accountId: string;
+        accountName: string;
+        enterpriseId: string;
+        enterpriseName: string;
+    }): Promise<Environment[]> {
+        const pk = this.buildAccountPK(params.accountName, params.accountId);
+
+        const items = await DynamoDBOperations.queryItems(
+            this.tableName,
+            'PK = :pk AND begins_with(SK, :sk)',
+            {
+                ':pk': pk,
+                ':sk': 'ENVIRONMENT#',
+            },
+        );
+
+        return items
+            .map((item) => this.mapDynamoDBItemToEnvironment(item))
+            .filter((env) => {
+                const matchesEntId = env.enterpriseId === params.enterpriseId;
+                const matchesEntName =
+                    !env.enterpriseName || env.enterpriseName === params.enterpriseName;
+                return matchesEntId && matchesEntName;
+            })
+            .sort((a, b) =>
+                (a.environmentName || '').localeCompare(b.environmentName || ''),
+            );
+    }
+
+    async getByIdForContext(
+        id: string,
+        params: {accountId: string; accountName: string},
+    ): Promise<Environment | null> {
+        const pk = this.buildAccountPK(params.accountName, params.accountId);
+        const sk = `ENVIRONMENT#${id}`;
+        const item = await DynamoDBOperations.getItem(this.tableName, {PK: pk, SK: sk});
+        return item ? this.mapDynamoDBItemToEnvironment(item) : null;
     }
 
     async getAll(): Promise<Environment[]> {
@@ -121,20 +166,19 @@ export class EnvironmentsDynamoDBService {
                 updatedAt: now,
             };
 
-            // Use account name from payload (sent from frontend breadcrumb)
-            const accountName = (
-                environment.accountName || 'SYSTIVA'
-            ).toUpperCase();
-            const accountId = environment.accountId || 'systiva';
+            // Account context is mandatory at the controller layer; keep a defensive fallback.
+            const accountName = (environment.accountName || '').toUpperCase();
+            const accountId = environment.accountId || '';
 
             console.log('🏢 Creating environment with account context:', {
                 accountName,
                 accountId,
                 enterpriseId: environment.enterpriseId,
+                enterpriseName: environment.enterpriseName,
             });
 
             // Create PK format: <ACCOUNT_NAME>#<account_id>#ENVIRONMENTS
-            const accountPK = `${accountName}#${accountId}#ENVIRONMENTS`;
+            const accountPK = this.buildAccountPK(accountName, accountId);
 
             const item = {
                 PK: accountPK,
@@ -143,6 +187,7 @@ export class EnvironmentsDynamoDBService {
                 account_id: environment.accountId || null,
                 account_name: accountName,
                 enterprise_id: environment.enterpriseId || null,
+                enterprise_name: environment.enterpriseName || null,
                 environment_name: newEnvironment.environmentName,
                 details: newEnvironment.details,
                 deployment_type: newEnvironment.deploymentType,
@@ -181,19 +226,13 @@ export class EnvironmentsDynamoDBService {
         try {
             console.log('📝 Updating environment:', id, updates);
 
-            // First, find the environment to get its PK and SK
-            const existing = await this.getById(id);
-            if (!existing) {
-                console.log('❌ Environment not found for update:', id);
-                return null;
+            if (!updates.accountId || !updates.accountName) {
+                throw new Error(
+                    'accountId and accountName are required for environment update (DynamoDB)',
+                );
             }
 
-            // Use account name from existing environment
-            const accountName = (
-                existing.accountName || 'SYSTIVA'
-            ).toUpperCase();
-            const accountId = existing.accountId || 'systiva';
-            const pk = `${accountName}#${accountId}#ENVIRONMENTS`;
+            const pk = this.buildAccountPK(updates.accountName, updates.accountId);
             const sk = `ENVIRONMENT#${id}`;
 
             const now = new Date().toISOString();
@@ -253,14 +292,27 @@ export class EnvironmentsDynamoDBService {
                 updateFields.push('account_id = :account_id');
                 expressionAttributeValues[':account_id'] = updates.accountId;
             }
+            if (updates.accountName !== undefined) {
+                updateFields.push('account_name = :account_name');
+                expressionAttributeValues[':account_name'] =
+                    (updates.accountName || '').toUpperCase();
+            }
             if (updates.enterpriseId !== undefined) {
                 updateFields.push('enterprise_id = :enterprise_id');
                 expressionAttributeValues[':enterprise_id'] =
                     updates.enterpriseId;
             }
+            if (updates.enterpriseName !== undefined) {
+                updateFields.push('enterprise_name = :enterprise_name');
+                expressionAttributeValues[':enterprise_name'] =
+                    updates.enterpriseName;
+            }
 
             if (updateFields.length === 0) {
-                return existing;
+                return await this.getByIdForContext(id, {
+                    accountId: updates.accountId,
+                    accountName: updates.accountName,
+                });
             }
 
             const updateExpression = `SET ${updateFields.join(
@@ -286,30 +338,22 @@ export class EnvironmentsDynamoDBService {
             console.log('✅ Environment updated successfully');
 
             // Return updated environment
-            return await this.getById(id);
+            return await this.getByIdForContext(id, {
+                accountId: updates.accountId,
+                accountName: updates.accountName,
+            });
         } catch (error) {
             console.error('❌ Error updating environment:', error);
             throw error;
         }
     }
 
-    async delete(id: string): Promise<boolean> {
+    async deleteForContext(
+        id: string,
+        params: {accountId: string; accountName: string},
+    ): Promise<boolean> {
         try {
-            console.log('🗑️ Deleting environment:', id);
-
-            // First, find the environment to get its PK and SK
-            const existing = await this.getById(id);
-            if (!existing) {
-                console.log('❌ Environment not found for deletion:', id);
-                return false;
-            }
-
-            // Use account name from existing environment
-            const accountName = (
-                existing.accountName || 'SYSTIVA'
-            ).toUpperCase();
-            const accountId = existing.accountId || 'systiva';
-            const pk = `${accountName}#${accountId}#ENVIRONMENTS`;
+            const pk = this.buildAccountPK(params.accountName, params.accountId);
             const sk = `ENVIRONMENT#${id}`;
 
             await DynamoDBOperations.deleteItem(this.tableName, {
@@ -345,6 +389,8 @@ export class EnvironmentsDynamoDBService {
             accountId: item.account_id || item.accountId || undefined,
             accountName: item.account_name || item.accountName || undefined,
             enterpriseId: item.enterprise_id || item.enterpriseId || undefined,
+            enterpriseName:
+                item.enterprise_name || item.enterpriseName || undefined,
             createdAt: item.created_date || item.createdAt,
             updatedAt: item.updated_date || item.updatedAt,
         };
