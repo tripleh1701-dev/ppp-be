@@ -6,7 +6,7 @@ import {
     decryptPassword,
     isValidEncryptedPassword,
     logPasswordOperation,
-    EncryptedPassword
+    EncryptedPassword,
 } from '../utils/passwordEncryption';
 
 // ==========================================
@@ -85,7 +85,7 @@ export class UserManagementDynamoDBService {
     private readonly tableName: string;
 
     constructor() {
-        // Use systiva table with consistent SYSTIVA# prefix
+        // Use systiva table with consistent ACCOUNT# prefix pattern
         this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
     }
 
@@ -111,15 +111,27 @@ export class UserManagementDynamoDBService {
         try {
             console.log(`🔐 Authenticating user: ${email}`);
 
-            // First, try to find user in Systiva table (PK: SYSTIVA#systiva#USERS)
-            const systivaItems = await DynamoDBOperations.queryItems(
+            // Try new format first: ACCOUNT#SYSTIVA for global users
+            let systivaItems = await DynamoDBOperations.queryItems(
                 this.tableName,
                 'PK = :pk AND begins_with(SK, :sk)',
                 {
-                    ':pk': 'SYSTIVA#systiva#USERS',
+                    ':pk': 'ACCOUNT#SYSTIVA',
                     ':sk': 'USER#',
                 },
             );
+
+            // Fallback to old format: SYSTIVA#systiva#USERS
+            if (!systivaItems || systivaItems.length === 0) {
+                systivaItems = await DynamoDBOperations.queryItems(
+                    this.tableName,
+                    'PK = :pk AND begins_with(SK, :sk)',
+                    {
+                        ':pk': 'SYSTIVA#systiva#USERS',
+                        ':sk': 'USER#',
+                    },
+                );
+            }
 
             console.log(`Found ${systivaItems.length} users in Systiva table`);
 
@@ -157,14 +169,21 @@ export class UserManagementDynamoDBService {
             let isPlainTextPassword = false;
 
             // Check for encrypted password (new format)
-            if (userItem.password_encrypted && isValidEncryptedPassword(userItem.password_encrypted)) {
+            if (
+                userItem.password_encrypted &&
+                isValidEncryptedPassword(userItem.password_encrypted)
+            ) {
                 try {
-                    const decrypted = decryptPassword(userItem.password_encrypted);
+                    const decrypted = decryptPassword(
+                        userItem.password_encrypted,
+                    );
                     const decryptedPassword = decrypted.password;
-                    
+
                     // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedPassword);
-                    
+                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                        decryptedPassword,
+                    );
+
                     if (isBcryptHash) {
                         // New format: encrypted bcrypt hash
                         passwordHash = decryptedPassword;
@@ -176,7 +195,10 @@ export class UserManagementDynamoDBService {
                     }
                     logPasswordOperation('decrypt', userItem.id, true);
                 } catch (error) {
-                    console.error(`❌ Failed to decrypt password for user ${userItem.id}:`, error);
+                    console.error(
+                        `❌ Failed to decrypt password for user ${userItem.id}:`,
+                        error,
+                    );
                     logPasswordOperation('decrypt', userItem.id, false);
                     return null;
                 }
@@ -195,34 +217,45 @@ export class UserManagementDynamoDBService {
 
             // Verify password
             let isPasswordValid = false;
-            
+
             if (isPlainTextPassword) {
                 // Legacy format: direct string comparison
                 isPasswordValid = password === passwordHash;
-                
+
                 // If password is valid, upgrade to bcrypt hash for future logins
                 if (isPasswordValid) {
-                    console.log('⚠️  Legacy password format detected. Upgrading to bcrypt hash...');
+                    console.log(
+                        '⚠️  Legacy password format detected. Upgrading to bcrypt hash...',
+                    );
                     try {
                         const bcryptHash = await this.hashPassword(password);
                         const encryptedBcryptHash = encryptPassword(bcryptHash);
-                        
+
                         // Determine the PK and SK from the user item
-                        const userPK = userItem.PK || (userItem.account_name && userItem.account_id 
-                            ? `${userItem.account_name.toUpperCase()}#${userItem.account_id}#USERS`
-                            : `SYSTIVA#systiva#USERS`);
+                        const userPK =
+                            userItem.PK ||
+                            (userItem.account_name && userItem.account_id
+                                ? `${userItem.account_name.toUpperCase()}#${
+                                      userItem.account_id
+                                  }#USERS`
+                                : `SYSTIVA#systiva#USERS`);
                         const userSK = userItem.SK || `USER#${userItem.id}`;
-                        
+
                         // Update the user's password to the new format
                         await DynamoDBOperations.updateItem(
                             this.tableName,
                             {PK: userPK, SK: userSK},
                             'SET password_encrypted = :passwordEncrypted REMOVE password',
-                            {':passwordEncrypted': encryptedBcryptHash}
+                            {':passwordEncrypted': encryptedBcryptHash},
                         );
-                        console.log('✅ Password upgraded to bcrypt hash format');
+                        console.log(
+                            '✅ Password upgraded to bcrypt hash format',
+                        );
                     } catch (upgradeError) {
-                        console.error('⚠️  Failed to upgrade password format:', upgradeError);
+                        console.error(
+                            '⚠️  Failed to upgrade password format:',
+                            upgradeError,
+                        );
                         // Continue anyway since authentication succeeded
                     }
                 }
@@ -311,16 +344,23 @@ export class UserManagementDynamoDBService {
             if (userData.password) {
                 try {
                     // Hash password with bcrypt first (for authentication)
-                    const bcryptHash = await this.hashPassword(userData.password);
+                    const bcryptHash = await this.hashPassword(
+                        userData.password,
+                    );
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
-                    
+
                     // Also encrypt the plain text password for display purposes (reversible)
-                    encryptedDisplayPassword = encryptPassword(userData.password);
-                    
+                    encryptedDisplayPassword = encryptPassword(
+                        userData.password,
+                    );
+
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
-                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to encrypt password for user ${userId}:`,
+                        error,
+                    );
                     logPasswordOperation('encrypt', userId, false);
                     throw new Error('Failed to encrypt password');
                 }
@@ -334,8 +374,9 @@ export class UserManagementDynamoDBService {
                 updatedAt: now,
             };
 
+            // New pattern: ACCOUNT#SYSTIVA for global users
             const item = {
-                PK: 'SYSTIVA#systiva#USERS',
+                PK: 'ACCOUNT#SYSTIVA',
                 SK: `USER#${userId}`,
                 id: userId,
                 account_id: 'systiva',
@@ -379,7 +420,7 @@ export class UserManagementDynamoDBService {
             enterpriseName?: string;
         },
         accountId: string,
-        accountName: string,
+        accountName?: string, // Optional - stored for reference but not required
     ): Promise<User> {
         try {
             const userId = uuidv4();
@@ -393,16 +434,23 @@ export class UserManagementDynamoDBService {
             if (userData.password) {
                 try {
                     // Hash password with bcrypt first (for authentication)
-                    const bcryptHash = await this.hashPassword(userData.password);
+                    const bcryptHash = await this.hashPassword(
+                        userData.password,
+                    );
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
-                    
+
                     // Also encrypt the plain text password for display purposes (reversible)
-                    encryptedDisplayPassword = encryptPassword(userData.password);
-                    
+                    encryptedDisplayPassword = encryptPassword(
+                        userData.password,
+                    );
+
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
-                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to encrypt password for user ${userId}:`,
+                        error,
+                    );
                     logPasswordOperation('encrypt', userId, false);
                     throw new Error('Failed to encrypt password');
                 }
@@ -416,17 +464,17 @@ export class UserManagementDynamoDBService {
                 updatedAt: now,
             };
 
-            // Use account-specific PK format: <ACCOUNT_NAME>#<account_id>#USERS
-            const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
+            // Use account-specific PK format: ACCOUNT#<ACCOUNT_id>
+            const accountPK = `ACCOUNT#${accountId}`;
 
             const item: any = {
                 PK: accountPK,
                 SK: `USER#${userId}`,
                 id: userId,
                 account_id: accountId,
-                account_name: accountName,
-                enterprise_id: userData.enterpriseId || 'systiva',  // Store enterprise context
-                enterprise_name: userData.enterpriseName || 'SYSTIVA',  // Store enterprise context
+                account_name: accountName || '', // Optional - stored for reference
+                enterprise_id: userData.enterpriseId || '', // Store enterprise context
+                enterprise_name: userData.enterpriseName || '', // Store enterprise context (optional)
                 first_name: user.firstName,
                 middle_name: user.middleName,
                 last_name: user.lastName,
@@ -443,11 +491,9 @@ export class UserManagementDynamoDBService {
                 entity_type: 'USER',
             };
 
-            console.log('💾 Creating user with enterprise context:', {
+            console.log('💾 Creating user:', {
                 account_id: accountId,
-                account_name: accountName,
                 enterprise_id: item.enterprise_id,
-                enterprise_name: item.enterprise_name,
             });
 
             await DynamoDBOperations.putItem(this.tableName, item);
@@ -474,18 +520,17 @@ export class UserManagementDynamoDBService {
 
     async listUsersByAccount(
         accountId: string,
-        accountName: string,
+        accountName?: string, // Optional - not used for query, only for logging
         enterpriseId?: string,
-        enterpriseName?: string,
+        enterpriseName?: string, // Optional - not used for query, only for logging
     ): Promise<User[]> {
         try {
-            const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
+            const accountPK = `ACCOUNT#${accountId}`;
 
             console.log('📋 Querying DynamoDB for account-specific users:', {
                 accountId,
-                accountName,
                 enterpriseId,
-                enterpriseName,
                 pkPrefix: accountPK,
             });
 
@@ -518,54 +563,92 @@ export class UserManagementDynamoDBService {
             // Filter by enterprise if specified (same logic as groups)
             let filteredItems = items;
             if (enterpriseId && enterpriseName) {
-                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
-                filteredItems = items.filter(item => {
-                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                console.log(
+                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                );
+                filteredItems = items.filter((item) => {
+                    const matchesEnterprise =
+                        item.enterprise_id === enterpriseId;
                     if (!matchesEnterprise) {
-                        console.log(`📋 ❌ Filtered out user ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                        console.log(
+                            `📋 ❌ Filtered out user ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
+                        );
                     }
                     return matchesEnterprise;
                 });
-                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} users`);
+                console.log(
+                    `📋 ✅ After enterprise filter: ${filteredItems.length} users`,
+                );
             }
 
             return filteredItems.map((item) => {
                 // Handle password decryption - prioritize display password (reversible)
                 let decryptedPassword: string | undefined;
-                
+
                 // First, try to decrypt display password (plain text encrypted with AES)
-                if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+                if (
+                    item.password_display_encrypted &&
+                    isValidEncryptedPassword(item.password_display_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(item.password_display_encrypted);
+                        const decrypted = decryptPassword(
+                            item.password_display_encrypted,
+                        );
                         decryptedPassword = decrypted.password;
-                        console.log(`✅ Decrypted display password for user ${item.id}`);
+                        console.log(
+                            `✅ Decrypted display password for user ${item.id}`,
+                        );
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt display password for user ${item.id}:`, error);
+                        console.error(
+                            `❌ Failed to decrypt display password for user ${item.id}:`,
+                            error,
+                        );
                     }
                 }
-                
+
                 // If display password not available, try legacy password_encrypted
-                if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                if (
+                    !decryptedPassword &&
+                    item.password_encrypted &&
+                    isValidEncryptedPassword(item.password_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(item.password_encrypted);
+                        const decrypted = decryptPassword(
+                            item.password_encrypted,
+                        );
                         const decryptedValue = decrypted.password;
-                        
+
                         // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
-                        
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                            decryptedValue,
+                        );
+
                         if (isBcryptHash) {
                             // New format: encrypted bcrypt hash - cannot decrypt to plain text
                             // Return undefined as we cannot show plain text from bcrypt hash
                             decryptedPassword = undefined;
-                            console.log(`⚠️  Password for user ${item.id} is stored as bcrypt hash - cannot display plain text`);
+                            console.log(
+                                `⚠️  Password for user ${item.id} is stored as bcrypt hash - cannot display plain text`,
+                            );
                         } else {
                             // Legacy format: encrypted plain text password - return the plain text
                             decryptedPassword = decryptedValue;
                         }
-                        logPasswordOperation('decrypt', item.id || 'unknown', true);
+                        logPasswordOperation(
+                            'decrypt',
+                            item.id || 'unknown',
+                            true,
+                        );
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt password for user ${item.id}:`, error);
-                        logPasswordOperation('decrypt', item.id || 'unknown', false);
+                        console.error(
+                            `❌ Failed to decrypt password for user ${item.id}:`,
+                            error,
+                        );
+                        logPasswordOperation(
+                            'decrypt',
+                            item.id || 'unknown',
+                            false,
+                        );
                         decryptedPassword = undefined; // Don't expose broken encrypted data
                     }
                 } else if (item.password) {
@@ -602,11 +685,18 @@ export class UserManagementDynamoDBService {
 
     async getUser(userId: string): Promise<User | null> {
         try {
-            // Fixed: Use correct PK pattern that matches creation and listing
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: 'SYSTIVA#systiva#USERS',
+            // Try new pattern first: ACCOUNT#SYSTIVA
+            let item = await DynamoDBOperations.getItem(this.tableName, {
+                PK: 'ACCOUNT#SYSTIVA',
                 SK: `USER#${userId}`,
             });
+            // Fallback to old pattern
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: 'SYSTIVA#systiva#USERS',
+                    SK: `USER#${userId}`,
+                });
+            }
 
             if (!item) {
                 return null;
@@ -614,39 +704,60 @@ export class UserManagementDynamoDBService {
 
             // Handle password decryption - prioritize display password (reversible)
             let decryptedPassword: string | undefined;
-            
+
             // First, try to decrypt display password (plain text encrypted with AES)
-            if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+            if (
+                item.password_display_encrypted &&
+                isValidEncryptedPassword(item.password_display_encrypted)
+            ) {
                 try {
-                    const decrypted = decryptPassword(item.password_display_encrypted);
+                    const decrypted = decryptPassword(
+                        item.password_display_encrypted,
+                    );
                     decryptedPassword = decrypted.password;
-                    console.log(`✅ Decrypted display password for user ${userId}`);
+                    console.log(
+                        `✅ Decrypted display password for user ${userId}`,
+                    );
                 } catch (error) {
-                    console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to decrypt display password for user ${userId}:`,
+                        error,
+                    );
                 }
             }
-            
+
             // If display password not available, try legacy password_encrypted
-            if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+            if (
+                !decryptedPassword &&
+                item.password_encrypted &&
+                isValidEncryptedPassword(item.password_encrypted)
+            ) {
                 try {
                     const decrypted = decryptPassword(item.password_encrypted);
                     const decryptedValue = decrypted.password;
-                    
+
                     // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
-                    
+                    const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                        decryptedValue,
+                    );
+
                     if (isBcryptHash) {
                         // New format: encrypted bcrypt hash - cannot decrypt to plain text
                         // Return undefined as we cannot show plain text from bcrypt hash
                         decryptedPassword = undefined;
-                        console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                        console.log(
+                            `⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`,
+                        );
                     } else {
                         // Legacy format: encrypted plain text password - return the plain text
                         decryptedPassword = decryptedValue;
                     }
                     logPasswordOperation('decrypt', userId, true);
                 } catch (error) {
-                    console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to decrypt password for user ${userId}:`,
+                        error,
+                    );
                     logPasswordOperation('decrypt', userId, false);
                     decryptedPassword = undefined;
                 }
@@ -677,17 +788,21 @@ export class UserManagementDynamoDBService {
         try {
             console.log('📋 Querying DynamoDB for Systiva users');
 
-            // Query for Systiva users using correct PK pattern
-            const systivaPK = 'SYSTIVA#systiva#USERS';
-            const items = await DynamoDBOperations.queryItems(
+            // Query for Systiva users using new pattern first, then fallback
+            const newSystivaPK = 'ACCOUNT#SYSTIVA';
+            let items = await DynamoDBOperations.queryItems(
                 this.tableName,
                 'PK = :pk AND begins_with(SK, :sk)',
-                {
-                    ':pk': systivaPK,
-                    ':sk': 'USER#',
-                },
+                {':pk': newSystivaPK, ':sk': 'USER#'},
             );
-
+            // Fallback to old pattern
+            if (!items || items.length === 0) {
+                items = await DynamoDBOperations.queryItems(
+                    this.tableName,
+                    'PK = :pk AND begins_with(SK, :sk)',
+                    {':pk': 'SYSTIVA#systiva#USERS', ':sk': 'USER#'},
+                );
+            }
             console.log(`📋 Found ${items.length} Systiva users`);
             if (items.length > 0) {
                 console.log(
@@ -705,40 +820,81 @@ export class UserManagementDynamoDBService {
                 .map((item) => {
                     // Handle password decryption - prioritize display password (reversible)
                     let decryptedPassword: string | undefined;
-                    
+
                     // First, try to decrypt display password (plain text encrypted with AES)
-                    if (item.password_display_encrypted && isValidEncryptedPassword(item.password_display_encrypted)) {
+                    if (
+                        item.password_display_encrypted &&
+                        isValidEncryptedPassword(
+                            item.password_display_encrypted,
+                        )
+                    ) {
                         try {
-                            const decrypted = decryptPassword(item.password_display_encrypted);
+                            const decrypted = decryptPassword(
+                                item.password_display_encrypted,
+                            );
                             decryptedPassword = decrypted.password;
-                            console.log(`✅ Decrypted display password for user ${item.id || 'unknown'}`);
+                            console.log(
+                                `✅ Decrypted display password for user ${
+                                    item.id || 'unknown'
+                                }`,
+                            );
                         } catch (error) {
-                            console.error(`❌ Failed to decrypt display password for user ${item.id || 'unknown'}:`, error);
+                            console.error(
+                                `❌ Failed to decrypt display password for user ${
+                                    item.id || 'unknown'
+                                }:`,
+                                error,
+                            );
                         }
                     }
-                    
+
                     // If display password not available, try legacy password_encrypted
-                    if (!decryptedPassword && item.password_encrypted && isValidEncryptedPassword(item.password_encrypted)) {
+                    if (
+                        !decryptedPassword &&
+                        item.password_encrypted &&
+                        isValidEncryptedPassword(item.password_encrypted)
+                    ) {
                         try {
-                            const decrypted = decryptPassword(item.password_encrypted);
+                            const decrypted = decryptPassword(
+                                item.password_encrypted,
+                            );
                             const decryptedValue = decrypted.password;
-                            
+
                             // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                            const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
-                            
+                            const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                                decryptedValue,
+                            );
+
                             if (isBcryptHash) {
                                 // New format: encrypted bcrypt hash - cannot decrypt to plain text
                                 // Return undefined as we cannot show plain text from bcrypt hash
                                 decryptedPassword = undefined;
-                                console.log(`⚠️  Password for user ${item.id || 'unknown'} is stored as bcrypt hash - cannot display plain text`);
+                                console.log(
+                                    `⚠️  Password for user ${
+                                        item.id || 'unknown'
+                                    } is stored as bcrypt hash - cannot display plain text`,
+                                );
                             } else {
                                 // Legacy format: encrypted plain text password - return the plain text
                                 decryptedPassword = decryptedValue;
                             }
-                            logPasswordOperation('decrypt', item.id || 'unknown', true);
+                            logPasswordOperation(
+                                'decrypt',
+                                item.id || 'unknown',
+                                true,
+                            );
                         } catch (error) {
-                            console.error(`❌ Failed to decrypt password for user ${item.id || 'unknown'}:`, error);
-                            logPasswordOperation('decrypt', item.id || 'unknown', false);
+                            console.error(
+                                `❌ Failed to decrypt password for user ${
+                                    item.id || 'unknown'
+                                }:`,
+                                error,
+                            );
+                            logPasswordOperation(
+                                'decrypt',
+                                item.id || 'unknown',
+                                false,
+                            );
                             decryptedPassword = undefined; // Don't expose broken encrypted data
                         }
                     } else if (item.password) {
@@ -852,27 +1008,38 @@ export class UserManagementDynamoDBService {
                 let encryptedDisplayPassword: EncryptedPassword | undefined;
                 try {
                     // Hash password with bcrypt first (for authentication)
-                    const bcryptHash = await this.hashPassword(updates.password);
+                    const bcryptHash = await this.hashPassword(
+                        updates.password,
+                    );
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
-                    
+
                     // Also encrypt the plain text password for display purposes (reversible)
-                    encryptedDisplayPassword = encryptPassword(updates.password);
-                    
+                    encryptedDisplayPassword = encryptPassword(
+                        updates.password,
+                    );
+
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
-                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to encrypt password for user ${userId}:`,
+                        error,
+                    );
                     logPasswordOperation('encrypt', userId, false);
                     throw new Error('Failed to encrypt password');
                 }
-                
+
                 updateFields.push('password_encrypted = :passwordEncrypted');
-                expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
-                
+                expressionAttributeValues[':passwordEncrypted'] =
+                    encryptedPasswordData;
+
                 // Store display password (plain text encrypted with AES, reversible)
-                updateFields.push('password_display_encrypted = :passwordDisplayEncrypted');
-                expressionAttributeValues[':passwordDisplayEncrypted'] = encryptedDisplayPassword;
-                
+                updateFields.push(
+                    'password_display_encrypted = :passwordDisplayEncrypted',
+                );
+                expressionAttributeValues[':passwordDisplayEncrypted'] =
+                    encryptedDisplayPassword;
+
                 // Remove old bcrypt password field if it exists
                 updateFields.push('password = :passwordRemove');
                 expressionAttributeValues[':passwordRemove'] = null;
@@ -893,7 +1060,7 @@ export class UserManagementDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: 'SYSTIVA#systiva#USERS',
+                            PK: 'ACCOUNT#SYSTIVA',
                             SK: `USER#${userId}`,
                         },
                         UpdateExpression: updateExpression,
@@ -919,40 +1086,65 @@ export class UserManagementDynamoDBService {
             if (updates.password !== undefined) {
                 // Password was just updated - return the plain text password from the request
                 decryptedPassword = updates.password;
-                console.log(`✅ Returning plain text password from update request for user ${userId}`);
+                console.log(
+                    `✅ Returning plain text password from update request for user ${userId}`,
+                );
             } else {
                 // Password was not updated, try to decrypt stored display password first
-                if (result.password_display_encrypted && isValidEncryptedPassword(result.password_display_encrypted)) {
+                if (
+                    result.password_display_encrypted &&
+                    isValidEncryptedPassword(result.password_display_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(result.password_display_encrypted);
+                        const decrypted = decryptPassword(
+                            result.password_display_encrypted,
+                        );
                         decryptedPassword = decrypted.password;
-                        console.log(`✅ Decrypted display password for user ${userId}`);
+                        console.log(
+                            `✅ Decrypted display password for user ${userId}`,
+                        );
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                        console.error(
+                            `❌ Failed to decrypt display password for user ${userId}:`,
+                            error,
+                        );
                     }
                 }
-                
+
                 // If display password not available, try legacy password_encrypted
-                if (!decryptedPassword && result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                if (
+                    !decryptedPassword &&
+                    result.password_encrypted &&
+                    isValidEncryptedPassword(result.password_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(result.password_encrypted);
+                        const decrypted = decryptPassword(
+                            result.password_encrypted,
+                        );
                         const decryptedValue = decrypted.password;
-                        
+
                         // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
-                        
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                            decryptedValue,
+                        );
+
                         if (isBcryptHash) {
                             // New format: encrypted bcrypt hash - cannot decrypt to plain text
                             // Return undefined as we cannot show plain text from bcrypt hash
                             decryptedPassword = undefined;
-                            console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                            console.log(
+                                `⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`,
+                            );
                         } else {
                             // Legacy format: encrypted plain text password - return the plain text
                             decryptedPassword = decryptedValue;
                         }
                         logPasswordOperation('decrypt', userId, true);
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                        console.error(
+                            `❌ Failed to decrypt password for user ${userId}:`,
+                            error,
+                        );
                         logPasswordOperation('decrypt', userId, false);
                         decryptedPassword = undefined;
                     }
@@ -991,7 +1183,8 @@ export class UserManagementDynamoDBService {
     ): Promise<User | null> {
         try {
             const now = new Date().toISOString();
-            const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
+            const accountPK = `ACCOUNT#${accountId}`;
 
             // Get existing user from systiva table
             const items = await DynamoDBOperations.queryItems(
@@ -1070,41 +1263,54 @@ export class UserManagementDynamoDBService {
                 let encryptedDisplayPassword: EncryptedPassword | undefined;
                 try {
                     // Hash password with bcrypt first (for authentication)
-                    const bcryptHash = await this.hashPassword(updates.password);
+                    const bcryptHash = await this.hashPassword(
+                        updates.password,
+                    );
                     // Then encrypt the bcrypt hash
                     encryptedPasswordData = encryptPassword(bcryptHash);
-                    
+
                     // Also encrypt the plain text password for display purposes (reversible)
-                    encryptedDisplayPassword = encryptPassword(updates.password);
-                    
+                    encryptedDisplayPassword = encryptPassword(
+                        updates.password,
+                    );
+
                     logPasswordOperation('encrypt', userId, true);
                 } catch (error) {
-                    console.error(`❌ Failed to encrypt password for user ${userId}:`, error);
+                    console.error(
+                        `❌ Failed to encrypt password for user ${userId}:`,
+                        error,
+                    );
                     logPasswordOperation('encrypt', userId, false);
                     throw new Error('Failed to encrypt password');
                 }
-                
+
                 updateFields.push('password_encrypted = :passwordEncrypted');
-                expressionAttributeValues[':passwordEncrypted'] = encryptedPasswordData;
-                
+                expressionAttributeValues[':passwordEncrypted'] =
+                    encryptedPasswordData;
+
                 // Store display password (plain text encrypted with AES, reversible)
-                updateFields.push('password_display_encrypted = :passwordDisplayEncrypted');
-                expressionAttributeValues[':passwordDisplayEncrypted'] = encryptedDisplayPassword;
-                
+                updateFields.push(
+                    'password_display_encrypted = :passwordDisplayEncrypted',
+                );
+                expressionAttributeValues[':passwordDisplayEncrypted'] =
+                    encryptedDisplayPassword;
+
                 // Remove old bcrypt password field if it exists
                 updateFields.push('#password = :passwordRemove');
                 expressionAttributeNames['#password'] = 'password';
                 expressionAttributeValues[':passwordRemove'] = null;
             }
-            
+
             // Update enterprise fields if provided
             if (updates.enterpriseId !== undefined) {
                 updateFields.push('enterprise_id = :enterpriseId');
-                expressionAttributeValues[':enterpriseId'] = updates.enterpriseId;
+                expressionAttributeValues[':enterpriseId'] =
+                    updates.enterpriseId;
             }
             if (updates.enterpriseName !== undefined) {
                 updateFields.push('enterprise_name = :enterpriseName');
-                expressionAttributeValues[':enterpriseName'] = updates.enterpriseName;
+                expressionAttributeValues[':enterpriseName'] =
+                    updates.enterpriseName;
             }
 
             // Always ensure entity_type is set
@@ -1148,40 +1354,65 @@ export class UserManagementDynamoDBService {
             if (updates.password !== undefined) {
                 // Password was just updated - return the plain text password from the request
                 decryptedPassword = updates.password;
-                console.log(`✅ Returning plain text password from update request for user ${userId}`);
+                console.log(
+                    `✅ Returning plain text password from update request for user ${userId}`,
+                );
             } else {
                 // Password was not updated, try to decrypt stored display password first
-                if (result.password_display_encrypted && isValidEncryptedPassword(result.password_display_encrypted)) {
+                if (
+                    result.password_display_encrypted &&
+                    isValidEncryptedPassword(result.password_display_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(result.password_display_encrypted);
+                        const decrypted = decryptPassword(
+                            result.password_display_encrypted,
+                        );
                         decryptedPassword = decrypted.password;
-                        console.log(`✅ Decrypted display password for user ${userId}`);
+                        console.log(
+                            `✅ Decrypted display password for user ${userId}`,
+                        );
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt display password for user ${userId}:`, error);
+                        console.error(
+                            `❌ Failed to decrypt display password for user ${userId}:`,
+                            error,
+                        );
                     }
                 }
-                
+
                 // If display password not available, try legacy password_encrypted
-                if (!decryptedPassword && result.password_encrypted && isValidEncryptedPassword(result.password_encrypted)) {
+                if (
+                    !decryptedPassword &&
+                    result.password_encrypted &&
+                    isValidEncryptedPassword(result.password_encrypted)
+                ) {
                     try {
-                        const decrypted = decryptPassword(result.password_encrypted);
+                        const decrypted = decryptPassword(
+                            result.password_encrypted,
+                        );
                         const decryptedValue = decrypted.password;
-                        
+
                         // Check if decrypted value is a bcrypt hash (starts with $2a$, $2b$, or $2y$)
-                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(decryptedValue);
-                        
+                        const isBcryptHash = /^\$2[ayb]\$.{56}$/.test(
+                            decryptedValue,
+                        );
+
                         if (isBcryptHash) {
                             // New format: encrypted bcrypt hash - cannot decrypt to plain text
                             // Return undefined as we cannot show plain text from bcrypt hash
                             decryptedPassword = undefined;
-                            console.log(`⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`);
+                            console.log(
+                                `⚠️  Password for user ${userId} is stored as bcrypt hash - cannot display plain text`,
+                            );
                         } else {
                             // Legacy format: encrypted plain text password - return the plain text
                             decryptedPassword = decryptedValue;
                         }
                         logPasswordOperation('decrypt', userId, true);
                     } catch (error) {
-                        console.error(`❌ Failed to decrypt password for user ${userId}:`, error);
+                        console.error(
+                            `❌ Failed to decrypt password for user ${userId}:`,
+                            error,
+                        );
                         logPasswordOperation('decrypt', userId, false);
                         decryptedPassword = undefined;
                     }
@@ -1220,12 +1451,16 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            // Fixed: Use correct PK pattern that matches creation and listing
+            // Delete from both new and old patterns
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: 'ACCOUNT#SYSTIVA',
+                SK: `USER#${userId}`,
+            }).catch(() => {});
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: 'SYSTIVA#systiva#USERS',
                 SK: `USER#${userId}`,
-            });
-            
+            }).catch(() => {});
+
             console.log(`✅ User ${userId} deleted successfully from DynamoDB`);
         } catch (error) {
             console.error('Error deleting user:', error);
@@ -1239,7 +1474,8 @@ export class UserManagementDynamoDBService {
         accountName: string,
     ): Promise<void> {
         try {
-            const accountPK = `${accountName.toUpperCase()}#${accountId}#USERS`;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
+            const accountPK = `ACCOUNT#${accountId}`;
 
             // Get user to find assigned groups for cleanup
             const items = await DynamoDBOperations.queryItems(
@@ -1278,9 +1514,9 @@ export class UserManagementDynamoDBService {
     async createGroup(
         groupData: Omit<Group, 'id' | 'createdAt' | 'updatedAt'> & {
             selectedAccountId?: string;
-            selectedAccountName?: string;
+            selectedAccountName?: string; // Optional - not required
             selectedEnterpriseId?: string;
-            selectedEnterpriseName?: string;
+            selectedEnterpriseName?: string; // Optional - not required
             id?: string;
         },
     ): Promise<Group> {
@@ -1288,16 +1524,13 @@ export class UserManagementDynamoDBService {
             const groupId = groupData.id || uuidv4();
             const now = new Date().toISOString();
 
-            // Determine if this is for a specific account or Systiva
-            const isAccountSpecific =
-                groupData.selectedAccountId && groupData.selectedAccountName;
+            // Determine if this is for a specific account or Systiva (only accountId required)
+            const isAccountSpecific = !!groupData.selectedAccountId;
 
-            // Use correct PK pattern: <ACCOUNT_NAME>#${account_Id}#GROUPS
+            // Use PK pattern: ACCOUNT#<ACCOUNT_id>
             const accountPK = isAccountSpecific
-                ? `${groupData.selectedAccountName!.toUpperCase()}#${
-                      groupData.selectedAccountId
-                  }#GROUPS`
-                : `SYSTIVA#systiva#GROUPS`;
+                ? `ACCOUNT#${groupData.selectedAccountId}`
+                : `ACCOUNT#SYSTIVA`;
 
             const group: Group = {
                 id: groupId,
@@ -1334,8 +1567,10 @@ export class UserManagementDynamoDBService {
             if (isAccountSpecific) {
                 item.account_id = groupData.selectedAccountId;
                 item.account_name = groupData.selectedAccountName;
-                item.enterprise_id = groupData.selectedEnterpriseId || 'systiva';
-                item.enterprise_name = groupData.selectedEnterpriseName || 'SYSTIVA';
+                item.enterprise_id =
+                    groupData.selectedEnterpriseId || 'systiva';
+                item.enterprise_name =
+                    groupData.selectedEnterpriseName || 'SYSTIVA';
             }
 
             console.log('🆕 Creating group in DynamoDB:', item);
@@ -1364,21 +1599,41 @@ export class UserManagementDynamoDBService {
         enterpriseName?: string,
     ): Promise<Group | null> {
         try {
-            // Determine PK based on account context
-            const isAccountSpecific = accountId && accountName;
+            // Determine PK based on account context (only accountId required)
+            const isAccountSpecific = !!accountId;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
-                ? `${accountName.toUpperCase()}#${accountId}#GROUPS`
+                ? `ACCOUNT#${accountId}`
+                : 'ACCOUNT#SYSTIVA';
+            // Legacy fallback patterns
+            const legacyPkPrefix = isAccountSpecific
+                ? `${
+                      accountName?.toUpperCase() || accountId
+                  }#${accountId}#GROUPS`
                 : 'SYSTIVA#systiva#GROUPS';
 
-            console.log(`🔍 Getting group ${groupId} from partition: ${pkPrefix}`);
+            console.log(
+                `🔍 Getting group ${groupId} from partition: ${pkPrefix} (fallback: ${legacyPkPrefix})`,
+            );
 
-            const item = await DynamoDBOperations.getItem(this.tableName, {
+            // Try new format first: ACCOUNT#<ACCOUNT_id>
+            let item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
             });
 
+            // Fallback to legacy format
             if (!item) {
-                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: legacyPkPrefix,
+                    SK: `GROUP#${groupId}`,
+                });
+            }
+
+            if (!item) {
+                console.log(
+                    `⚠️  Group ${groupId} not found in ${pkPrefix} or ${legacyPkPrefix}`,
+                );
                 return null;
             }
 
@@ -1410,7 +1665,7 @@ export class UserManagementDynamoDBService {
             );
             return {
                 total: allItems.length,
-                groups: allItems.map(item => ({
+                groups: allItems.map((item) => ({
                     PK: item.PK,
                     SK: item.SK,
                     id: item.id,
@@ -1434,17 +1689,23 @@ export class UserManagementDynamoDBService {
                 'entity_type = :type',
                 {':type': 'GROUP'},
             );
-            
-            console.log(`🗑️  Deleting all ${allItems.length} groups from database...`);
-            
+
+            console.log(
+                `🗑️  Deleting all ${allItems.length} groups from database...`,
+            );
+
             for (const item of allItems) {
-                console.log(`🗑️  Deleting group: ${item.id} (${item.group_name || 'unnamed'}) from ${item.PK}`);
+                console.log(
+                    `🗑️  Deleting group: ${item.id} (${
+                        item.group_name || 'unnamed'
+                    }) from ${item.PK}`,
+                );
                 await DynamoDBOperations.deleteItem(this.tableName, {
                     PK: item.PK,
                     SK: item.SK,
                 });
             }
-            
+
             console.log(`✅ Successfully deleted ${allItems.length} groups`);
             return {
                 success: true,
@@ -1465,36 +1726,46 @@ export class UserManagementDynamoDBService {
                 'entity_type = :type',
                 {':type': 'user_group_assignment'},
             );
-            
-            console.log(`🗑️  Deleting ${assignmentItems.length} user-group assignment records...`);
-            
+
+            console.log(
+                `🗑️  Deleting ${assignmentItems.length} user-group assignment records...`,
+            );
+
             for (const item of assignmentItems) {
                 await DynamoDBOperations.deleteItem(this.tableName, {
                     PK: item.PK,
                     SK: item.SK,
                 });
             }
-            
+
             // Clear assigned_groups field from all users
             const allUsers = await DynamoDBOperations.scanItems(
                 this.tableName,
                 'entity_type = :type',
                 {':type': 'USER'},
             );
-            
+
             console.log(`🔄 Found ${allUsers.length} users in database`);
             let clearedCount = 0;
-            
+
             for (const user of allUsers) {
-                console.log(`👤 User ${user.id} (${user.first_name} ${user.last_name}):`, {
-                    PK: user.PK,
-                    SK: user.SK,
-                    assigned_groups: user.assigned_groups,
-                    hasGroups: !!(user.assigned_groups && user.assigned_groups.length > 0),
-                });
-                
+                console.log(
+                    `👤 User ${user.id} (${user.first_name} ${user.last_name}):`,
+                    {
+                        PK: user.PK,
+                        SK: user.SK,
+                        assigned_groups: user.assigned_groups,
+                        hasGroups: !!(
+                            user.assigned_groups &&
+                            user.assigned_groups.length > 0
+                        ),
+                    },
+                );
+
                 if (user.assigned_groups && user.assigned_groups.length > 0) {
-                    console.log(`🔄 Clearing ${user.assigned_groups.length} groups from user ${user.id}`);
+                    console.log(
+                        `🔄 Clearing ${user.assigned_groups.length} groups from user ${user.id}`,
+                    );
                     await DynamoDBOperations.updateItem(
                         this.tableName,
                         {PK: user.PK, SK: user.SK},
@@ -1505,7 +1776,7 @@ export class UserManagementDynamoDBService {
                     console.log(`✅ Cleared groups from user ${user.id}`);
                 }
             }
-            
+
             console.log(`✅ Successfully cleared all user-group assignments`);
             return {
                 success: true,
@@ -1527,18 +1798,20 @@ export class UserManagementDynamoDBService {
         enterpriseName?: string,
     ): Promise<Group[]> {
         try {
-            console.log(
-                '📋 Scanning DynamoDB for groups with full context',
-                {accountId, accountName, enterpriseId, enterpriseName},
-            );
+            console.log('📋 Scanning DynamoDB for groups with full context', {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
 
-            // Determine if we need to filter by account
-            const isAccountSpecific = accountId && accountName;
+            // Determine if we need to filter by account (only accountId required)
+            const isAccountSpecific = !!accountId;
 
             let items: any[];
             if (isAccountSpecific) {
-                // Query for account-specific groups using correct PK pattern
-                const accountPK = `${accountName.toUpperCase()}#${accountId}#GROUPS`;
+                // Query for account-specific groups using PK pattern: ACCOUNT#<ACCOUNT_id>
+                const accountPK = `ACCOUNT#${accountId}`;
                 console.log('📋 ================================');
                 console.log('📋 Querying for account-specific groups');
                 console.log('📋 Input Parameters:', {
@@ -1559,8 +1832,10 @@ export class UserManagementDynamoDBService {
                         ':sk': 'GROUP#',
                     },
                 );
-                
-                console.log(`📋 ⚡ Query returned ${items.length} items from DynamoDB`);
+
+                console.log(
+                    `📋 ⚡ Query returned ${items.length} items from DynamoDB`,
+                );
                 if (items.length > 0) {
                     console.log('📋 ✅ First item structure:', {
                         PK: items[0].PK,
@@ -1571,35 +1846,47 @@ export class UserManagementDynamoDBService {
                         account_name: items[0].account_name,
                     });
                 } else {
-                    console.log('📋 ❌ No items found - checking if data exists...');
+                    console.log(
+                        '📋 ❌ No items found - checking if data exists...',
+                    );
                     // Do a broader scan to see what's actually in the table
                     const allItems = await DynamoDBOperations.scanItems(
                         this.tableName,
                         'entity_type = :type',
                         {':type': 'GROUP'},
                     );
-                    console.log(`📋 📊 Total groups in entire table: ${allItems.length}`);
+                    console.log(
+                        `📋 📊 Total groups in entire table: ${allItems.length}`,
+                    );
                     if (allItems.length > 0) {
-                        console.log('📋 Sample PKs in table:', allItems.slice(0, 5).map(i => ({
-                            PK: i.PK,
-                            SK: i.SK,
-                            account_name: i.account_name,
-                            account_id: i.account_id,
-                        })));
+                        console.log(
+                            '📋 Sample PKs in table:',
+                            allItems.slice(0, 5).map((i) => ({
+                                PK: i.PK,
+                                SK: i.SK,
+                                account_name: i.account_name,
+                                account_id: i.account_id,
+                            })),
+                        );
                     }
                 }
             } else {
-                // Query for Systiva groups using correct PK pattern
+                // Query for Systiva groups using new pattern first
                 console.log('📋 Querying for Systiva groups');
-                const systivaPK = 'SYSTIVA#systiva#GROUPS';
+                const newSystivaPK = 'ACCOUNT#SYSTIVA';
                 items = await DynamoDBOperations.queryItems(
                     this.tableName,
                     'PK = :pk AND begins_with(SK, :sk)',
-                    {
-                        ':pk': systivaPK,
-                        ':sk': 'GROUP#',
-                    },
+                    {':pk': newSystivaPK, ':sk': 'GROUP#'},
                 );
+                // Fallback to old pattern
+                if (!items || items.length === 0) {
+                    items = await DynamoDBOperations.queryItems(
+                        this.tableName,
+                        'PK = :pk AND begins_with(SK, :sk)',
+                        {':pk': 'SYSTIVA#systiva#GROUPS', ':sk': 'GROUP#'},
+                    );
+                }
             }
 
             console.log(`📋 Found ${items.length} groups before filtering`);
@@ -1608,15 +1895,22 @@ export class UserManagementDynamoDBService {
             // Filter by enterprise if specified
             let filteredItems = items;
             if (enterpriseId && enterpriseName) {
-                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
-                filteredItems = items.filter(item => {
-                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                console.log(
+                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                );
+                filteredItems = items.filter((item) => {
+                    const matchesEnterprise =
+                        item.enterprise_id === enterpriseId;
                     if (!matchesEnterprise) {
-                        console.log(`📋 ❌ Filtered out group ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                        console.log(
+                            `📋 ❌ Filtered out group ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
+                        );
                     }
                     return matchesEnterprise;
                 });
-                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} groups`);
+                console.log(
+                    `📋 ✅ After enterprise filter: ${filteredItems.length} groups`,
+                );
             }
 
             const groups = filteredItems
@@ -1655,16 +1949,16 @@ export class UserManagementDynamoDBService {
         try {
             const now = new Date().toISOString();
 
-            // Determine PK based on account context
+            // Determine PK based on account context - PK pattern: ACCOUNT#<ACCOUNT_id>
             const isAccountSpecific =
                 updates.selectedAccountId && updates.selectedAccountName;
             const pkPrefix = isAccountSpecific
-                ? `${updates.selectedAccountName!.toUpperCase()}#${
-                      updates.selectedAccountId
-                  }#GROUPS`
-                : 'SYSTIVA#systiva#GROUPS';
+                ? `ACCOUNT#${updates.selectedAccountId}`
+                : 'ACCOUNT#SYSTIVA';
 
-            console.log(`🔄 updateGroup: Updating group ${groupId} in partition ${pkPrefix}`);
+            console.log(
+                `🔄 updateGroup: Updating group ${groupId} in partition ${pkPrefix}`,
+            );
             console.log(`🔄 Update data:`, updates);
 
             // Get existing group with account context to find it in correct partition
@@ -1676,10 +1970,12 @@ export class UserManagementDynamoDBService {
                 updates.selectedEnterpriseName,
             );
             if (!existingGroup) {
-                console.log(`❌ Group ${groupId} not found in partition ${pkPrefix}`);
+                console.log(
+                    `❌ Group ${groupId} not found in partition ${pkPrefix}`,
+                );
                 return null;
             }
-            
+
             console.log(`✅ Found existing group:`, existingGroup);
 
             const updateFields: string[] = [];
@@ -1723,15 +2019,17 @@ export class UserManagementDynamoDBService {
                     updates.assignedRoles,
                 );
             }
-            
+
             // Update enterprise fields if provided
             if (updates.selectedEnterpriseId !== undefined) {
                 updateFields.push('enterprise_id = :enterpriseId');
-                expressionAttributeValues[':enterpriseId'] = updates.selectedEnterpriseId;
+                expressionAttributeValues[':enterpriseId'] =
+                    updates.selectedEnterpriseId;
             }
             if (updates.selectedEnterpriseName !== undefined) {
                 updateFields.push('enterprise_name = :enterpriseName');
-                expressionAttributeValues[':enterpriseName'] = updates.selectedEnterpriseName;
+                expressionAttributeValues[':enterpriseName'] =
+                    updates.selectedEnterpriseName;
             }
 
             // Always ensure entity_type is set (for legacy records that might be missing it)
@@ -1800,18 +2098,34 @@ export class UserManagementDynamoDBService {
                 enterpriseName,
             });
 
-            // Determine PK based on account context
-            const isAccountSpecific = accountId && accountName;
+            // Determine PK based on account context (only accountId required)
+            const isAccountSpecific = !!accountId;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
-                ? `${accountName.toUpperCase()}#${accountId}#GROUPS`
+                ? `ACCOUNT#${accountId}`
+                : 'ACCOUNT#SYSTIVA';
+            const legacyPkPrefix = isAccountSpecific
+                ? `${
+                      accountName?.toUpperCase() || accountId
+                  }#${accountId}#GROUPS`
                 : 'SYSTIVA#systiva#GROUPS';
 
-            console.log(`🗑️  Deleting from partition: ${pkPrefix}`);
-            
+            console.log(
+                `🗑️  Deleting from partition: ${pkPrefix} (also trying: ${legacyPkPrefix})`,
+            );
+
             // Get group to find assigned roles for cleanup
-            const group = await this.getGroup(groupId, accountId, accountName, enterpriseId, enterpriseName);
+            const group = await this.getGroup(
+                groupId,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            );
             if (!group) {
-                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
+                console.log(
+                    `⚠️  Group ${groupId} not found in ${pkPrefix} or ${legacyPkPrefix}`,
+                );
                 return; // Group doesn't exist, nothing to delete
             }
 
@@ -1825,13 +2139,19 @@ export class UserManagementDynamoDBService {
             // Delete all user-group lookups for this group
             await this.deleteAllUserGroupLookupsForGroup(groupId);
 
-            // Delete the group from the correct partition
+            // Delete the group from both partitions (new and legacy)
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
-            });
-            
-            console.log(`✅ Successfully deleted group ${groupId} from ${pkPrefix}`);
+            }).catch(() => {});
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: legacyPkPrefix,
+                SK: `GROUP#${groupId}`,
+            }).catch(() => {});
+
+            console.log(
+                `✅ Successfully deleted group ${groupId} from ${pkPrefix} and ${legacyPkPrefix}`,
+            );
         } catch (error) {
             console.error('Error deleting group:', error);
             throw error;
@@ -1845,9 +2165,9 @@ export class UserManagementDynamoDBService {
     async createRole(
         roleData: Omit<Role, 'id' | 'createdAt' | 'updatedAt'> & {
             selectedAccountId?: string;
-            selectedAccountName?: string;
+            selectedAccountName?: string; // Optional - not required
             selectedEnterpriseId?: string;
-            selectedEnterpriseName?: string;
+            selectedEnterpriseName?: string; // Optional - not required
         },
     ): Promise<Role> {
         try {
@@ -1857,30 +2177,22 @@ export class UserManagementDynamoDBService {
             console.log('📋 createRole called with roleData:', {
                 name: roleData.name,
                 selectedAccountId: roleData.selectedAccountId,
-                selectedAccountName: roleData.selectedAccountName,
                 selectedEnterpriseId: roleData.selectedEnterpriseId,
-                selectedEnterpriseName: roleData.selectedEnterpriseName,
-                fullRoleData: roleData,
             });
 
-            // Determine if this is for a specific account or Systiva
-            const isAccountSpecific =
-                roleData.selectedAccountId && roleData.selectedAccountName;
+            // Determine if this is for a specific account or Systiva (only accountId required)
+            const isAccountSpecific = !!roleData.selectedAccountId;
 
             console.log('📋 isAccountSpecific check:', {
                 isAccountSpecific,
                 hasAccountId: !!roleData.selectedAccountId,
-                hasAccountName: !!roleData.selectedAccountName,
                 hasEnterpriseId: !!roleData.selectedEnterpriseId,
-                hasEnterpriseName: !!roleData.selectedEnterpriseName,
             });
 
-            // Use correct PK pattern: <ACCOUNT_NAME>#${account_Id}#ROLES
+            // Use PK pattern: ACCOUNT#<ACCOUNT_id>
             const accountPK = isAccountSpecific
-                ? `${roleData.selectedAccountName!.toUpperCase()}#${
-                      roleData.selectedAccountId
-                  }#ROLES`
-                : `SYSTIVA#systiva#ROLES`;
+                ? `ACCOUNT#${roleData.selectedAccountId}`
+                : `ACCOUNT#SYSTIVA`;
 
             console.log('📋 Using PK:', accountPK);
 
@@ -1914,7 +2226,9 @@ export class UserManagementDynamoDBService {
 
             await DynamoDBOperations.putItem(this.tableName, item);
 
-            console.log(`✅ Role created successfully with PK: ${accountPK}, Enterprise: ${roleData.selectedEnterpriseName}`);
+            console.log(
+                `✅ Role created successfully with PK: ${accountPK}, Enterprise: ${roleData.selectedEnterpriseName}`,
+            );
 
             return role;
         } catch (error) {
@@ -1932,7 +2246,12 @@ export class UserManagementDynamoDBService {
     ): Promise<Role | null> {
         try {
             // Query listRoles with account/enterprise context and filter by ID
-            const allRoles = await this.listRoles(accountId, accountName, enterpriseId, enterpriseName);
+            const allRoles = await this.listRoles(
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            );
             const role = allRoles.find((r) => r.id === roleId);
 
             if (!role) {
@@ -1954,18 +2273,20 @@ export class UserManagementDynamoDBService {
         enterpriseName?: string,
     ): Promise<Role[]> {
         try {
-            console.log(
-                '📋 Scanning DynamoDB for roles with full context',
-                {accountId, accountName, enterpriseId, enterpriseName},
-            );
+            console.log('📋 Scanning DynamoDB for roles with full context', {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
 
-            // Determine if we need to filter by account
-            const isAccountSpecific = accountId && accountName;
+            // Determine if we need to filter by account (only accountId required)
+            const isAccountSpecific = !!accountId;
 
             let items: any[];
             if (isAccountSpecific) {
-                // Query for account-specific roles using correct PK pattern
-                const accountPK = `${accountName.toUpperCase()}#${accountId}#ROLES`;
+                // Query for account-specific roles using PK pattern: ACCOUNT#<ACCOUNT_id>
+                const accountPK = `ACCOUNT#${accountId}`;
                 console.log('📋 ================================');
                 console.log('📋 Querying for account-specific roles');
                 console.log('📋 Input Parameters:', {
@@ -1986,20 +2307,27 @@ export class UserManagementDynamoDBService {
                         ':sk': 'ROLE#',
                     },
                 );
-                
-                console.log(`📋 ⚡ Query returned ${items.length} items from DynamoDB`);
+
+                console.log(
+                    `📋 ⚡ Query returned ${items.length} items from DynamoDB`,
+                );
             } else {
-                // Query for Systiva roles using correct PK pattern
+                // Query for Systiva roles using new pattern first
                 console.log('📋 Querying for Systiva roles');
-                const systivaPK = 'SYSTIVA#systiva#ROLES';
+                const newSystivaPK = 'ACCOUNT#SYSTIVA';
                 items = await DynamoDBOperations.queryItems(
                     this.tableName,
                     'PK = :pk AND begins_with(SK, :sk)',
-                    {
-                        ':pk': systivaPK,
-                        ':sk': 'ROLE#',
-                    },
+                    {':pk': newSystivaPK, ':sk': 'ROLE#'},
                 );
+                // Fallback to old pattern
+                if (!items || items.length === 0) {
+                    items = await DynamoDBOperations.queryItems(
+                        this.tableName,
+                        'PK = :pk AND begins_with(SK, :sk)',
+                        {':pk': 'SYSTIVA#systiva#ROLES', ':sk': 'ROLE#'},
+                    );
+                }
             }
 
             console.log(`📋 Found ${items.length} roles before filtering`);
@@ -2007,15 +2335,22 @@ export class UserManagementDynamoDBService {
             // Filter by enterprise if specified
             let filteredItems = items;
             if (enterpriseId && enterpriseName) {
-                console.log(`📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
-                filteredItems = items.filter(item => {
-                    const matchesEnterprise = item.enterprise_id === enterpriseId;
+                console.log(
+                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                );
+                filteredItems = items.filter((item) => {
+                    const matchesEnterprise =
+                        item.enterprise_id === enterpriseId;
                     if (!matchesEnterprise) {
-                        console.log(`📋 ❌ Filtered out role ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`);
+                        console.log(
+                            `📋 ❌ Filtered out role ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
+                        );
                     }
                     return matchesEnterprise;
                 });
-                console.log(`📋 ✅ After enterprise filter: ${filteredItems.length} roles`);
+                console.log(
+                    `📋 ✅ After enterprise filter: ${filteredItems.length} roles`,
+                );
             }
 
             const roles = filteredItems
@@ -2048,7 +2383,8 @@ export class UserManagementDynamoDBService {
         accountName: string,
     ): Promise<Role[]> {
         try {
-            const accountPK = `${accountName.toUpperCase()}#${accountId}#ROLES`;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
+            const accountPK = `ACCOUNT#${accountId}`;
 
             console.log('📋 Querying DynamoDB for account-specific roles:', {
                 accountId,
@@ -2116,14 +2452,12 @@ export class UserManagementDynamoDBService {
             console.log(`🔄 updateRole: Updating role ${roleId}`);
             console.log(`🔄 Update data:`, updates);
 
-            // Determine PK based on account context
+            // Determine PK based on account context - PK pattern: ACCOUNT#<ACCOUNT_id>
             const isAccountSpecific =
                 updates.selectedAccountId && updates.selectedAccountName;
             const pkPrefix = isAccountSpecific
-                ? `${updates.selectedAccountName!.toUpperCase()}#${
-                      updates.selectedAccountId
-                  }#ROLES`
-                : 'SYSTIVA#systiva#ROLES';
+                ? `ACCOUNT#${updates.selectedAccountId}`
+                : 'ACCOUNT#SYSTIVA';
 
             console.log(`🔄 Using PK: ${pkPrefix}`);
 
@@ -2136,10 +2470,12 @@ export class UserManagementDynamoDBService {
                 updates.selectedEnterpriseName,
             );
             if (!existingRole) {
-                console.log(`❌ Role ${roleId} not found in partition ${pkPrefix}`);
+                console.log(
+                    `❌ Role ${roleId} not found in partition ${pkPrefix}`,
+                );
                 return null;
             }
-            
+
             console.log(`✅ Found existing role:`, existingRole);
 
             // Find the PK by querying the database with correct partition
@@ -2202,11 +2538,13 @@ export class UserManagementDynamoDBService {
             }
             if (updates.selectedEnterpriseId !== undefined) {
                 updateFields.push('enterprise_id = :enterpriseId');
-                expressionAttributeValues[':enterpriseId'] = updates.selectedEnterpriseId;
+                expressionAttributeValues[':enterpriseId'] =
+                    updates.selectedEnterpriseId;
             }
             if (updates.selectedEnterpriseName !== undefined) {
                 updateFields.push('enterprise_name = :enterpriseName');
-                expressionAttributeValues[':enterpriseName'] = updates.selectedEnterpriseName;
+                expressionAttributeValues[':enterpriseName'] =
+                    updates.selectedEnterpriseName;
             }
 
             // Always ensure entity_type is set (for legacy records that might be missing it)
@@ -2285,17 +2623,24 @@ export class UserManagementDynamoDBService {
             // Delete all group-role lookups for this role
             await this.deleteAllGroupRoleLookupsForRole(roleId);
 
-            // Determine the correct PK based on account context
-            const isAccountSpecific = accountId && accountName;
+            // Determine the correct PK based on account context (only accountId required)
+            const isAccountSpecific = !!accountId;
+            // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
-                ? `${accountName.toUpperCase()}#${accountId}#ROLES`
+                ? `ACCOUNT#${accountId}`
+                : 'ACCOUNT#SYSTIVA';
+            const legacyPkPrefix = isAccountSpecific
+                ? `${
+                      accountName?.toUpperCase() || accountId
+                  }#${accountId}#ROLES`
                 : 'SYSTIVA#systiva#ROLES';
 
-            // Find the correct PK for this role
+            // Find the correct PK for this role - try both patterns
             const allRolesRaw = await withDynamoDB(async (client) => {
                 const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
 
-                const response = await client.send(
+                // Query with new pattern first: ACCOUNT#<ACCOUNT_id>
+                let response = await client.send(
                     new QueryCommand({
                         TableName: this.tableName,
                         KeyConditionExpression:
@@ -2307,12 +2652,29 @@ export class UserManagementDynamoDBService {
                     }),
                 );
 
+                // If no results, try legacy pattern
+                if (!response.Items || response.Items.length === 0) {
+                    response = await client.send(
+                        new QueryCommand({
+                            TableName: this.tableName,
+                            KeyConditionExpression:
+                                'PK = :pk AND begins_with(SK, :skPrefix)',
+                            ExpressionAttributeValues: {
+                                ':pk': legacyPkPrefix,
+                                ':skPrefix': 'ROLE#',
+                            },
+                        }),
+                    );
+                }
+
                 return response.Items || [];
             });
 
             const roleRecord = allRolesRaw.find((r) => r.id === roleId);
             if (roleRecord) {
-                console.log(`✅ Found role to delete with PK: ${roleRecord.PK}, SK: ${roleRecord.SK}`);
+                console.log(
+                    `✅ Found role to delete with PK: ${roleRecord.PK}, SK: ${roleRecord.SK}`,
+                );
                 await DynamoDBOperations.deleteItem(this.tableName, {
                     PK: roleRecord.PK,
                     SK: roleRecord.SK,
@@ -2334,9 +2696,11 @@ export class UserManagementDynamoDBService {
         groupId: string,
     ): Promise<void> {
         const now = new Date().toISOString();
+        // New pattern: USER#<accountId>#<userId>#GROUPS, GROUP#<groupId>
+        // For system users (no account), use USER#SYSTIVA#<userId>#GROUPS
         const lookupItem = {
-            PK: `SYSTIVA#${userId}`,
-            SK: `GROUP_ASSIGNMENT#${groupId}`,
+            PK: `USER#SYSTIVA#${userId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
             user_id: userId,
             group_id: groupId,
             assigned_at: now,
@@ -2350,7 +2714,7 @@ export class UserManagementDynamoDBService {
         userId: string,
         groupId: string,
         accountId: string,
-        accountName: string,
+        accountName?: string, // Optional - stored for reference
     ): Promise<void> {
         const now = new Date().toISOString();
 
@@ -2361,34 +2725,40 @@ export class UserManagementDynamoDBService {
             user_id: userId,
             group_id: groupId,
             account_id: accountId,
-            account_name: accountName,
+            account_name: accountName || '',
             assigned_at: now,
             entity_type: 'GROUP_MEMBERSHIP',
         };
         await DynamoDBOperations.putItem(this.tableName, userGroupsItem);
 
-        // Group's members relationship: PK: GROUP#${accountId}#${groupId}#MEMBERS, SK: USER#${userId}
-        const groupMembersItem = {
-            PK: `GROUP#${accountId}#${groupId}#MEMBERS`,
+        // Group's users relationship: PK: GROUP#<ACCOUNT_id>#<group_id>#USERS, SK: USER#<userID>
+        const groupUsersItem = {
+            PK: `GROUP#${accountId}#${groupId}#USERS`,
             SK: `USER#${userId}`,
             user_id: userId,
             group_id: groupId,
             account_id: accountId,
-            account_name: accountName,
+            account_name: accountName || '',
             assigned_at: now,
             entity_type: 'USER_IN_GROUP',
         };
-        await DynamoDBOperations.putItem(this.tableName, groupMembersItem);
+        await DynamoDBOperations.putItem(this.tableName, groupUsersItem);
     }
 
     private async deleteUserGroupLookup(
         userId: string,
         groupId: string,
     ): Promise<void> {
+        // Delete with new pattern
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `USER#SYSTIVA#${userId}#GROUPS`,
+            SK: `GROUP#${groupId}`,
+        }).catch(() => {});
+        // Also try old pattern for backward compatibility
         await DynamoDBOperations.deleteItem(this.tableName, {
             PK: `SYSTIVA#${userId}`,
             SK: `GROUP_ASSIGNMENT#${groupId}`,
-        });
+        }).catch(() => {});
     }
 
     private async deleteUserGroupLookupInAccount(
@@ -2402,9 +2772,9 @@ export class UserManagementDynamoDBService {
             SK: `GROUP#${groupId}`,
         });
 
-        // Delete group's members relationship
+        // Delete group's users relationship
         await DynamoDBOperations.deleteItem(this.tableName, {
-            PK: `GROUP#${accountId}#${groupId}#MEMBERS`,
+            PK: `GROUP#${accountId}#${groupId}#USERS`,
             SK: `USER#${userId}`,
         });
     }
@@ -2455,9 +2825,11 @@ export class UserManagementDynamoDBService {
         roleId: string,
     ): Promise<void> {
         const now = new Date().toISOString();
+        // New pattern: GROUP#<accountId>#<groupId>#ROLES, ROLE#<roleId>
+        // For system groups (no account), use GROUP#SYSTIVA#<groupId>#ROLES
         const lookupItem = {
-            PK: `SYSTIVA#${groupId}`,
-            SK: `ROLE_ASSIGNMENT#${roleId}`,
+            PK: `GROUP#SYSTIVA#${groupId}#ROLES`,
+            SK: `ROLE#${roleId}`,
             group_id: groupId,
             role_id: roleId,
             assigned_at: now,
@@ -2506,10 +2878,16 @@ export class UserManagementDynamoDBService {
         groupId: string,
         roleId: string,
     ): Promise<void> {
+        // Delete with new pattern
+        await DynamoDBOperations.deleteItem(this.tableName, {
+            PK: `GROUP#SYSTIVA#${groupId}#ROLES`,
+            SK: `ROLE#${roleId}`,
+        }).catch(() => {});
+        // Also try old pattern for backward compatibility
         await DynamoDBOperations.deleteItem(this.tableName, {
             PK: `SYSTIVA#${groupId}`,
             SK: `ROLE_ASSIGNMENT#${roleId}`,
-        });
+        }).catch(() => {});
     }
 
     private async deleteGroupRoleLookupInAccount(
@@ -2631,31 +3009,32 @@ export class UserManagementDynamoDBService {
     async getUserGroups(
         userId: string,
         accountId?: string,
-        accountName?: string,
+        accountName?: string, // Optional - not required
         enterpriseId?: string,
-        enterpriseName?: string,
+        enterpriseName?: string, // Optional - not required
     ): Promise<Group[]> {
         try {
-            console.log('🔍 getUserGroups called:', { 
-                userId, 
-                accountId, 
-                accountName,
+            console.log('🔍 getUserGroups called:', {
+                userId,
+                accountId,
                 enterpriseId,
-                enterpriseName 
             });
 
-            // Get user from correct table based on account context
+            // Get user from correct table based on account context (only accountId required)
             let user;
-            if (accountId && accountName) {
-                console.log('📋 Looking for user in account table:', accountName);
+            if (accountId) {
+                console.log('📋 Looking for user in account table:', accountId);
                 const users = await this.listUsersByAccount(
-                    accountId, 
-                    accountName,
-                    enterpriseId,      // ✅ Pass enterprise params
-                    enterpriseName     // ✅ Pass enterprise params
+                    accountId,
+                    undefined, // accountName not required
+                    enterpriseId,
+                    undefined, // enterpriseName not required
                 );
-                user = users.find(u => u.id === userId);
-                console.log(`📋 User found in account table:`, user ? 'YES' : 'NO');
+                user = users.find((u) => u.id === userId);
+                console.log(
+                    `📋 User found in account table:`,
+                    user ? 'YES' : 'NO',
+                );
             } else {
                 console.log('📋 Looking for user in Systiva table');
                 user = await this.getUser(userId);
@@ -2666,26 +3045,29 @@ export class UserManagementDynamoDBService {
                 return [];
             }
 
-            console.log(`📋 User has ${user.assignedGroups.length} assigned group(s):`, user.assignedGroups);
+            console.log(
+                `📋 User has ${user.assignedGroups.length} assigned group(s):`,
+                user.assignedGroups,
+            );
 
             const groups: Group[] = [];
             for (const groupId of user.assignedGroups) {
                 console.log(`🔍 Looking up group: ${groupId}`);
-                
+
                 // Try to find group with full context (account + enterprise)
                 let group = await this.getGroup(
                     groupId,
                     accountId,
                     accountName,
                     enterpriseId,
-                    enterpriseName
+                    enterpriseName,
                 );
-                
+
                 // If not found with account context, try Systiva table
                 if (!group) {
                     group = await this.getGroup(groupId);
                 }
-                
+
                 if (group) {
                     console.log(`  ✅ Found group: ${group.name}`);
                     groups.push(group);
@@ -2710,24 +3092,41 @@ export class UserManagementDynamoDBService {
         enterpriseName?: string,
     ): Promise<Role[]> {
         try {
-            console.log(`📋 getGroupRoles called for ${groupId} with context:`, {
+            console.log(
+                `📋 getGroupRoles called for ${groupId} with context:`,
+                {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                },
+            );
+
+            const group = await this.getGroup(
+                groupId,
                 accountId,
                 accountName,
                 enterpriseId,
                 enterpriseName,
-            });
-
-            const group = await this.getGroup(groupId, accountId, accountName, enterpriseId, enterpriseName);
+            );
             if (!group || !group.assignedRoles) {
                 console.log(`⚠️ Group not found or has no assigned roles`);
                 return [];
             }
 
-            console.log(`✅ Found group with ${group.assignedRoles.length} assigned role(s)`);
+            console.log(
+                `✅ Found group with ${group.assignedRoles.length} assigned role(s)`,
+            );
 
             const roles: Role[] = [];
             for (const roleId of group.assignedRoles) {
-                const role = await this.getRole(roleId, accountId, accountName, enterpriseId, enterpriseName);
+                const role = await this.getRole(
+                    roleId,
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                );
                 if (role) {
                     roles.push(role);
                 } else {
@@ -2735,7 +3134,9 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            console.log(`✅ Returning ${roles.length} role(s) for group ${groupId}`);
+            console.log(
+                `✅ Returning ${roles.length} role(s) for group ${groupId}`,
+            );
             return roles;
         } catch (error) {
             console.error('Error getting group roles:', error);
@@ -2821,22 +3222,28 @@ export class UserManagementDynamoDBService {
             });
 
             // If account context is provided, prioritize account-specific groups
-            if (accountId && accountName) {
+            if (accountId) {
                 // First, try to find group in account-specific partition
                 const accountGroup = await this.getGroup(
                     groupId,
                     accountId,
-                    accountName,
+                    undefined, // accountName not required
                     enterpriseId,
-                    enterpriseName,
+                    undefined, // enterpriseName not required
                 );
 
                 if (accountGroup) {
-                    console.log(`✅ Group found in account scope: ${accountGroup.name}`);
-                    
+                    console.log(
+                        `✅ Group found in account scope: ${accountGroup.name}`,
+                    );
+
                     // Validate enterprise match if specified
                     // Note: getGroup already filters by enterprise, but double-check here
-                    if (enterpriseId && accountGroup.enterpriseId && accountGroup.enterpriseId !== enterpriseId) {
+                    if (
+                        enterpriseId &&
+                        accountGroup.enterpriseId &&
+                        accountGroup.enterpriseId !== enterpriseId
+                    ) {
                         return {
                             isValid: false,
                             group: accountGroup,
@@ -2853,11 +3260,15 @@ export class UserManagementDynamoDBService {
                 }
 
                 // Group not found in account scope - check if it's a Systiva group
-                console.log(`⚠️  Group not found in account scope, checking Systiva...`);
+                console.log(
+                    `⚠️  Group not found in account scope, checking Systiva...`,
+                );
                 const systivaGroup = await this.getGroup(groupId);
 
                 if (systivaGroup) {
-                    console.log(`❌ Group found in SYSTIVA scope: ${systivaGroup.name}`);
+                    console.log(
+                        `❌ Group found in SYSTIVA scope: ${systivaGroup.name}`,
+                    );
                     return {
                         isValid: false,
                         group: systivaGroup,
@@ -2875,7 +3286,9 @@ export class UserManagementDynamoDBService {
                 };
             } else {
                 // No account context - only Systiva groups are valid
-                console.log(`📋 No account context - validating as Systiva group`);
+                console.log(
+                    `📋 No account context - validating as Systiva group`,
+                );
                 const systivaGroup = await this.getGroup(groupId);
 
                 if (systivaGroup) {
@@ -2898,7 +3311,9 @@ export class UserManagementDynamoDBService {
             return {
                 isValid: false,
                 group: null,
-                warning: `Error validating group: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                warning: `Error validating group: ${
+                    error instanceof Error ? error.message : 'Unknown error'
+                }`,
                 scopeType: 'not_found',
             };
         }
@@ -2916,12 +3331,15 @@ export class UserManagementDynamoDBService {
         enterpriseName?: string,
     ): Promise<Group | null> {
         try {
-            console.log(`🔍 Looking for account-specific group named "${groupName}"`, {
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-            });
+            console.log(
+                `🔍 Looking for account-specific group named "${groupName}"`,
+                {
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                },
+            );
 
             const groups = await this.listGroups(
                 accountId,
@@ -2931,18 +3349,27 @@ export class UserManagementDynamoDBService {
             );
 
             const matchingGroup = groups.find(
-                (g) => g.name === groupName || g.name.toLowerCase() === groupName.toLowerCase(),
+                (g) =>
+                    g.name === groupName ||
+                    g.name.toLowerCase() === groupName.toLowerCase(),
             );
 
             if (matchingGroup) {
-                console.log(`✅ Found account-specific alternative: ${matchingGroup.name} (${matchingGroup.id})`);
+                console.log(
+                    `✅ Found account-specific alternative: ${matchingGroup.name} (${matchingGroup.id})`,
+                );
             } else {
-                console.log(`❌ No account-specific group found with name "${groupName}"`);
+                console.log(
+                    `❌ No account-specific group found with name "${groupName}"`,
+                );
             }
 
             return matchingGroup || null;
         } catch (error) {
-            console.error('Error finding account-specific group by name:', error);
+            console.error(
+                'Error finding account-specific group by name:',
+                error,
+            );
             return null;
         }
     }

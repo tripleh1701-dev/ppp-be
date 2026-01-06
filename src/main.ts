@@ -1,5 +1,8 @@
-import 'reflect-metadata';
+// Load environment variables FIRST, before any other imports
 import * as dotenv from 'dotenv';
+dotenv.config();
+
+import 'reflect-metadata';
 import {NestFactory} from '@nestjs/core';
 import {Module} from '@nestjs/common';
 import {
@@ -60,7 +63,7 @@ import {CognitoAuthService} from './services/cognitoAuth';
 // Cognito auth service instance
 const cognitoAuth = new CognitoAuthService();
 
-dotenv.config();
+// Note: dotenv.config() is called at the top of the file before imports
 
 const STORAGE_DIR = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
@@ -1240,30 +1243,68 @@ class AccountsController {
     }
 
     @Put()
-    async update(@Body() body: any) {
-        const {id, ...rest} = body || {};
-        if (!id) return {error: 'id required'};
-
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            const updated = await accountsDynamoDB.update(id, rest); // String ID for DynamoDB
-            if (!updated) return {error: 'Not found'};
-            return updated;
+    async update(@Body() body: any, @Res() res: any) {
+        // Support both 'id' and 'accountId' for flexibility
+        const accountId = body?.id || body?.accountId;
+        if (!accountId) {
+            return res.status(HttpStatus.BAD_REQUEST).json({
+                result: 'failed',
+                msg: 'id or accountId is required',
+            });
         }
 
-        const updated = await accounts.update(Number(id), rest); // Number ID for PostgreSQL
-        if (!updated) return {error: 'Not found'};
-        return updated;
+        // Remove id/accountId from updates to avoid duplication
+        const {id, accountId: accId, ...updates} = body || {};
+
+        console.log('🔄 PUT /api/accounts - Updating account:', accountId);
+        console.log('🔄 Update payload:', JSON.stringify(updates, null, 2));
+
+        try {
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                const updated = await accountsDynamoDB.update(
+                    accountId,
+                    updates,
+                );
+                if (!updated) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        result: 'failed',
+                        msg: 'Account not found',
+                        data: {accountId},
+                    });
+                }
+                console.log('✅ Account updated successfully:', accountId);
+                return res.status(HttpStatus.OK).json({
+                    result: 'success',
+                    msg: 'Account updated successfully',
+                    data: updated,
+                });
+            }
+
+            const updated = await accounts.update(Number(accountId), updates);
+            if (!updated) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    result: 'failed',
+                    msg: 'Account not found',
+                    data: {accountId},
+                });
+            }
+            console.log('✅ Account updated successfully:', accountId);
+            return res.status(HttpStatus.OK).json({
+                result: 'success',
+                msg: 'Account updated successfully',
+                data: updated,
+            });
+        } catch (error: any) {
+            console.error('❌ Error updating account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to update account: ${error.message}`,
+            });
+        }
     }
 
-    @Delete(':id')
-    async remove(@Param('id') id: string) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            await accountsDynamoDB.remove(id); // String ID for DynamoDB
-            return {};
-        }
-        await accounts.remove(Number(id)); // Number ID for PostgreSQL
-        return {};
-    }
+    // Note: Use DELETE /api/accounts/offboard?accountId=xxx for proper deletion
+    // The @Delete(':id') handler was removed to avoid route conflicts with /offboard
 
     /**
      * Onboard a new account
@@ -1572,8 +1613,8 @@ class AccountsController {
      * Offboard (delete) an account
      * DELETE /api/accounts/offboard?accountId=xxx
      *
-     * This triggers infrastructure deprovisioning via external API
-     * and removes the account from the database
+     * This deletes the account from the local database.
+     * Infrastructure deprovisioning is handled separately if configured.
      */
     @Delete('offboard')
     async offboard(
@@ -1596,11 +1637,12 @@ class AccountsController {
             console.log('🗑️ Offboarding account:', accountId);
 
             let infraDeprovisioningResult: any = null;
-            let infraApiSuccess = false;
+            let infraApiCalled = false;
 
-            // Try infrastructure API first if configured
+            // Try infrastructure API first if configured (for infra cleanup)
             if (INFRA_PROVISIONING_API_BASE_URL) {
                 const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
+                infraApiCalled = true;
 
                 try {
                     console.log(
@@ -1630,119 +1672,67 @@ class AccountsController {
                     );
 
                     infraDeprovisioningResult = infraResponse.data;
-                    infraApiSuccess = true;
                     console.log(
-                        '✅ Infrastructure deprovisioning initiated:',
+                        '✅ Infrastructure API response:',
                         infraDeprovisioningResult,
                     );
-                    // Infrastructure API succeeded - now delete from DynamoDB
-                    try {
-                        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                            await accountsDynamoDB.remove(accountId);
-                            console.log(
-                                '✅ Account deleted from DynamoDB after successful infra deprovisioning',
-                            );
-                        } else {
-                            await accounts.remove(Number(accountId));
-                            console.log(
-                                '✅ Account deleted from local storage after successful infra deprovisioning',
-                            );
-                        }
-                    } catch (deleteError: any) {
-                        console.error(
-                            '❌ DynamoDB deletion failed after infra deprovisioning:',
-                            deleteError.message,
-                        );
-                        // Infra was deleted but DB wasn't - mark for manual cleanup
-                        return res
-                            .status(HttpStatus.INTERNAL_SERVER_ERROR)
-                            .json({
-                                result: 'partial_failure',
-                                msg: 'Infrastructure was deprovisioned but database deletion failed. Manual cleanup required.',
-                                data: {
-                                    accountId: accountId,
-                                    infraDeprovisioning:
-                                        infraDeprovisioningResult,
-                                    dbError: deleteError.message,
-                                },
-                            });
-                    }
                 } catch (infraError: any) {
                     console.error(
-                        '⚠️ Infrastructure deprovisioning failed:',
+                        '⚠️ Infrastructure deprovisioning API call failed:',
                         infraError?.response?.data || infraError.message,
                     );
                     infraDeprovisioningResult = {
-                        error: 'Infrastructure deprovisioning failed',
+                        warning: 'Infrastructure API call failed',
                         message:
                             infraError?.response?.data?.msg ||
                             infraError.message,
+                        note: 'Proceeding with local database deletion',
                     };
-
-                    // Infra API failed - mark account as "deletion_failed" for manual review
-                    // This is better than orphaning infrastructure
-                    try {
-                        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                            await accountsDynamoDB.update(accountId, {
-                                status: 'deletion_failed',
-                                provisioningState: 'deletion_failed',
-                                deletionError:
-                                    infraError?.response?.data?.msg ||
-                                    infraError.message,
-                                deletionAttemptedAt: new Date().toISOString(),
-                            } as any);
-                            console.log(
-                                '📝 Account marked as deletion_failed for manual review',
-                            );
-                        }
-                    } catch (updateError: any) {
-                        console.error(
-                            '⚠️ Failed to update account status:',
-                            updateError.message,
-                        );
-                    }
-
-                    // Return failure so user knows deletion didn't complete
-                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                        result: 'failed',
-                        msg: 'Infrastructure deprovisioning failed. Account marked for manual cleanup.',
-                        data: {
-                            accountId: accountId,
-                            infraDeprovisioning: infraDeprovisioningResult,
-                            status: 'deletion_failed',
-                        },
-                    });
+                    // Continue with local deletion even if infra API fails
                 }
             } else {
-                // Infra API not configured - delete locally only
                 console.log(
                     '⚠️ INFRA_PROVISIONING_API_URL not configured - deleting locally only',
                 );
-
-                try {
-                    if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                        await accountsDynamoDB.remove(accountId);
-                        console.log('✅ Account deleted from local DynamoDB');
-                    } else {
-                        await accounts.remove(Number(accountId));
-                        console.log('✅ Account deleted from local storage');
-                    }
-                } catch (deleteError: any) {
-                    console.error(
-                        '❌ Local deletion failed:',
-                        deleteError.message,
-                    );
-                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                        result: 'failed',
-                        msg: `Failed to delete account: ${deleteError.message}`,
-                    });
-                }
-
                 infraDeprovisioningResult = {
                     skipped: true,
                     message:
                         'Infrastructure API not configured - deleted locally only',
                 };
+            }
+
+            // ALWAYS delete from local database regardless of infra API result
+            // This ensures the account is removed from the database
+            try {
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    console.log(
+                        '🗑️ Deleting account from DynamoDB:',
+                        accountId,
+                    );
+                    await accountsDynamoDB.remove(accountId);
+                    console.log('✅ Account deleted from DynamoDB');
+                } else {
+                    console.log(
+                        '🗑️ Deleting account from local storage:',
+                        accountId,
+                    );
+                    await accounts.remove(Number(accountId));
+                    console.log('✅ Account deleted from local storage');
+                }
+            } catch (deleteError: any) {
+                console.error(
+                    '❌ Database deletion failed:',
+                    deleteError.message,
+                );
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    result: 'failed',
+                    msg: `Failed to delete account from database: ${deleteError.message}`,
+                    data: {
+                        accountId: accountId,
+                        infraDeprovisioning: infraDeprovisioningResult,
+                        dbError: deleteError.message,
+                    },
+                });
             }
 
             console.log('✅ Account offboarded successfully:', accountId);
@@ -1754,6 +1744,7 @@ class AccountsController {
                     accountId: accountId,
                     deletedAt: new Date().toISOString(),
                     infraDeprovisioning: infraDeprovisioningResult,
+                    infraApiCalled: infraApiCalled,
                 },
             });
         } catch (error: any) {
@@ -6720,9 +6711,7 @@ class UserManagementController {
     @Get('users')
     async listUsers(
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
@@ -6734,59 +6723,47 @@ class UserManagementController {
             '📋 GET /api/user-management/users called with query params:',
             {
                 accountId,
-                accountName,
                 enterpriseId,
-                enterpriseName,
             },
         );
 
-        // Check if account context is provided
-        const hasAccountContext = accountId && accountName;
+        // Check if account context is provided (only accountId required)
+        const hasAccountContext = !!accountId;
 
         if (hasAccountContext) {
-            console.log(
-                `✅ Listing users for account: ${accountName} (${accountId})`,
-            );
-            if (enterpriseId && enterpriseName) {
-                console.log(
-                    `   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
-                );
+            console.log(`✅ Listing users for accountId: ${accountId}`);
+            if (enterpriseId) {
+                console.log(`   Filtering by enterpriseId: ${enterpriseId}`);
             }
 
             const users = await userManagement.listUsersByAccount(
                 accountId,
-                accountName,
+                undefined, // accountName not required
                 enterpriseId, // Pass enterprise filter
-                enterpriseName, // Pass enterprise filter
+                undefined, // enterpriseName not required
             );
 
             // Fetch assigned groups for each user
             const usersWithGroups = await Promise.all(
                 users.map(async (user: any) => {
                     try {
-                        // IMPORTANT: Use the account/enterprise from the user record itself
-                        // Not from the query parameters, as they might differ
+                        // Use accountId/enterpriseId from the user record or query params
                         const userAccountId = user.accountId || accountId;
-                        const userAccountName = user.accountName || accountName;
                         const userEnterpriseId =
                             user.enterpriseId || enterpriseId;
-                        const userEnterpriseName =
-                            user.enterpriseName || enterpriseName;
 
                         console.log(`🔍 Fetching groups for user ${user.id}:`, {
                             userAccountId,
-                            userAccountName,
                             userEnterpriseId,
-                            userEnterpriseName,
                         });
 
                         const assignedGroups =
                             await userManagement.getUserGroups(
                                 user.id,
-                                userAccountId, // Use user's account context
-                                userAccountName, // Use user's account context
-                                userEnterpriseId, // Use user's enterprise context
-                                userEnterpriseName, // Use user's enterprise context
+                                userAccountId,
+                                undefined, // accountName not required
+                                userEnterpriseId,
+                                undefined, // enterpriseName not required
                             );
 
                         console.log(
@@ -6847,24 +6824,20 @@ class UserManagementController {
 
         console.log('💾 POST /api/user-management/users called with body:', {
             accountId: body.accountId,
-            accountName: body.accountName,
             enterpriseId: body.enterpriseId,
-            enterpriseName: body.enterpriseName,
             firstName: body.firstName,
             lastName: body.lastName,
             emailAddress: body.emailAddress,
         });
 
-        // Check if account context is provided
-        const hasAccountContext = body.accountId && body.accountName;
+        // Check if account context is provided (only accountId required)
+        const hasAccountContext = !!body.accountId;
 
         if (hasAccountContext) {
-            console.log(
-                `✅ Creating user in account table: ${body.accountName} (${body.accountId})`,
-            );
-            console.log(
-                `   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`,
-            );
+            console.log(`✅ Creating user in account table: ${body.accountId}`);
+            if (body.enterpriseId) {
+                console.log(`   EnterpriseId: ${body.enterpriseId}`);
+            }
 
             // Prepare user data for account-specific creation (include enterprise context)
             const userPayload = {
@@ -6885,14 +6858,14 @@ class UserManagementController {
                           (group: any) => group.id || group,
                       )
                     : [],
-                enterpriseId: body.enterpriseId, // Pass enterprise context
-                enterpriseName: body.enterpriseName, // Pass enterprise context
+                enterpriseId: body.enterpriseId, // Pass enterprise context (optional)
+                enterpriseName: body.enterpriseName, // Pass enterprise context (optional)
             };
 
             return await userManagement.createUserInAccountTable(
                 userPayload,
                 body.accountId,
-                body.accountName,
+                body.accountName, // Optional - can be undefined
             );
         } else {
             console.log(
@@ -8278,24 +8251,31 @@ async function bootstrap() {
             console.log('Testing DynamoDB connection...');
             const dynamoConnected = await testDynamoDBConnection();
             if (!dynamoConnected) {
-                console.error(
-                    'Failed to connect to DynamoDB. Please check your AWS configuration and table setup.',
+                console.warn(
+                    '⚠️ DynamoDB connection test failed. Some tables may not exist yet.',
                 );
-                console.error('Required environment variables:');
-                console.error('- AWS_REGION (default: us-east-1)');
-                console.error('- AWS_ACCESS_KEY_ID (if not using IAM roles)');
-                console.error(
+                console.warn('This is OK if you are using specific tables.');
+                console.warn(
+                    'Required environment variables for full DynamoDB:',
+                );
+                console.warn('- AWS_REGION (default: us-east-1)');
+                console.warn('- AWS_ACCESS_KEY_ID (if not using IAM roles)');
+                console.warn(
                     '- AWS_SECRET_ACCESS_KEY (if not using IAM roles)',
                 );
-                console.error(
+                console.warn(
                     '- DYNAMODB_ENTERPRISE_TABLE (default: EnterpriseConfig)',
                 );
-                console.error(
+                console.warn(
                     '- DYNAMODB_ENDPOINT (optional, for local DynamoDB)',
                 );
-                process.exit(1);
+                // Don't exit - allow app to continue with available tables
+                console.warn(
+                    '⚠️ Continuing anyway - specific table operations may work.',
+                );
+            } else {
+                console.log('DynamoDB connection successful!');
             }
-            console.log('DynamoDB connection successful!');
         }
 
         // Services are already initialized at module load time
@@ -8349,8 +8329,11 @@ async function bootstrap() {
         // Validate password encryption configuration
         console.log('🔐 Validating password encryption configuration...');
         if (!validatePasswordEncryptionConfig()) {
-            console.error('❌ Password encryption configuration is invalid!');
-            process.exit(1);
+            console.warn('⚠️ Password encryption configuration is invalid!');
+            console.warn(
+                '⚠️ User password operations will fail. Set PASSWORD_ENCRYPTION_KEY env variable.',
+            );
+            console.warn('⚠️ Continuing anyway - other APIs should work.');
         }
 
         // Create the NestJS application
@@ -8401,6 +8384,46 @@ async function bootstrap() {
 
         // SECURITY: Apply general rate limiting to all API routes
         app.use('/api', apiRateLimiter);
+
+        // AUDIT: Add middleware to extract user info from JWT and set audit context
+        const {runWithAuditContext} = require('./dynamodb');
+        const jwt = require('jsonwebtoken');
+        app.use((req: any, res: any, next: any) => {
+            // Extract user info from JWT token for audit columns
+            let auditContext: any = {userId: 'system', username: 'system'};
+
+            const authHeader = req.headers?.authorization || '';
+            if (authHeader.startsWith('Bearer ')) {
+                try {
+                    const token = authHeader.substring(7);
+                    // Decode without verification to extract user info (verification happens elsewhere)
+                    const decoded: any = jwt.decode(token);
+                    if (decoded) {
+                        auditContext = {
+                            userId:
+                                decoded.sub ||
+                                decoded.userId ||
+                                decoded.user_id ||
+                                decoded.email ||
+                                'system',
+                            username:
+                                decoded.username ||
+                                decoded.email ||
+                                decoded.name ||
+                                'system',
+                            email: decoded.email || '',
+                        };
+                    }
+                } catch (e) {
+                    // Failed to decode token - use default system user
+                }
+            }
+
+            // Run the rest of the request with audit context
+            runWithAuditContext(auditContext, () => {
+                next();
+            });
+        });
 
         // Skip seeding - using existing fnd_ tables
         console.log('Using existing database schema with fnd_ tables...');

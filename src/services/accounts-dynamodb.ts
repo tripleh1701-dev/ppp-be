@@ -30,6 +30,11 @@ export interface Account {
     licenses?: any[];
     createdAt?: string;
     updatedAt?: string;
+    // Audit columns
+    CREATED_BY?: string | number | null;
+    CREATION_DATE?: string | null;
+    LAST_UPDATED_BY?: string | number | null;
+    LAST_UPDATE_DATE?: string | null;
 }
 
 export interface TechnicalUser {
@@ -129,22 +134,31 @@ export class AccountsDynamoDBService {
                     try {
                         // Skip if account already has licenses array populated
                         if (account.licenses && account.licenses.length > 0) {
-                            console.log(`📋 Account ${account.accountName} already has ${account.licenses.length} licenses`);
+                            console.log(
+                                `📋 Account ${account.accountName} already has ${account.licenses.length} licenses`,
+                            );
                             return account;
                         }
 
                         // Fetch licenses separately for this account
-                        const licenses = await this.listLicenses(account.id || account.accountId);
-                        console.log(`📋 Fetched ${licenses.length} licenses for account ${account.accountName}`);
+                        const licenses = await this.listLicenses(
+                            account.id || account.accountId,
+                        );
+                        console.log(
+                            `📋 Fetched ${licenses.length} licenses for account ${account.accountName}`,
+                        );
                         return {
                             ...account,
                             licenses: licenses,
                         };
                     } catch (error) {
-                        console.warn(`⚠️ Could not fetch licenses for account ${account.accountName}:`, error);
+                        console.warn(
+                            `⚠️ Could not fetch licenses for account ${account.accountName}:`,
+                            error,
+                        );
                         return account;
                     }
-                })
+                }),
             );
 
             // Sort by account name and return
@@ -344,6 +358,11 @@ export class AccountsDynamoDBService {
                             item.lastModified ||
                             item.updatedAt ||
                             item.updated_date,
+                        // Audit columns
+                        CREATED_BY: item.CREATED_BY || null,
+                        CREATION_DATE: item.CREATION_DATE || null,
+                        LAST_UPDATED_BY: item.LAST_UPDATED_BY || null,
+                        LAST_UPDATE_DATE: item.LAST_UPDATE_DATE || null,
                     };
                 } catch (mapError) {
                     console.error(
@@ -393,6 +412,27 @@ export class AccountsDynamoDBService {
                 });
             }
 
+            // Fallback to numeric ID format: PK = accountId, SK = accountId
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: accountId,
+                    SK: accountId,
+                });
+            }
+
+            // Final fallback: scan and find by accountId field (for legacy data)
+            if (!item) {
+                console.log('🔍 Trying scan fallback for legacy account...');
+                const allItems = await DynamoDBOperations.scanItems(
+                    this.tableName,
+                );
+                item = allItems?.find(
+                    (i: any) =>
+                        i.accountId === accountId &&
+                        (i.entityType === 'ACCOUNT' || i.accountName),
+                );
+            }
+
             if (!item) {
                 console.log('❌ Account not found:', accountId);
                 return null;
@@ -424,8 +464,13 @@ export class AccountsDynamoDBService {
 
             // Build technicalUsers array from stored data or single technicalUser
             let technicalUsers = item.technicalUsers || [];
-            if (technicalUsers.length === 0 && (item.technicalUser || technicalUser)) {
-                technicalUsers = [item.technicalUser || technicalUser].filter(Boolean);
+            if (
+                technicalUsers.length === 0 &&
+                (item.technicalUser || technicalUser)
+            ) {
+                technicalUsers = [item.technicalUser || technicalUser].filter(
+                    Boolean,
+                );
             }
 
             return {
@@ -449,6 +494,11 @@ export class AccountsDynamoDBService {
                 licenses: licenses || [],
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
+                // Audit columns
+                CREATED_BY: item.CREATED_BY || null,
+                CREATION_DATE: item.CREATION_DATE || null,
+                LAST_UPDATED_BY: item.LAST_UPDATED_BY || null,
+                LAST_UPDATE_DATE: item.LAST_UPDATE_DATE || null,
             };
         } catch (error) {
             console.error('❌ Error getting account:', error);
@@ -458,8 +508,14 @@ export class AccountsDynamoDBService {
 
     async create(accountData: Omit<Account, 'id'>): Promise<Account> {
         try {
-            const accountId = uuidv4();
-            const now = new Date().toISOString();
+            // Generate short numeric ID (YYMMDD + 2-digit random) for consistency
+            const now = new Date();
+            const dateStr = now.toISOString().slice(2, 10).replace(/-/g, ''); // YYMMDD
+            const randomSuffix = Math.floor(Math.random() * 99)
+                .toString()
+                .padStart(2, '0');
+            const accountId = `${dateStr}${randomSuffix}`;
+            const nowIso = now.toISOString();
 
             console.log(
                 '🆕 Creating new account with ID:',
@@ -533,10 +589,10 @@ export class AccountsDynamoDBService {
                 status: (accountData as any).status || 'Active',
                 provisioningState: 'active',
                 entityType: 'ACCOUNT',
-                registeredOn: now,
-                createdAt: now,
-                lastModified: now,
-                updatedAt: now,
+                registeredOn: nowIso,
+                createdAt: nowIso,
+                lastModified: nowIso,
+                updatedAt: nowIso,
             };
 
             console.log(
@@ -584,8 +640,8 @@ export class AccountsDynamoDBService {
                 technicalUsername: technicalUsername || '',
                 technicalUserId: technicalUserId,
                 licenses: licenses,
-                createdAt: now,
-                updatedAt: now,
+                createdAt: nowIso,
+                updatedAt: nowIso,
             };
         } catch (error) {
             console.error('❌ Error creating account:', error);
@@ -606,12 +662,28 @@ export class AccountsDynamoDBService {
 
             const now = new Date().toISOString();
 
-            // Get existing account first
-            const existingAccount = await this.get(accountId);
-            if (!existingAccount) {
+            // Find the actual record to get its PK/SK (for legacy format support)
+            const allItems = await DynamoDBOperations.scanItems(
+                this.accountRegistryTable,
+            );
+            const existingItem = allItems?.find(
+                (i: any) =>
+                    (i.accountId === accountId || i.id === accountId) &&
+                    (i.entityType === 'ACCOUNT' || i.accountName),
+            );
+
+            if (!existingItem) {
                 console.log('❌ Account not found, cannot update:', accountId);
                 return null;
             }
+
+            // Get the actual PK and SK from the existing item
+            const actualPK = existingItem.PK || `ACCOUNT#${accountId}`;
+            const actualSK = existingItem.SK || `ACCOUNT#${accountId}`;
+            console.log('📋 Found existing account with key:', {
+                PK: actualPK,
+                SK: actualSK,
+            });
 
             const updateFields: string[] = [];
             const expressionAttributeValues: any = {
@@ -620,17 +692,21 @@ export class AccountsDynamoDBService {
             const expressionAttributeNames: any = {};
 
             // Only update account-level fields (not licenses - those are separate entities)
+            // Update BOTH camelCase and snake_case versions for compatibility with different record formats
             if (updates.accountName !== undefined) {
+                updateFields.push('accountName = :accountName');
                 updateFields.push('#account_name = :accountName');
                 expressionAttributeValues[':accountName'] = updates.accountName;
                 expressionAttributeNames['#account_name'] = 'account_name';
             }
             if (updates.masterAccount !== undefined) {
+                updateFields.push('masterAccount = :masterAccount');
                 updateFields.push('master_account = :masterAccount');
                 expressionAttributeValues[':masterAccount'] =
                     updates.masterAccount;
             }
             if (updates.cloudType !== undefined) {
+                updateFields.push('cloudType = :cloudType');
                 updateFields.push('cloud_type = :cloudType');
                 expressionAttributeValues[':cloudType'] = updates.cloudType;
             }
@@ -655,11 +731,15 @@ export class AccountsDynamoDBService {
             // Handle technicalUsers array
             if ((updates as any).technicalUsers !== undefined) {
                 updateFields.push('technicalUsers = :technicalUsers');
-                expressionAttributeValues[':technicalUsers'] = (updates as any).technicalUsers;
+                expressionAttributeValues[':technicalUsers'] = (
+                    updates as any
+                ).technicalUsers;
                 // Also update the first technical user for backward compatibility
                 if ((updates as any).technicalUsers?.length > 0) {
                     updateFields.push('technicalUser = :technicalUser');
-                    expressionAttributeValues[':technicalUser'] = (updates as any).technicalUsers[0];
+                    expressionAttributeValues[':technicalUser'] = (
+                        updates as any
+                    ).technicalUsers[0];
                     updateFields.push('technicalUsername = :technicalUsername');
                     expressionAttributeValues[':technicalUsername'] =
                         (updates as any).technicalUsers[0]?.adminUsername || '';
@@ -697,22 +777,23 @@ export class AccountsDynamoDBService {
                 return await this.get(accountId);
             }
 
+            // Update all timestamp formats for compatibility
             const updateExpression = `SET ${updateFields.join(
                 ', ',
-            )}, updated_date = :updated`;
+            )}, updated_date = :updated, updatedAt = :updated, lastModified = :updated`;
 
             console.log('📝 DynamoDB UpdateCommand:', {
                 TableName: this.accountRegistryTable,
-                Key: {PK: `ACCOUNT#${accountId}`, SK: `ACCOUNT#${accountId}`},
+                Key: {PK: actualPK, SK: actualSK},
                 UpdateExpression: updateExpression,
             });
 
-            // Use accountRegistryTable (same table as create and list)
+            // Use accountRegistryTable with the actual key from the existing record
             await DynamoDBOperations.updateItem(
                 this.accountRegistryTable,
                 {
-                    PK: `ACCOUNT#${accountId}`,
-                    SK: `ACCOUNT#${accountId}`,
+                    PK: actualPK,
+                    SK: actualSK,
                 },
                 updateExpression,
                 expressionAttributeValues,
