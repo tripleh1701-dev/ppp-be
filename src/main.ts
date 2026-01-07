@@ -1,5 +1,9 @@
-import 'reflect-metadata';
+// Load environment variables FIRST, before any other imports
 import * as dotenv from 'dotenv';
+dotenv.config();
+
+import 'reflect-metadata';
+
 import {NestFactory} from '@nestjs/core';
 import {Module} from '@nestjs/common';
 import {
@@ -11,6 +15,7 @@ import {
     Param,
     Body,
     Query,
+    Req,
     Res,
     HttpStatus,
     Patch,
@@ -54,6 +59,17 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
+// import {CognitoAuthService} from './services/cognitoAuth';
+
+// Cognito auth service instance
+// const cognitoAuth = new CognitoAuthService();
+const cognitoAuth: any = {
+    isAvailable: () => false,
+    login: async () => ({error: 'CognitoAuthService not available'}),
+    completeNewPasswordChallenge: async () => ({error: 'CognitoAuthService not available'}),
+};
+
+// Note: dotenv.config() is called at the top of the file before imports
 import {fetchGitHubRepositories, fetchGitHubBranches} from './utils/githubApiClient';
 
 dotenv.config();
@@ -95,12 +111,34 @@ try {
     GEO_DATA = {};
 }
 
+// Initialize storage mode from environment variables immediately
+// This must happen before services are used by controllers
+const storageMode: string = process.env.STORAGE_MODE || 'dynamodb';
+
+// Infrastructure provisioning API URL (for account onboarding/offboarding)
+// This should be set via environment variable in deployment
+const INFRA_PROVISIONING_API_BASE_URL =
+    process.env.INFRA_PROVISIONING_API_URL || '';
+
+console.log('🔧 Storage mode (from env):', storageMode);
+console.log('🔧 Environment variables at load time:', {
+    STORAGE_MODE: process.env.STORAGE_MODE,
+    NODE_ENV: process.env.NODE_ENV,
+    WORKSPACE: process.env.WORKSPACE,
+    ACCOUNT_REGISTRY_TABLE_NAME: process.env.ACCOUNT_REGISTRY_TABLE_NAME,
+    DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+    INFRA_PROVISIONING_API_URL: INFRA_PROVISIONING_API_BASE_URL
+        ? '***configured***'
+        : 'NOT SET',
+});
+
 // Providers (plain classes)
 const accounts = new AccountsService(STORAGE_DIR);
-let accountsDynamoDB: AccountsDynamoDBService | null = null;
 
-// Global service variables - will be initialized in bootstrap after env vars are loaded
-let storageMode: string;
+// Initialize DynamoDB services immediately based on storage mode
+// This ensures they are available when controllers are instantiated
+// Using definite assignment assertion (!) to indicate these will be initialized before use
+let accountsDynamoDB: AccountsDynamoDBService;
 let enterprises: any;
 
 const businessUnits = new BusinessUnitsService(STORAGE_DIR);
@@ -116,9 +154,43 @@ let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
 let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
 let globalSettings: GlobalSettingsDynamoDBService;
-let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService | null = null;
-let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService | null = null;
-let buildsDynamoDB: BuildsDynamoDBService | null = null;
+let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService;
+let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService;
+let buildsDynamoDB: BuildsDynamoDBService;
+
+// Initialize services based on storage mode at module load time
+if (storageMode === 'dynamodb') {
+    console.log('🔧 Initializing DynamoDB services at module load...');
+    try {
+        accountsDynamoDB = new AccountsDynamoDBService();
+        enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
+        services = new ServicesDynamoDBService(STORAGE_DIR);
+        products = new ProductsDynamoDBService(STORAGE_DIR);
+        enterpriseProductsServices =
+            new EnterpriseProductsServicesDynamoDBService(STORAGE_DIR);
+        accountLicenses = new AccountLicensesDynamoDBService();
+        userManagement = new UserManagementDynamoDBService();
+        AccessControl_Service = new AccessControl_DynamoDBService();
+        environments = new EnvironmentsDynamoDBService();
+        globalSettings = new GlobalSettingsDynamoDBService();
+        pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
+        buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
+        buildsDynamoDB = new BuildsDynamoDBService();
+        console.log('✅ DynamoDB services initialized successfully');
+    } catch (error) {
+        console.error('❌ Failed to initialize DynamoDB services:', error);
+    }
+} else {
+    console.log('🔧 Using filesystem/postgres services');
+    enterprises = new EnterprisesService(STORAGE_DIR);
+    services = new ServicesService(STORAGE_DIR);
+    products = new ProductsService(STORAGE_DIR);
+    enterpriseProductsServices = new EnterpriseProductsServicesService(
+        STORAGE_DIR,
+    );
+    environments = new EnvironmentsService(STORAGE_DIR);
+}
+
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
 const userGroups = new UserGroupsService(STORAGE_DIR);
@@ -139,24 +211,92 @@ class AuthController {
     @Post('login')
     async login(@Body() body: any, @Res() res: any) {
         try {
-            const {email, password} = body;
+            const {email, password, username} = body;
+            const loginId = username || email; // Support both email and username
 
-            if (!email || !password) {
+            if (!loginId || !password) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
-                    error: 'Email and password are required',
+                    error: 'Email/username and password are required',
                 });
             }
 
-            // Use userManagement service for authentication
+            // Try Cognito authentication first (if IMS_API_URL is configured)
+            if (cognitoAuth.isAvailable()) {
+                console.log('Attempting Cognito authentication via IMS...');
+                const cognitoResult = await cognitoAuth.login(
+                    loginId,
+                    password,
+                );
+
+                // Handle NEW_PASSWORD_REQUIRED challenge
+                if (cognitoResult.requiresPasswordChange) {
+                    return res.status(HttpStatus.OK).json({
+                        success: false,
+                        requiresPasswordChange: true,
+                        challengeName: cognitoResult.challengeName,
+                        session: cognitoResult.session,
+                        message:
+                            cognitoResult.message ||
+                            'Password change required on first login',
+                        data: {
+                            user: {
+                                id: cognitoResult.user?.username || loginId,
+                                emailAddress:
+                                    cognitoResult.user?.email || loginId,
+                                firstName: '',
+                                lastName: '',
+                            },
+                        },
+                    });
+                }
+
+                if (cognitoResult.success && cognitoResult.tokens) {
+                    const user = cognitoResult.user;
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        data: {
+                            user: {
+                                id: user?.username || loginId,
+                                firstName:
+                                    user?.username?.split('@')[0] || 'User',
+                                middleName: '',
+                                lastName: '',
+                                emailAddress: user?.email || loginId,
+                                status: 'active',
+                                technicalUser: false,
+                                role: user?.userRoles?.[0] || 'User',
+                                tenantId: user?.tenantId,
+                                permissions: user?.permissions || [],
+                                groups: user?.groups || [],
+                            },
+                            token: cognitoResult.tokens.AccessToken,
+                            refreshToken: cognitoResult.tokens.RefreshToken,
+                            idToken: cognitoResult.tokens.IdToken,
+                            expiresIn: cognitoResult.tokens.ExpiresIn,
+                        },
+                    });
+                }
+
+                // Cognito auth failed - return error (don't fallback to local auth)
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    error: cognitoResult.error || 'Invalid email or password',
+                });
+            }
+
+            // Fallback: Use local DynamoDB authentication
             if (storageMode !== 'dynamodb' || !userManagement) {
                 return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
                     success: false,
-                    error: 'Authentication service not available',
+                    error: 'Authentication service not available. Configure IMS_API_URL for Cognito auth.',
                 });
             }
 
-            const user = await userManagement.authenticateUser(email, password);
+            const user = await userManagement.authenticateUser(
+                loginId,
+                password,
+            );
 
             if (!user) {
                 return res.status(HttpStatus.UNAUTHORIZED).json({
@@ -218,6 +358,72 @@ class AuthController {
         }
     }
 
+    @Post('complete-password-challenge')
+    async completePasswordChallenge(@Body() body: any, @Res() res: any) {
+        try {
+            const {username, email, newPassword, session} = body;
+            const loginId = username || email;
+
+            if (!loginId || !newPassword || !session) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Username, new password, and session are required',
+                });
+            }
+
+            if (!cognitoAuth.isAvailable()) {
+                return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+                    success: false,
+                    error: 'Cognito authentication not configured',
+                });
+            }
+
+            const result = await cognitoAuth.completeNewPasswordChallenge(
+                loginId,
+                newPassword,
+                session,
+            );
+
+            if (result.success && result.tokens) {
+                const user = result.user;
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    message: 'Password updated successfully',
+                    data: {
+                        user: {
+                            id: user?.username || loginId,
+                            firstName: user?.username?.split('@')[0] || 'User',
+                            middleName: '',
+                            lastName: '',
+                            emailAddress: user?.email || loginId,
+                            status: 'active',
+                            technicalUser: false,
+                            role: user?.userRoles?.[0] || 'User',
+                            tenantId: user?.tenantId,
+                            permissions: user?.permissions || [],
+                            groups: user?.groups || [],
+                        },
+                        token: result.tokens.AccessToken,
+                        refreshToken: result.tokens.RefreshToken,
+                        idToken: result.tokens.IdToken,
+                        expiresIn: result.tokens.ExpiresIn,
+                    },
+                });
+            }
+
+            return res.status(HttpStatus.BAD_REQUEST).json({
+                success: false,
+                error: result.error || 'Failed to update password',
+            });
+        } catch (error) {
+            safeConsoleError('Error completing password challenge', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: 'Failed to update password',
+            });
+        }
+    }
+
     @Post('logout')
     async logout(@Res() res: any) {
         // In a real implementation, invalidate the token
@@ -258,7 +464,8 @@ class OAuthController {
                     'GitHub OAuth Client ID is not configured. Please configure GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables.',
                 setupInstructions: {
                     step1: 'Create a GitHub OAuth App at https://github.com/settings/developers',
-                    step2: 'Set Authorization callback URL to: ' +
+                    step2:
+                        'Set Authorization callback URL to: ' +
                         (process.env.APP_BASE_URL || 'http://localhost:3000') +
                         '/security-governance/credentials/github/oauth2/callback',
                     step3: 'Copy the Client ID and Client Secret',
@@ -280,8 +487,7 @@ class OAuthController {
      */
     @Get('github/setup-instructions')
     async getSetupInstructions(@Res() res: any) {
-        const appBaseUrl =
-            process.env.APP_BASE_URL || 'http://localhost:3000';
+        const appBaseUrl = process.env.APP_BASE_URL || 'http://localhost:3000';
         const callbackUrl = `${appBaseUrl}/security-governance/credentials/github/oauth2/callback`;
 
         return res.status(HttpStatus.OK).json({
@@ -399,7 +605,9 @@ APP_BASE_URL=${appBaseUrl}`,
                         <script>
                             // Close window if opened as popup, otherwise redirect
                             if (window.opener) {
-                                window.opener.postMessage({ type: 'oauth-error', error: '${error}', errorDescription: '${errorDescription || ''}' }, '*');
+                                window.opener.postMessage({ type: 'oauth-error', error: '${error}', errorDescription: '${
+                    errorDescription || ''
+                }' }, '*');
                                 window.close();
                             } else {
                                 setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -499,7 +707,11 @@ APP_BASE_URL=${appBaseUrl}`,
             } = tokenResponse.data;
 
             if (tokenError) {
-                console.error('GitHub OAuth token error:', tokenError, tokenErrorDescription);
+                console.error(
+                    'GitHub OAuth token error:',
+                    tokenError,
+                    tokenErrorDescription,
+                );
                 return res.status(HttpStatus.BAD_REQUEST).send(`
                     <!DOCTYPE html>
                     <html>
@@ -512,10 +724,16 @@ APP_BASE_URL=${appBaseUrl}`,
                     </head>
                     <body>
                         <h1 class="error">Token Exchange Failed</h1>
-                        <p>${tokenErrorDescription || tokenError || 'Failed to exchange authorization code'}</p>
+                        <p>${
+                            tokenErrorDescription ||
+                            tokenError ||
+                            'Failed to exchange authorization code'
+                        }</p>
                         <script>
                             if (window.opener) {
-                                window.opener.postMessage({ type: 'oauth-error', error: '${tokenError}', errorDescription: '${tokenErrorDescription || ''}' }, '*');
+                                window.opener.postMessage({ type: 'oauth-error', error: '${tokenError}', errorDescription: '${
+                    tokenErrorDescription || ''
+                }' }, '*');
                                 window.close();
                             } else {
                                 setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -657,7 +875,9 @@ APP_BASE_URL=${appBaseUrl}`,
                     <p>${error.message || 'Failed to process authorization'}</p>
                     <script>
                         if (window.opener) {
-                            window.opener.postMessage({ type: 'oauth-error', error: 'server_error', errorDescription: '${error.message || ''}' }, '*');
+                            window.opener.postMessage({ type: 'oauth-error', error: 'server_error', errorDescription: '${
+                                error.message || ''
+                            }' }, '*');
                             window.close();
                         } else {
                             setTimeout(() => window.location.href = '/security-governance/credentials', 3000);
@@ -668,7 +888,6 @@ APP_BASE_URL=${appBaseUrl}`,
             `);
         }
     }
-
 }
 
 @Controller('api')
@@ -1437,8 +1656,12 @@ class ConnectorsController {
                 success: false,
                 status: 'failed',
                 connected: false,
-                message: 'An unexpected error occurred while processing the request',
-                error: process.env.NODE_ENV === 'development' ? error.message : undefined
+                message:
+                    'An unexpected error occurred while processing the request',
+                error:
+                    process.env.NODE_ENV === 'development'
+                        ? error.message
+                        : undefined,
             });
         }
     }
@@ -2048,10 +2271,25 @@ class ConnectorsController {
 class AccountsController {
     @Get()
     async list() {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.list();
+        try {
+            console.log('📋 GET /api/accounts - storageMode:', storageMode);
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                console.log('📋 Using DynamoDB service to list accounts');
+                const result = await accountsDynamoDB.list();
+                console.log('✅ Listed', result?.length || 0, 'accounts');
+                return result;
+            }
+            console.log('📋 Using filesystem service to list accounts');
+            return await accounts.list();
+        } catch (error: any) {
+            console.error('❌ Error listing accounts:', error);
+            return {
+                error: 'Failed to list accounts',
+                message: error?.message || 'Unknown error',
+                stack:
+                    process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
+            };
         }
-        return await accounts.list();
     }
 
     @Get(':id')
@@ -2064,36 +2302,748 @@ class AccountsController {
 
     @Post()
     async create(@Body() body: any) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.create(body);
+        try {
+            console.log(
+                '📝 POST /api/accounts - Creating account:',
+                body?.accountName,
+            );
+
+            let result: any;
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                result = await accountsDynamoDB.create(body);
+                console.log('✅ Account created:', result?.id);
+            } else {
+                result = await accounts.create(body);
+            }
+
+            const createdAccountId = result?.id || result?.accountId;
+
+            // Create technical users in User Management table after successful account creation
+            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+            const createdTechnicalUsers: any[] = [];
+            if (
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0 &&
+                createdAccountId &&
+                storageMode === 'dynamodb' &&
+                userManagement
+            ) {
+                console.log(
+                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${createdAccountId}`,
+                );
+
+                for (const techUser of body.technicalUsers) {
+                    try {
+                        // Map technical user fields to User format
+                        const userPayload = {
+                            firstName:
+                                techUser.firstName || techUser.first_name || '',
+                            middleName:
+                                techUser.middleName ||
+                                techUser.middle_name ||
+                                '',
+                            lastName:
+                                techUser.lastName || techUser.last_name || '',
+                            emailAddress:
+                                techUser.adminEmail ||
+                                techUser.email ||
+                                techUser.emailAddress ||
+                                '',
+                            password:
+                                techUser.adminPassword ||
+                                techUser.password ||
+                                'TempPass123!',
+                            status:
+                                techUser.status === true
+                                    ? 'Active'
+                                    : techUser.status === false
+                                    ? 'Inactive'
+                                    : techUser.status || 'Active',
+                            startDate:
+                                techUser.assignmentStartDate ||
+                                techUser.startDate ||
+                                new Date().toISOString(),
+                            endDate:
+                                techUser.assignmentEndDate ||
+                                techUser.endDate ||
+                                '',
+                            technicalUser: true, // Mark as technical user
+                            assignedGroups: techUser.assignedUserGroup
+                                ? [techUser.assignedUserGroup]
+                                : [],
+                        };
+
+                        console.log(
+                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
+                        );
+
+                        // Use userManagement to create user with proper PK/SK structure
+                        const createdUser =
+                            await userManagement.createUserInAccountTable(
+                                userPayload,
+                                createdAccountId,
+                                body.accountName || '',
+                            );
+                        console.log(
+                            `✅ Technical user created with ID: ${createdUser.id}`,
+                        );
+                        createdTechnicalUsers.push(createdUser);
+                    } catch (userError: any) {
+                        console.error(
+                            `❌ Failed to create technical user:`,
+                            userError.message,
+                        );
+                        // Continue with other users even if one fails
+                    }
+                }
+
+                console.log(
+                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
+                );
+            }
+
+            return {
+                ...result,
+                technicalUsersCreated: createdTechnicalUsers.length,
+            };
+        } catch (error: any) {
+            console.error('❌ Error creating account:', error);
+            return {
+                error: 'Failed to create account',
+                message: error?.message || 'Unknown error',
+            };
         }
-        return await accounts.create(body);
     }
 
     @Put()
-    async update(@Body() body: any) {
-        const {id, ...rest} = body || {};
-        if (!id) return {error: 'id required'};
-
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            const updated = await accountsDynamoDB.update(id, rest); // String ID for DynamoDB
-            if (!updated) return {error: 'Not found'};
-            return updated;
+    async update(@Body() body: any, @Res() res: any) {
+        // Support both 'id' and 'accountId' for flexibility
+        const accountId = body?.id || body?.accountId;
+        if (!accountId) {
+            return res.status(HttpStatus.BAD_REQUEST).json({
+                result: 'failed',
+                msg: 'id or accountId is required',
+            });
         }
 
-        const updated = await accounts.update(Number(id), rest); // Number ID for PostgreSQL
-        if (!updated) return {error: 'Not found'};
-        return updated;
+        // Remove id/accountId from updates to avoid duplication
+        const {id, accountId: accId, ...updates} = body || {};
+
+        console.log('🔄 PUT /api/accounts - Updating account:', accountId);
+        console.log('🔄 Update payload:', JSON.stringify(updates, null, 2));
+
+        try {
+            if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                const updated = await accountsDynamoDB.update(
+                    accountId,
+                    updates,
+                );
+                if (!updated) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        result: 'failed',
+                        msg: 'Account not found',
+                        data: {accountId},
+                    });
+                }
+                console.log('✅ Account updated successfully:', accountId);
+                return res.status(HttpStatus.OK).json({
+                    result: 'success',
+                    msg: 'Account updated successfully',
+                    data: updated,
+                });
+            }
+
+            const updated = await accounts.update(Number(accountId), updates);
+            if (!updated) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    result: 'failed',
+                    msg: 'Account not found',
+                    data: {accountId},
+                });
+            }
+            console.log('✅ Account updated successfully:', accountId);
+            return res.status(HttpStatus.OK).json({
+                result: 'success',
+                msg: 'Account updated successfully',
+                data: updated,
+            });
+        } catch (error: any) {
+            console.error('❌ Error updating account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to update account: ${error.message}`,
+            });
+        }
     }
 
-    @Delete(':id')
-    async remove(@Param('id') id: string) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            await accountsDynamoDB.remove(id); // String ID for DynamoDB
-            return {};
+    // Note: Use DELETE /api/accounts/offboard?accountId=xxx for proper deletion
+    // The @Delete(':id') handler was removed to avoid route conflicts with /offboard
+
+    /**
+     * Onboard a new account
+     * POST /api/accounts/onboard
+     *
+     * Required fields: accountName, masterAccount, subscriptionTier
+     * Optional fields: addressDetails, technicalUser, email, firstName, lastName, etc.
+     */
+    @Post('onboard')
+    async onboard(@Body() body: any, @Req() req: any, @Res() res: any) {
+        try {
+            // Get authorization header to forward to infrastructure API
+            const authHeader =
+                req.headers?.authorization || req.headers?.Authorization || '';
+
+            // Validate required fields
+            const requiredFields = [
+                'accountName',
+                'masterAccount',
+                'subscriptionTier',
+            ];
+            const missingFields = requiredFields.filter(
+                (field) => !body[field],
+            );
+
+            if (missingFields.length > 0) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Missing required fields: ${missingFields.join(', ')}`,
+                });
+            }
+
+            // Validate mandatory arrays: licenses and technicalUsers
+            const hasLicenses =
+                body.licenses &&
+                Array.isArray(body.licenses) &&
+                body.licenses.length > 0;
+            const hasTechnicalUsers =
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0;
+
+            const missingArrays: string[] = [];
+            if (!hasLicenses) missingArrays.push('At least one License');
+            if (!hasTechnicalUsers)
+                missingArrays.push('At least one Technical User');
+
+            if (missingArrays.length > 0) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Missing mandatory data: ${missingArrays.join(', ')}`,
+                });
+            }
+
+            // Validate subscription tier
+            const validTiers = ['public', 'private', 'platform'];
+            if (!validTiers.includes(body.subscriptionTier)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Invalid subscriptionTier. Must be one of: ${validTiers.join(
+                        ', ',
+                    )}`,
+                });
+            }
+
+            console.log('🚀 Onboarding new account:', body.accountName);
+
+            const now = new Date();
+            let infraProvisioningResult: any = null;
+            let savedAccount: any = null;
+
+            // If infrastructure API is configured, let it handle persistence
+            // to avoid duplicate entries in DynamoDB
+            if (INFRA_PROVISIONING_API_BASE_URL) {
+                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/onboard`;
+
+                try {
+                    console.log(
+                        '🔧 Triggering infrastructure provisioning:',
+                        infraApiUrl,
+                    );
+
+                    // Build payload for infrastructure API
+                    // Generate default email if not provided (infra API requires email)
+                    const sanitizedAccountName = body.accountName
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]/g, '');
+                    const defaultEmail = `admin@${sanitizedAccountName}.local`;
+
+                    const infraPayload = {
+                        accountName: body.accountName,
+                        subscriptionTier: body.subscriptionTier,
+                        email: body.email || body.adminEmail || defaultEmail,
+                        firstName: body.firstName || 'Admin',
+                        lastName: body.lastName || body.accountName,
+                        adminUsername: body.adminUsername || 'admin',
+                        adminEmail:
+                            body.adminEmail || body.email || defaultEmail,
+                        adminPassword: body.adminPassword || 'TempPass123!',
+                        createdBy: body.createdBy || 'admin',
+                    };
+
+                    console.log('📦 Infrastructure payload:', {
+                        ...infraPayload,
+                        adminPassword: '***hidden***',
+                    });
+
+                    // Build headers - forward auth token if present
+                    const infraHeaders: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                    };
+                    if (authHeader) {
+                        infraHeaders['Authorization'] = authHeader;
+                        console.log(
+                            '🔐 Forwarding authorization header to infra API',
+                        );
+                    } else {
+                        console.log('⚠️ No authorization header to forward');
+                    }
+
+                    const infraResponse = await axios.post(
+                        infraApiUrl,
+                        infraPayload,
+                        {
+                            headers: infraHeaders,
+                            timeout: 30000, // 30 second timeout
+                        },
+                    );
+
+                    infraProvisioningResult = infraResponse.data;
+                    console.log(
+                        '✅ Infrastructure provisioning initiated:',
+                        infraProvisioningResult,
+                    );
+
+                    // Use the account created by infra API as the source of truth
+                    if (infraProvisioningResult?.data) {
+                        const infraAccountId =
+                            infraProvisioningResult.data.accountId;
+
+                        savedAccount = {
+                            id: infraAccountId,
+                            accountId: infraAccountId,
+                            accountName:
+                                infraProvisioningResult.data.accountName ||
+                                body.accountName,
+                            masterAccount: body.masterAccount,
+                            subscriptionTier:
+                                infraProvisioningResult.data.subscriptionTier ||
+                                body.subscriptionTier,
+                            email: infraProvisioningResult.data.email,
+                            firstName: infraProvisioningResult.data.firstName,
+                            lastName: infraProvisioningResult.data.lastName,
+                            provisioningState:
+                                infraProvisioningResult.data.provisioningState,
+                            stepFunctionExecutionArn:
+                                infraProvisioningResult.data
+                                    .stepFunctionExecutionArn,
+                            createdAt:
+                                infraProvisioningResult.data.registeredOn ||
+                                now.toISOString(),
+                            updatedAt:
+                                infraProvisioningResult.data.lastModified ||
+                                now.toISOString(),
+                            // Include arrays from frontend request
+                            addresses: body.addresses || [],
+                            technicalUsers: body.technicalUsers || [],
+                            licenses: body.licenses || [],
+                        };
+
+                        // Update the account in DynamoDB with additional fields
+                        // (addresses, technicalUsers, licenses) that infra API doesn't handle
+                        if (
+                            storageMode === 'dynamodb' &&
+                            accountsDynamoDB &&
+                            infraAccountId
+                        ) {
+                            try {
+                                console.log(
+                                    '📝 Updating account with additional details:',
+                                    infraAccountId,
+                                );
+                                await accountsDynamoDB.update(infraAccountId, {
+                                    addresses: body.addresses || [],
+                                    technicalUsers: body.technicalUsers || [],
+                                    licenses: body.licenses || [],
+                                    // Also store address details in flat format
+                                    addressLine1:
+                                        body.addressDetails?.addressLine1 || '',
+                                    addressLine2:
+                                        body.addressDetails?.addressLine2 || '',
+                                    city: body.addressDetails?.city || '',
+                                    state: body.addressDetails?.state || '',
+                                    country: body.addressDetails?.country || '',
+                                    // Technical user info
+                                    technicalUsername:
+                                        body.technicalUser?.adminUsername || '',
+                                } as any);
+                                console.log(
+                                    '✅ Account updated with addresses, technicalUsers, licenses',
+                                );
+                            } catch (updateError: any) {
+                                console.error(
+                                    '⚠️ Failed to update account with additional fields:',
+                                    updateError.message,
+                                );
+                            }
+                        }
+                    }
+                } catch (infraError: any) {
+                    console.error(
+                        '❌ Infrastructure provisioning failed:',
+                        infraError?.response?.data || infraError.message,
+                    );
+
+                    // Step Functions/Infra API failed - return error immediately
+                    // DO NOT save to DynamoDB if infrastructure provisioning fails
+                    const errorMessage =
+                        infraError?.response?.data?.msg ||
+                        infraError?.response?.data?.message ||
+                        infraError.message ||
+                        'Infrastructure provisioning failed';
+
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                        result: 'failed',
+                        msg: `Account creation failed: ${errorMessage}`,
+                        error: 'INFRASTRUCTURE_PROVISIONING_FAILED',
+                        details: infraError?.response?.data || null,
+                    });
+                }
+            } else {
+                // Infra API not configured - save locally to DynamoDB
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - saving locally only',
+                );
+
+                // Generate account ID
+                const dateStr = now
+                    .toISOString()
+                    .slice(0, 10)
+                    .replace(/-/g, '');
+                const randomSuffix = Math.floor(Math.random() * 99)
+                    .toString()
+                    .padStart(2, '0');
+                const accountId = `${dateStr.slice(0, 6)}${randomSuffix}`;
+
+                // Build account data
+                const accountData: any = {
+                    id: accountId,
+                    accountId: accountId,
+                    accountName: body.accountName,
+                    masterAccount: body.masterAccount,
+                    subscriptionTier: body.subscriptionTier,
+                    provisioningState: 'active',
+                    status: 'ACTIVE',
+                    createdAt: now.toISOString(),
+                    updatedAt: now.toISOString(),
+                    createdBy: body.createdBy || 'admin',
+                };
+
+                // Add optional fields if provided
+                if (body.email) accountData.email = body.email;
+                if (body.firstName) accountData.firstName = body.firstName;
+                if (body.lastName) accountData.lastName = body.lastName;
+                if (body.adminUsername)
+                    accountData.adminUsername = body.adminUsername;
+                if (body.adminEmail) accountData.adminEmail = body.adminEmail;
+                if (body.addressDetails)
+                    accountData.addressDetails = body.addressDetails;
+                if (body.technicalUser)
+                    accountData.technicalUser = body.technicalUser;
+
+                // Add arrays for full data persistence
+                accountData.addresses = body.addresses || [];
+                accountData.technicalUsers = body.technicalUsers || [];
+                accountData.licenses = body.licenses || [];
+
+                // Flatten address details for easier querying
+                if (body.addressDetails) {
+                    accountData.addressLine1 =
+                        body.addressDetails.addressLine1 || '';
+                    accountData.addressLine2 =
+                        body.addressDetails.addressLine2 || '';
+                    accountData.city = body.addressDetails.city || '';
+                    accountData.state = body.addressDetails.state || '';
+                    accountData.country = body.addressDetails.country || '';
+                }
+
+                // Technical user info for display
+                if (body.technicalUser) {
+                    accountData.technicalUsername =
+                        body.technicalUser.adminUsername || '';
+                }
+
+                // Save to DynamoDB or PostgreSQL
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    savedAccount = await accountsDynamoDB.create(accountData);
+                } else {
+                    savedAccount = await accounts.create(accountData);
+                }
+
+                console.log(
+                    '✅ Account saved to local database:',
+                    savedAccount?.id,
+                );
+
+                infraProvisioningResult = {
+                    skipped: true,
+                    message:
+                        'Infrastructure provisioning API not configured - saved locally',
+                };
+            }
+
+            const finalAccountId =
+                savedAccount?.id || savedAccount?.accountId || 'unknown';
+            console.log('✅ Account onboarded successfully:', finalAccountId);
+
+            // Create technical users in User Management table
+            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+            const createdTechnicalUsers: any[] = [];
+            if (
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0
+            ) {
+                console.log(
+                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${finalAccountId}`,
+                );
+
+                for (const techUser of body.technicalUsers) {
+                    try {
+                        // Map technical user fields to User format
+                        const userPayload = {
+                            firstName:
+                                techUser.firstName || techUser.first_name || '',
+                            middleName:
+                                techUser.middleName ||
+                                techUser.middle_name ||
+                                '',
+                            lastName:
+                                techUser.lastName || techUser.last_name || '',
+                            emailAddress:
+                                techUser.adminEmail ||
+                                techUser.email ||
+                                techUser.emailAddress ||
+                                '',
+                            password:
+                                techUser.adminPassword ||
+                                techUser.password ||
+                                'TempPass123!',
+                            status: techUser.status || 'Active',
+                            startDate:
+                                techUser.assignmentStartDate ||
+                                techUser.startDate ||
+                                new Date().toISOString(),
+                            endDate:
+                                techUser.assignmentEndDate ||
+                                techUser.endDate ||
+                                '',
+                            technicalUser: true, // Mark as technical user
+                            assignedGroups: techUser.assignedUserGroup
+                                ? [techUser.assignedUserGroup]
+                                : [],
+                        };
+
+                        console.log(
+                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
+                        );
+
+                        // Use userManagement to create user with proper PK/SK structure
+                        // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+                        if (storageMode === 'dynamodb' && userManagement) {
+                            const createdUser =
+                                await userManagement.createUserInAccountTable(
+                                    userPayload,
+                                    finalAccountId,
+                                    body.accountName || '',
+                                );
+                            console.log(
+                                `✅ Technical user created with ID: ${createdUser.id}`,
+                            );
+                            createdTechnicalUsers.push(createdUser);
+                        } else {
+                            console.warn(
+                                '⚠️ DynamoDB not available - skipping technical user creation',
+                            );
+                        }
+                    } catch (userError: any) {
+                        console.error(
+                            `❌ Failed to create technical user:`,
+                            userError.message,
+                        );
+                        // Continue with other users even if one fails
+                    }
+                }
+
+                console.log(
+                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
+                );
+            }
+
+            return res.status(HttpStatus.CREATED).json({
+                result: 'success',
+                msg: 'Account onboarded successfully',
+                data: {
+                    ...savedAccount,
+                    infraProvisioning: infraProvisioningResult,
+                    technicalUsersCreated: createdTechnicalUsers.length,
+                },
+                accountId: finalAccountId,
+            });
+        } catch (error: any) {
+            console.error('❌ Error onboarding account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to onboard account: ${error.message}`,
+            });
         }
-        await accounts.remove(Number(id)); // Number ID for PostgreSQL
-        return {};
+    }
+
+    /**
+     * Offboard (delete) an account
+     * DELETE /api/accounts/offboard?accountId=xxx
+     *
+     * This deletes the account from the local database.
+     * Infrastructure deprovisioning is handled separately if configured.
+     */
+    @Delete('offboard')
+    async offboard(
+        @Query('accountId') accountId: string,
+        @Req() req: any,
+        @Res() res: any,
+    ) {
+        try {
+            // Get authorization header to forward to infrastructure API
+            const authHeader =
+                req.headers?.authorization || req.headers?.Authorization || '';
+
+            if (!accountId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: 'accountId query parameter is required',
+                });
+            }
+
+            console.log('🗑️ Offboarding account:', accountId);
+
+            let infraDeprovisioningResult: any = null;
+            let infraApiCalled = false;
+
+            // Try infrastructure API first if configured (for infra cleanup)
+            if (INFRA_PROVISIONING_API_BASE_URL) {
+                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
+                infraApiCalled = true;
+
+                try {
+                    console.log(
+                        '🔧 Triggering infrastructure deprovisioning:',
+                        infraApiUrl,
+                    );
+
+                    // Build headers - forward auth token if present
+                    const infraHeaders: Record<string, string> = {
+                        'Content-Type': 'application/json',
+                    };
+                    if (authHeader) {
+                        infraHeaders['Authorization'] = authHeader;
+                        console.log(
+                            '🔐 Forwarding authorization header to infra API',
+                        );
+                    } else {
+                        console.log('⚠️ No authorization header to forward');
+                    }
+
+                    const infraResponse = await axios.delete(
+                        `${infraApiUrl}?accountId=${accountId}`,
+                        {
+                            headers: infraHeaders,
+                            timeout: 30000, // 30 second timeout
+                        },
+                    );
+
+                    infraDeprovisioningResult = infraResponse.data;
+                    console.log(
+                        '✅ Infrastructure API response:',
+                        infraDeprovisioningResult,
+                    );
+                } catch (infraError: any) {
+                    console.error(
+                        '⚠️ Infrastructure deprovisioning API call failed:',
+                        infraError?.response?.data || infraError.message,
+                    );
+                    infraDeprovisioningResult = {
+                        warning: 'Infrastructure API call failed',
+                        message:
+                            infraError?.response?.data?.msg ||
+                            infraError.message,
+                        note: 'Proceeding with local database deletion',
+                    };
+                    // Continue with local deletion even if infra API fails
+                }
+            } else {
+                console.log(
+                    '⚠️ INFRA_PROVISIONING_API_URL not configured - deleting locally only',
+                );
+                infraDeprovisioningResult = {
+                    skipped: true,
+                    message:
+                        'Infrastructure API not configured - deleted locally only',
+                };
+            }
+
+            // ALWAYS delete from local database regardless of infra API result
+            // This ensures the account is removed from the database
+            try {
+                if (storageMode === 'dynamodb' && accountsDynamoDB) {
+                    console.log(
+                        '🗑️ Deleting account from DynamoDB:',
+                        accountId,
+                    );
+                    await accountsDynamoDB.remove(accountId);
+                    console.log('✅ Account deleted from DynamoDB');
+                } else {
+                    console.log(
+                        '🗑️ Deleting account from local storage:',
+                        accountId,
+                    );
+                    await accounts.remove(Number(accountId));
+                    console.log('✅ Account deleted from local storage');
+                }
+            } catch (deleteError: any) {
+                console.error(
+                    '❌ Database deletion failed:',
+                    deleteError.message,
+                );
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    result: 'failed',
+                    msg: `Failed to delete account from database: ${deleteError.message}`,
+                    data: {
+                        accountId: accountId,
+                        infraDeprovisioning: infraDeprovisioningResult,
+                        dbError: deleteError.message,
+                    },
+                });
+            }
+
+            console.log('✅ Account offboarded successfully:', accountId);
+
+            return res.status(HttpStatus.OK).json({
+                result: 'success',
+                msg: 'Account offboarded successfully',
+                data: {
+                    accountId: accountId,
+                    deletedAt: new Date().toISOString(),
+                    infraDeprovisioning: infraDeprovisioningResult,
+                    infraApiCalled: infraApiCalled,
+                },
+            });
+        } catch (error: any) {
+            console.error('❌ Error offboarding account:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                result: 'failed',
+                msg: `Failed to offboard account: ${error.message}`,
+            });
+        }
     }
 
     // Technical User endpoints
@@ -9421,7 +10371,7 @@ class GlobalSettingsController {
         ConnectorsController,
     ],
 })
-class AppModule {}
+export class AppModule {}
 
 async function bootstrap() {
     try {
@@ -9466,14 +10416,21 @@ async function bootstrap() {
         dotenv.config({path: 'config.env'});
         dotenv.config(); // Also load from .env if it exists
 
-        storageMode = process.env.STORAGE_MODE || 'postgres';
-        console.log('Loaded Storage Mode:', storageMode);
+        // Note: storageMode is already initialized at module load time
+        // This is just for logging and connection testing in standalone mode
+        const currentStorageMode = process.env.STORAGE_MODE || 'dynamodb';
+        console.log('Bootstrap - Storage Mode:', currentStorageMode);
+        console.log('Bootstrap - Services already initialized:', {
+            accountsDynamoDB: !!accountsDynamoDB,
+            enterprises: !!enterprises,
+            services: !!services,
+        });
         console.log(
             'Use In-Memory DynamoDB:',
             process.env.USE_IN_MEMORY_DYNAMODB,
         );
 
-        if (storageMode === 'postgres') {
+        if (currentStorageMode === 'postgres') {
             console.log('Testing PostgreSQL connection...');
             const dbConnected = await testConnection();
             if (!dbConnected) {
@@ -9483,34 +10440,54 @@ async function bootstrap() {
                 process.exit(1);
             }
             console.log('PostgreSQL connection successful!');
-        } else if (storageMode === 'dynamodb') {
+        } else if (currentStorageMode === 'dynamodb') {
             console.log('Testing DynamoDB connection...');
             const dynamoConnected = await testDynamoDBConnection();
             if (!dynamoConnected) {
-                console.error(
-                    'Failed to connect to DynamoDB. Please check your AWS configuration and table setup.',
+                console.warn(
+                    '⚠️ DynamoDB connection test failed. Some tables may not exist yet.',
                 );
-                console.error('Required environment variables:');
-                console.error('- AWS_REGION (default: us-east-1)');
-                console.error('- AWS_ACCESS_KEY_ID (if not using IAM roles)');
-                console.error(
+                console.warn('This is OK if you are using specific tables.');
+                console.warn(
+                    'Required environment variables for full DynamoDB:',
+                );
+                console.warn('- AWS_REGION (default: us-east-1)');
+                console.warn('- AWS_ACCESS_KEY_ID (if not using IAM roles)');
+                console.warn(
                     '- AWS_SECRET_ACCESS_KEY (if not using IAM roles)',
                 );
-                console.error(
+                console.warn(
                     '- DYNAMODB_ENTERPRISE_TABLE (default: EnterpriseConfig)',
                 );
-                console.error(
+                console.warn(
                     '- DYNAMODB_ENDPOINT (optional, for local DynamoDB)',
                 );
-                process.exit(1);
-            }
+                // Don't exit - allow app to continue with available tables
+                console.warn(
+                    '⚠️ Continuing anyway - specific table operations may work.',
+                );
+            } else {
             console.log('DynamoDB connection successful!');
         }
+        }
 
-        // Initialize services based on storage mode after environment variables are loaded
-        console.log('Initializing services for storage mode:', storageMode);
+        // Services are already initialized at module load time
+        // This section is kept for backward compatibility and logging
+        console.log('Services status for storage mode:', currentStorageMode);
+        console.log(
+            '  accountsDynamoDB:',
+            accountsDynamoDB ? 'initialized' : 'not initialized',
+        );
+        console.log(
+            '  enterprises:',
+            enterprises ? 'initialized' : 'not initialized',
+        );
 
-        if (storageMode === 'dynamodb') {
+        // Re-initialize services only if not already done (should not happen normally)
+        if (currentStorageMode === 'dynamodb' && !accountsDynamoDB) {
+            console.log(
+                '⚠️ Re-initializing DynamoDB services in bootstrap (this should not happen)',
+            );
             accountsDynamoDB = new AccountsDynamoDBService();
             enterprises = new EnterprisesDynamoDBService(STORAGE_DIR);
             services = new ServicesDynamoDBService(STORAGE_DIR);
@@ -9526,13 +10503,8 @@ async function bootstrap() {
             buildsDynamoDB = new BuildsDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
-            console.log('Accounts DynamoDB service initialized');
-            console.log('AccessControl DynamoDB service initialized');
-            console.log('UserManagement DynamoDB service initialized');
-            console.log('Environments DynamoDB service initialized');
-            console.log('GlobalSettings DynamoDB service initialized');
-            console.log('PipelineCanvas DynamoDB service initialized');
-        } else {
+        } else if (currentStorageMode !== 'dynamodb' && !enterprises) {
+            console.log('⚠️ Re-initializing filesystem services in bootstrap');
             enterprises = new EnterprisesService(STORAGE_DIR);
             services = new ServicesService(STORAGE_DIR);
             products = new ProductsService(STORAGE_DIR);
@@ -9551,8 +10523,11 @@ async function bootstrap() {
         // Validate password encryption configuration
         console.log('🔐 Validating password encryption configuration...');
         if (!validatePasswordEncryptionConfig()) {
-            console.error('❌ Password encryption configuration is invalid!');
-            process.exit(1);
+            console.warn('⚠️ Password encryption configuration is invalid!');
+            console.warn(
+                '⚠️ User password operations will fail. Set PASSWORD_ENCRYPTION_KEY env variable.',
+            );
+            console.warn('⚠️ Continuing anyway - other APIs should work.');
         }
 
         // Create the NestJS application
@@ -9604,6 +10579,46 @@ async function bootstrap() {
         // SECURITY: Apply general rate limiting to all API routes
         app.use('/api', apiRateLimiter);
 
+        // AUDIT: Add middleware to extract user info from JWT and set audit context
+        const {runWithAuditContext} = require('./dynamodb');
+        const jwt = require('jsonwebtoken');
+        app.use((req: any, res: any, next: any) => {
+            // Extract user info from JWT token for audit columns
+            let auditContext: any = {userId: 'system', username: 'system'};
+
+            const authHeader = req.headers?.authorization || '';
+            if (authHeader.startsWith('Bearer ')) {
+                try {
+                    const token = authHeader.substring(7);
+                    // Decode without verification to extract user info (verification happens elsewhere)
+                    const decoded: any = jwt.decode(token);
+                    if (decoded) {
+                        auditContext = {
+                            userId:
+                                decoded.sub ||
+                                decoded.userId ||
+                                decoded.user_id ||
+                                decoded.email ||
+                                'system',
+                            username:
+                                decoded.username ||
+                                decoded.email ||
+                                decoded.name ||
+                                'system',
+                            email: decoded.email || '',
+                        };
+                    }
+                } catch (e) {
+                    // Failed to decode token - use default system user
+                }
+            }
+
+            // Run the rest of the request with audit context
+            runWithAuditContext(auditContext, () => {
+                next();
+            });
+        });
+
         // Skip seeding - using existing fnd_ tables
         console.log('Using existing database schema with fnd_ tables...');
 
@@ -9633,4 +10648,8 @@ async function bootstrap() {
     }
 }
 
+// Only run bootstrap when NOT in Lambda environment
+// Lambda uses index.ts handler which creates the app differently
+if (!process.env.AWS_LAMBDA_FUNCTION_NAME) {
 bootstrap();
+}
