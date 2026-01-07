@@ -59,10 +59,10 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
-// import {CognitoAuthService} from './services/cognitoAuth';
+import {CognitoAuthService} from './services/cognitoAuth';
 
 // Cognito auth service instance
-// const cognitoAuth = new CognitoAuthService();
+const cognitoAuth = new CognitoAuthService();
 const cognitoAuth: any = {
     isAvailable: () => false,
     login: async () => ({error: 'CognitoAuthService not available'}),
