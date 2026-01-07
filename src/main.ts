@@ -1227,12 +1227,105 @@ class AccountsController {
                 '📝 POST /api/accounts - Creating account:',
                 body?.accountName,
             );
+
+            let result: any;
             if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                const result = await accountsDynamoDB.create(body);
+                result = await accountsDynamoDB.create(body);
                 console.log('✅ Account created:', result?.id);
-                return result;
+            } else {
+                result = await accounts.create(body);
             }
-            return await accounts.create(body);
+
+            const createdAccountId = result?.id || result?.accountId;
+
+            // Create technical users in User Management table after successful account creation
+            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+            const createdTechnicalUsers: any[] = [];
+            if (
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0 &&
+                createdAccountId &&
+                storageMode === 'dynamodb' &&
+                userManagement
+            ) {
+                console.log(
+                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${createdAccountId}`,
+                );
+
+                for (const techUser of body.technicalUsers) {
+                    try {
+                        // Map technical user fields to User format
+                        const userPayload = {
+                            firstName:
+                                techUser.firstName || techUser.first_name || '',
+                            middleName:
+                                techUser.middleName ||
+                                techUser.middle_name ||
+                                '',
+                            lastName:
+                                techUser.lastName || techUser.last_name || '',
+                            emailAddress:
+                                techUser.adminEmail ||
+                                techUser.email ||
+                                techUser.emailAddress ||
+                                '',
+                            password:
+                                techUser.adminPassword ||
+                                techUser.password ||
+                                'TempPass123!',
+                            status:
+                                techUser.status === true
+                                    ? 'Active'
+                                    : techUser.status === false
+                                    ? 'Inactive'
+                                    : techUser.status || 'Active',
+                            startDate:
+                                techUser.assignmentStartDate ||
+                                techUser.startDate ||
+                                new Date().toISOString(),
+                            endDate:
+                                techUser.assignmentEndDate ||
+                                techUser.endDate ||
+                                '',
+                            technicalUser: true, // Mark as technical user
+                            assignedGroups: techUser.assignedUserGroup
+                                ? [techUser.assignedUserGroup]
+                                : [],
+                        };
+
+                        console.log(
+                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
+                        );
+
+                        // Use userManagement to create user with proper PK/SK structure
+                        const createdUser =
+                            await userManagement.createUserInAccountTable(
+                                userPayload,
+                                createdAccountId,
+                            );
+                        console.log(
+                            `✅ Technical user created with ID: ${createdUser.id}`,
+                        );
+                        createdTechnicalUsers.push(createdUser);
+                    } catch (userError: any) {
+                        console.error(
+                            `❌ Failed to create technical user:`,
+                            userError.message,
+                        );
+                        // Continue with other users even if one fails
+                    }
+                }
+
+                console.log(
+                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
+                );
+            }
+
+            return {
+                ...result,
+                technicalUsersCreated: createdTechnicalUsers.length,
+            };
         } catch (error: any) {
             console.error('❌ Error creating account:', error);
             return {
