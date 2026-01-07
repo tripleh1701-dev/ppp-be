@@ -70,7 +70,6 @@ export class EnterprisesDynamoDBService {
                 PK: `ENTERPRISE#${enterpriseId}`,
                 SK: `ENTERPRISE#${enterpriseId}`,
                 id: enterpriseId,
-                id: enterpriseId,
                 enterprise_name: body.name,
                 name: body.name, // Keep both for compatibility
                 created_date: now,
