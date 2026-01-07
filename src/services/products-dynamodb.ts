@@ -6,6 +6,11 @@ export interface Product {
     name: string;
     createdAt?: string;
     updatedAt?: string;
+    // Audit columns
+    CREATED_BY?: string | number | null;
+    CREATION_DATE?: string | null;
+    LAST_UPDATED_BY?: string | number | null;
+    LAST_UPDATE_DATE?: string | null;
 }
 
 export class ProductsDynamoDBService {
@@ -26,13 +31,23 @@ export class ProductsDynamoDBService {
                 },
             );
 
-            // Transform DynamoDB items to Product interface
+            // Transform DynamoDB items to Product interface - support both old and new PK patterns
             return items
                 .map((item) => ({
-                    id: item.PK?.replace('SYSTIVA#', '') || item.id,
+                    id:
+                        item.id ||
+                        item.PK?.replace('PRODUCT#', '').replace(
+                            'SYSTIVA#',
+                            '',
+                        ),
                     name: item.product_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
+                    // Audit columns
+                    CREATED_BY: item.CREATED_BY || null,
+                    CREATION_DATE: item.CREATION_DATE || null,
+                    LAST_UPDATED_BY: item.LAST_UPDATED_BY || null,
+                    LAST_UPDATE_DATE: item.LAST_UPDATE_DATE || null,
                 }))
                 .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         } catch (error) {
@@ -46,8 +61,9 @@ export class ProductsDynamoDBService {
             const productId = uuidv4();
             const now = new Date().toISOString();
 
+            // New PK/SK pattern: PRODUCT#<id>
             const item = {
-                PK: `SYSTIVA#${productId}`,
+                PK: `PRODUCT#${productId}`,
                 SK: `PRODUCT#${productId}`,
                 id: productId,
                 product_name: body.name,
@@ -100,7 +116,7 @@ export class ProductsDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `SYSTIVA#${id}`,
+                            PK: `PRODUCT#${id}`,
                             SK: `PRODUCT#${id}`,
                         },
                         UpdateExpression: updateExpression,
@@ -133,6 +149,12 @@ export class ProductsDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
+            // Try new format first, then old format
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: `PRODUCT#${id}`,
+                SK: `PRODUCT#${id}`,
+            }).catch(() => {});
+            // Also try old SYSTIVA# format for backward compatibility
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `SYSTIVA#${id}`,
                 SK: `PRODUCT#${id}`,
@@ -145,10 +167,19 @@ export class ProductsDynamoDBService {
 
     async get(id: string): Promise<Product | null> {
         try {
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${id}`,
+            // Try new format first
+            let item = await DynamoDBOperations.getItem(this.tableName, {
+                PK: `PRODUCT#${id}`,
                 SK: `PRODUCT#${id}`,
             });
+
+            // Fallback to old SYSTIVA# format
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: `SYSTIVA#${id}`,
+                    SK: `PRODUCT#${id}`,
+                });
+            }
 
             if (!item) {
                 return null;

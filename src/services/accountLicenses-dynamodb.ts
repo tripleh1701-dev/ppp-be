@@ -56,8 +56,9 @@ export class AccountLicensesDynamoDBService {
                     ),
                 ).toISOString();
 
+            // New PK/SK pattern: ACCOUNT#<accountId>, LICENSE#<licenseId>
             const item = {
-                PK: `SYSTIVA#${params.accountId}#ACCOUNT`,
+                PK: `ACCOUNT#${params.accountId}`,
                 SK: `LICENSE#${licenseId}`,
                 id: licenseId,
                 account_id: params.accountId,
@@ -148,9 +149,10 @@ export class AccountLicensesDynamoDBService {
         try {
             const items = await DynamoDBOperations.queryItems(
                 this.tableName,
+                // Query with new format first
                 'PK = :pk AND begins_with(SK, :sk)',
                 {
-                    ':pk': `SYSTIVA#${accountId}#ACCOUNT`,
+                    ':pk': `ACCOUNT#${accountId}`,
                     ':sk': 'LICENSE#',
                 },
             );
@@ -184,10 +186,18 @@ export class AccountLicensesDynamoDBService {
         licenseId: string,
     ): Promise<AccountLicense | null> {
         try {
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${accountId}#ACCOUNT`,
+            // Try new format first
+            let item = await DynamoDBOperations.getItem(this.tableName, {
+                PK: `ACCOUNT#${accountId}`,
                 SK: `LICENSE#${licenseId}`,
             });
+            // Fallback to old format
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: `SYSTIVA#${accountId}#ACCOUNT`,
+                    SK: `LICENSE#${licenseId}`,
+                });
+            }
 
             if (!item) {
                 return null;
@@ -219,6 +229,12 @@ export class AccountLicensesDynamoDBService {
      */
     async remove(accountId: string, licenseId: string): Promise<void> {
         try {
+            // Delete with new format
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: `ACCOUNT#${accountId}`,
+                SK: `LICENSE#${licenseId}`,
+            }).catch(() => {});
+            // Also try old format for backward compatibility
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `SYSTIVA#${accountId}#ACCOUNT`,
                 SK: `LICENSE#${licenseId}`,
@@ -252,7 +268,7 @@ export class AccountLicensesDynamoDBService {
             const result = await DynamoDBOperations.updateItem(
                 this.tableName,
                 {
-                    PK: `SYSTIVA#${accountId}#ACCOUNT`,
+                    PK: `ACCOUNT#${accountId}`,
                     SK: `LICENSE#${licenseId}`,
                 },
                 updateExpression,

@@ -1,3 +1,7 @@
+// Load environment variables first - this file may be imported before main.ts dotenv runs
+import * as dotenv from 'dotenv';
+dotenv.config();
+
 import {DynamoDBClient} from '@aws-sdk/client-dynamodb';
 import {
     DynamoDBDocumentClient,
@@ -33,24 +37,31 @@ export function getDynamoDBClient(): DynamoDBClient {
         });
 
         const config: any = {
-            region: process.env.AWS_REGION || 'us-east-1',
+            region:
+                process.env.AWS_REGION ||
+                process.env.AWS_REGION_NAME ||
+                'us-east-1',
         };
 
-        // Add credentials if provided via environment variables
-        if (
-            process.env.AWS_ACCESS_KEY_ID &&
-            process.env.AWS_SECRET_ACCESS_KEY
-        ) {
-            config.credentials = {
-                accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-                secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-            };
-        }
-
-        // For local DynamoDB development
+        // In Lambda/AWS environment, DO NOT use explicit credentials
+        // The Lambda execution role provides credentials automatically
+        // Only use explicit credentials for local development with DYNAMODB_ENDPOINT
         if (process.env.DYNAMODB_ENDPOINT) {
+            // Local DynamoDB development
             config.endpoint = process.env.DYNAMODB_ENDPOINT;
+
+            // Only add explicit credentials for local development
+            if (
+                process.env.AWS_ACCESS_KEY_ID &&
+                process.env.AWS_SECRET_ACCESS_KEY
+            ) {
+                config.credentials = {
+                    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+                    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+                };
+            }
         }
+        // For AWS Lambda, don't set explicit credentials - use IAM role
 
         client = new DynamoDBClient(config);
     }
@@ -139,13 +150,109 @@ function shouldUseInMemoryStore(): boolean {
     return process.env.USE_IN_MEMORY_DYNAMODB === 'true';
 }
 
+// ============================================================================
+// AUDIT COLUMNS SUPPORT
+// ============================================================================
+// These columns are automatically added to all DynamoDB operations:
+// - CREATED_BY: User ID who created the record (NUMBER/STRING)
+// - CREATION_DATE: ISO timestamp when record was created
+// - LAST_UPDATED_BY: User ID who last updated the record (NUMBER/STRING)
+// - LAST_UPDATE_DATE: ISO timestamp when record was last updated
+// ============================================================================
+
+// Async Local Storage for request context (user info)
+import {AsyncLocalStorage} from 'async_hooks';
+
+export interface AuditContext {
+    userId?: string | number;
+    username?: string;
+    email?: string;
+}
+
+// Create AsyncLocalStorage instance for request-scoped audit context
+export const auditContextStorage = new AsyncLocalStorage<AuditContext>();
+
+// Get current audit context (user info from request)
+export function getAuditContext(): AuditContext {
+    return auditContextStorage.getStore() || {};
+}
+
+// Set audit context for the current request
+export function setAuditContext(context: AuditContext): void {
+    const store = auditContextStorage.getStore();
+    if (store) {
+        Object.assign(store, context);
+    }
+}
+
+// Run code with audit context
+export function runWithAuditContext<T>(context: AuditContext, fn: () => T): T {
+    return auditContextStorage.run(context, fn);
+}
+
+// Add audit columns to an item (for CREATE operations)
+function addCreateAuditColumns(item: any): any {
+    const now = new Date().toISOString();
+    const auditContext = getAuditContext();
+    const userId = auditContext.userId || auditContext.username || 'system';
+
+    return {
+        ...item,
+        CREATED_BY: userId,
+        CREATION_DATE: now,
+        LAST_UPDATED_BY: userId,
+        LAST_UPDATE_DATE: now,
+    };
+}
+
+// Add audit columns to update expression (for UPDATE operations)
+function addUpdateAuditToExpression(
+    updateExpression: string,
+    expressionAttributeValues: any,
+): {updateExpression: string; expressionAttributeValues: any} {
+    const now = new Date().toISOString();
+    const auditContext = getAuditContext();
+    const userId = auditContext.userId || auditContext.username || 'system';
+
+    // Add audit columns to SET expression
+    let modifiedExpression = updateExpression;
+
+    // Check if expression already has SET clause
+    if (modifiedExpression.toUpperCase().includes('SET ')) {
+        // Append to existing SET clause
+        modifiedExpression = modifiedExpression.replace(
+            /SET /i,
+            'SET LAST_UPDATED_BY = :audit_lastUpdatedBy, LAST_UPDATE_DATE = :audit_lastUpdateDate, ',
+        );
+    } else {
+        // Add SET clause
+        modifiedExpression = `SET LAST_UPDATED_BY = :audit_lastUpdatedBy, LAST_UPDATE_DATE = :audit_lastUpdateDate ${modifiedExpression}`;
+    }
+
+    return {
+        updateExpression: modifiedExpression,
+        expressionAttributeValues: {
+            ...expressionAttributeValues,
+            ':audit_lastUpdatedBy': userId,
+            ':audit_lastUpdateDate': now,
+        },
+    };
+}
+
 // Utility functions for DynamoDB operations
 export const DynamoDBOperations = {
-    // Put item
-    async putItem(tableName: string, item: any): Promise<void> {
+    // Put item (with automatic audit columns)
+    async putItem(
+        tableName: string,
+        item: any,
+        skipAudit: boolean = false,
+    ): Promise<void> {
+        // Add audit columns unless explicitly skipped
+        const itemWithAudit = skipAudit ? item : addCreateAuditColumns(item);
+
         if (shouldUseInMemoryStore()) {
-            const key = `${item.PK}#${item.SK}`;
-            inMemoryStore[key] = item;
+            const key = `${itemWithAudit.PK}#${itemWithAudit.SK}`;
+            inMemoryStore[key] = itemWithAudit;
             console.log(`In-memory store: PUT ${key}`);
             return;
         }
@@ -154,7 +261,7 @@ export const DynamoDBOperations = {
             await client.send(
                 new PutCommand({
                     TableName: tableName,
-                    Item: item,
+                    Item: itemWithAudit,
                 }),
             );
         });
@@ -272,20 +379,35 @@ export const DynamoDBOperations = {
         });
     },
 
-    // Update item
+    // Update item (with automatic audit columns)
     async updateItem(
         tableName: string,
         key: any,
         updateExpression: string,
         expressionAttributeValues: any,
         expressionAttributeNames?: any,
+        skipAudit: boolean = false,
     ): Promise<any> {
+        // Add audit columns to update expression unless explicitly skipped
+        let finalUpdateExpression = updateExpression;
+        let finalExpressionAttributeValues = expressionAttributeValues;
+
+        if (!skipAudit) {
+            const auditResult = addUpdateAuditToExpression(
+                updateExpression,
+                expressionAttributeValues,
+            );
+            finalUpdateExpression = auditResult.updateExpression;
+            finalExpressionAttributeValues =
+                auditResult.expressionAttributeValues;
+        }
+
         return withDynamoDB(async (client) => {
             const updateParams: any = {
                 TableName: tableName,
                 Key: key,
-                UpdateExpression: updateExpression,
-                ExpressionAttributeValues: expressionAttributeValues,
+                UpdateExpression: finalUpdateExpression,
+                ExpressionAttributeValues: finalExpressionAttributeValues,
                 ReturnValues: 'ALL_NEW',
             };
 

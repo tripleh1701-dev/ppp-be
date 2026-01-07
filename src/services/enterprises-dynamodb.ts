@@ -6,6 +6,11 @@ export interface Enterprise {
     name: string;
     createdAt?: string;
     updatedAt?: string;
+    // Audit columns
+    CREATED_BY?: string | number | null;
+    CREATION_DATE?: string | null;
+    LAST_UPDATED_BY?: string | number | null;
+    LAST_UPDATE_DATE?: string | null;
 }
 
 export class EnterprisesDynamoDBService {
@@ -20,19 +25,33 @@ export class EnterprisesDynamoDBService {
         try {
             const items = await DynamoDBOperations.scanItems(this.tableName);
 
-            // Filter and transform only enterprise items (those with SYSTIVA# prefix and ENTERPRISE# sort key)
+            // Filter and transform enterprise items - support both old SYSTIVA# and new ENTERPRISE# patterns
             return items
                 .filter(
                     (item) =>
-                        item.PK?.startsWith('SYSTIVA#') &&
-                        item.SK?.startsWith('ENTERPRISE#') &&
-                        item.entity_type === 'enterprise',
+                        item.entity_type === 'enterprise' ||
+                        (item.PK?.startsWith('ENTERPRISE#') &&
+                            item.SK?.startsWith('ENTERPRISE#')) ||
+                        (item.PK?.startsWith('SYSTIVA#') &&
+                            item.SK?.startsWith('ENTERPRISE#')),
                 )
                 .map((item) => ({
-                    id: item.PK?.replace('SYSTIVA#', '') || item.id,
+                    // Extract ID from new ENTERPRISE# format or old SYSTIVA# format
+                    id:
+                        item.id ||
+                        item.PK?.replace('ENTERPRISE#', '').replace(
+                            'SYSTIVA#',
+                            '',
+                        ) ||
+                        item.SK?.replace('ENTERPRISE#', ''),
                     name: item.enterprise_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
+                    // Audit columns
+                    CREATED_BY: item.CREATED_BY || null,
+                    CREATION_DATE: item.CREATION_DATE || null,
+                    LAST_UPDATED_BY: item.LAST_UPDATED_BY || null,
+                    LAST_UPDATE_DATE: item.LAST_UPDATE_DATE || null,
                 }))
                 .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
         } catch (error) {
@@ -46,9 +65,11 @@ export class EnterprisesDynamoDBService {
             const enterpriseId = uuidv4();
             const now = new Date().toISOString();
 
+            // New PK/SK pattern: ENTERPRISE#<id> for both PK and SK
             const item = {
-                PK: `SYSTIVA#${enterpriseId}`,
+                PK: `ENTERPRISE#${enterpriseId}`,
                 SK: `ENTERPRISE#${enterpriseId}`,
+                id: enterpriseId,
                 id: enterpriseId,
                 enterprise_name: body.name,
                 name: body.name, // Keep both for compatibility
@@ -100,7 +121,7 @@ export class EnterprisesDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: `SYSTIVA#${id}`,
+                            PK: `ENTERPRISE#${id}`,
                             SK: `ENTERPRISE#${id}`,
                         },
                         UpdateExpression: updateExpression,
@@ -133,6 +154,12 @@ export class EnterprisesDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
+            // Try new format first, then old format
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: `ENTERPRISE#${id}`,
+                SK: `ENTERPRISE#${id}`,
+            }).catch(() => {});
+            // Also try old SYSTIVA# format for backward compatibility
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `SYSTIVA#${id}`,
                 SK: `ENTERPRISE#${id}`,
@@ -145,10 +172,19 @@ export class EnterprisesDynamoDBService {
 
     async get(id: string): Promise<Enterprise | null> {
         try {
-            const item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: `SYSTIVA#${id}`,
+            // Try new format first
+            let item = await DynamoDBOperations.getItem(this.tableName, {
+                PK: `ENTERPRISE#${id}`,
                 SK: `ENTERPRISE#${id}`,
             });
+
+            // Fallback to old SYSTIVA# format
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: `SYSTIVA#${id}`,
+                    SK: `ENTERPRISE#${id}`,
+                });
+            }
 
             if (!item) {
                 return null;
@@ -159,6 +195,11 @@ export class EnterprisesDynamoDBService {
                 name: item.enterprise_name || item.name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
+                // Audit columns
+                CREATED_BY: item.CREATED_BY || null,
+                CREATION_DATE: item.CREATION_DATE || null,
+                LAST_UPDATED_BY: item.LAST_UPDATED_BY || null,
+                LAST_UPDATE_DATE: item.LAST_UPDATE_DATE || null,
             };
         } catch (error) {
             console.error('Error getting enterprise:', error);
@@ -184,7 +225,9 @@ export class EnterprisesDynamoDBService {
 
             const item = items[0];
             return {
-                id: item.id || item.PK?.replace('SYSTIVA#', ''),
+                id:
+                    item.id ||
+                    item.PK?.replace('ENTERPRISE#', '').replace('SYSTIVA#', ''),
                 name: item.enterprise_name || item.name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
@@ -208,8 +251,9 @@ export class EnterprisesDynamoDBService {
                 const enterpriseId = pgEnterprise.id.toString(); // Convert number to string
                 const now = new Date().toISOString();
 
+                // Use new PK/SK pattern for migration
                 const item = {
-                    PK: `SYSTIVA#${enterpriseId}`,
+                    PK: `ENTERPRISE#${enterpriseId}`,
                     SK: `ENTERPRISE#${enterpriseId}`,
                     id: enterpriseId,
                     enterprise_name: pgEnterprise.name,
