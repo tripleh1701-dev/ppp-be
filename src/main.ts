@@ -1337,6 +1337,28 @@ class AccountsController {
                 });
             }
 
+            // Validate mandatory arrays: licenses and technicalUsers
+            const hasLicenses =
+                body.licenses &&
+                Array.isArray(body.licenses) &&
+                body.licenses.length > 0;
+            const hasTechnicalUsers =
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0;
+
+            const missingArrays: string[] = [];
+            if (!hasLicenses) missingArrays.push('At least one License');
+            if (!hasTechnicalUsers)
+                missingArrays.push('At least one Technical User');
+
+            if (missingArrays.length > 0) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    result: 'failed',
+                    msg: `Missing mandatory data: ${missingArrays.join(', ')}`,
+                });
+            }
+
             // Validate subscription tier
             const validTiers = ['public', 'private', 'platform'];
             if (!validTiers.includes(body.subscriptionTier)) {
@@ -1494,15 +1516,24 @@ class AccountsController {
                     }
                 } catch (infraError: any) {
                     console.error(
-                        '⚠️ Infrastructure provisioning failed:',
+                        '❌ Infrastructure provisioning failed:',
                         infraError?.response?.data || infraError.message,
                     );
-                    infraProvisioningResult = {
-                        error: 'Infrastructure provisioning failed',
-                        message:
-                            infraError?.response?.data?.msg ||
-                            infraError.message,
-                    };
+
+                    // Step Functions/Infra API failed - return error immediately
+                    // DO NOT save to DynamoDB if infrastructure provisioning fails
+                    const errorMessage =
+                        infraError?.response?.data?.msg ||
+                        infraError?.response?.data?.message ||
+                        infraError.message ||
+                        'Infrastructure provisioning failed';
+
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                        result: 'failed',
+                        msg: `Account creation failed: ${errorMessage}`,
+                        error: 'INFRASTRUCTURE_PROVISIONING_FAILED',
+                        details: infraError?.response?.data || null,
+                    });
                 }
             } else {
                 // Infra API not configured - save locally to DynamoDB
@@ -1591,12 +1622,96 @@ class AccountsController {
                 savedAccount?.id || savedAccount?.accountId || 'unknown';
             console.log('✅ Account onboarded successfully:', finalAccountId);
 
+            // Create technical users in User Management table
+            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+            const createdTechnicalUsers: any[] = [];
+            if (
+                body.technicalUsers &&
+                Array.isArray(body.technicalUsers) &&
+                body.technicalUsers.length > 0
+            ) {
+                console.log(
+                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${finalAccountId}`,
+                );
+
+                for (const techUser of body.technicalUsers) {
+                    try {
+                        // Map technical user fields to User format
+                        const userPayload = {
+                            firstName:
+                                techUser.firstName || techUser.first_name || '',
+                            middleName:
+                                techUser.middleName ||
+                                techUser.middle_name ||
+                                '',
+                            lastName:
+                                techUser.lastName || techUser.last_name || '',
+                            emailAddress:
+                                techUser.adminEmail ||
+                                techUser.email ||
+                                techUser.emailAddress ||
+                                '',
+                            password:
+                                techUser.adminPassword ||
+                                techUser.password ||
+                                'TempPass123!',
+                            status: techUser.status || 'Active',
+                            startDate:
+                                techUser.assignmentStartDate ||
+                                techUser.startDate ||
+                                new Date().toISOString(),
+                            endDate:
+                                techUser.assignmentEndDate ||
+                                techUser.endDate ||
+                                '',
+                            technicalUser: true, // Mark as technical user
+                            assignedGroups: techUser.assignedUserGroup
+                                ? [techUser.assignedUserGroup]
+                                : [],
+                        };
+
+                        console.log(
+                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
+                        );
+
+                        // Use userManagement to create user with proper PK/SK structure
+                        // PK: ACCOUNT#<accountId>, SK: USER#<userId>
+                        if (storageMode === 'dynamodb' && userManagement) {
+                            const createdUser =
+                                await userManagement.createUserInAccountTable(
+                                    userPayload,
+                                    finalAccountId,
+                                );
+                            console.log(
+                                `✅ Technical user created with ID: ${createdUser.id}`,
+                            );
+                            createdTechnicalUsers.push(createdUser);
+                        } else {
+                            console.warn(
+                                '⚠️ DynamoDB not available - skipping technical user creation',
+                            );
+                        }
+                    } catch (userError: any) {
+                        console.error(
+                            `❌ Failed to create technical user:`,
+                            userError.message,
+                        );
+                        // Continue with other users even if one fails
+                    }
+                }
+
+                console.log(
+                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
+                );
+            }
+
             return res.status(HttpStatus.CREATED).json({
                 result: 'success',
                 msg: 'Account onboarded successfully',
                 data: {
                     ...savedAccount,
                     infraProvisioning: infraProvisioningResult,
+                    technicalUsersCreated: createdTechnicalUsers.length,
                 },
                 accountId: finalAccountId,
             });
