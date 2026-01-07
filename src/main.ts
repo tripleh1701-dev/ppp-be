@@ -72,16 +72,29 @@ const cognitoAuth: any = {
 // Note: dotenv.config() is called at the top of the file before imports
 import {fetchGitHubRepositories, fetchGitHubBranches} from './utils/githubApiClient';
 
+dotenv.config();
 
 const MIN_CONNECTIVITY_TEST_MS = 2500;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-// import {CognitoAuthService} from './services/cognitoAuth';
 
-// Cognito auth service instance
-// const cognitoAuth = new CognitoAuthService();
+function validateOutboundUrl(urlStr: string, fieldName: string): URL {
+    let url: URL;
+    try {
+        url = new URL(urlStr);
+    } catch {
+        throw new Error(`Invalid ${fieldName}`);
+    }
 
-// Note: dotenv.config() is called at the top of the file before imports
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+        throw new Error(`Invalid ${fieldName}`);
+    }
+
+    const hostname = (url.hostname || '').toLowerCase();
+    if (!hostname) throw new Error(`Invalid ${fieldName}`);
+
+    return url;
+}
 
 const STORAGE_DIR = process.env.STORAGE_DIR
     ? path.resolve(process.env.STORAGE_DIR)
@@ -127,13 +140,19 @@ const accounts = new AccountsService(STORAGE_DIR);
 // Using definite assignment assertion (!) to indicate these will be initialized before use
 let accountsDynamoDB: AccountsDynamoDBService;
 let enterprises: any;
+
+const businessUnits = new BusinessUnitsService(STORAGE_DIR);
+const templates = new TemplatesService(STORAGE_DIR);
+const pipelineYaml = new PipelineYamlService(STORAGE_DIR);
+const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
+// Global service variables - will be initialized in bootstrap after env vars are loaded
 let services: any;
 let products: any;
 let enterpriseProductsServices: any;
 let accountLicenses: AccountLicensesDynamoDBService;
 let userManagement: UserManagementDynamoDBService;
 let AccessControl_Service: AccessControl_DynamoDBService;
-let environments: any;
+let environments: any; // Will be EnvironmentsService or EnvironmentsDynamoDBService
 let globalSettings: GlobalSettingsDynamoDBService;
 let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService;
 let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService;
@@ -171,11 +190,6 @@ if (storageMode === 'dynamodb') {
     );
     environments = new EnvironmentsService(STORAGE_DIR);
 }
-
-const businessUnits = new BusinessUnitsService(STORAGE_DIR);
-const templates = new TemplatesService(STORAGE_DIR);
-const pipelineYaml = new PipelineYamlService(STORAGE_DIR);
-const pipelineConfig = new PipelineConfigService(STORAGE_DIR);
 
 // Legacy services (will be replaced by AccessControl_Service)
 const users = new UsersService();
@@ -294,8 +308,10 @@ class AuthController {
             // Get user's groups and roles
             let userRole = 'User'; // Default role
             try {
+                // Note: For auth, we don't have account context, so only works for Systiva users
                 const userGroups = await userManagement.getUserGroups(user.id);
                 if (userGroups && userGroups.length > 0) {
+                    // Get roles from the first group
                     const groupRoles = await userManagement.getGroupRoles(
                         userGroups[0].id,
                     );
@@ -305,6 +321,7 @@ class AuthController {
                 }
             } catch (roleError) {
                 safeConsoleError('Error fetching user roles:', roleError);
+                // Continue with default role
             }
 
             // Generate JWT token (secure)
@@ -332,6 +349,7 @@ class AuthController {
                 },
             });
         } catch (error) {
+            // SECURITY: Use sanitized error logging to prevent password leaks
             safeConsoleError('Error during login', error);
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
@@ -408,6 +426,7 @@ class AuthController {
 
     @Post('logout')
     async logout(@Res() res: any) {
+        // In a real implementation, invalidate the token
         return res.status(HttpStatus.OK).json({
             success: true,
             message: 'Logged out successfully',
@@ -533,8 +552,39 @@ APP_BASE_URL=${appBaseUrl}`,
         @Query('enterpriseId') enterpriseId?: string,
         @Query('enterpriseName') enterpriseName?: string,
         @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
         @Query('userId') userId?: string,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
     ) {
+        // Log received query parameters
+        console.log('🔑 [OAuth Callback] Received query parameters:', {
+            hasCode: !!code,
+            hasState: !!state,
+            accountId: accountId,
+            accountName: accountName,
+            enterpriseId: enterpriseId,
+            enterpriseName: enterpriseName,
+            workstream: workstream,
+            product: product,
+            service: service,
+            userId: userId,
+            credentialName: credentialName,
+            connectorName: connectorName,
+            allQueryParams: {
+                code,
+                state,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+                userId,
+            },
+        });
         try {
             // Handle OAuth errors from GitHub
             if (error) {
@@ -723,19 +773,49 @@ APP_BASE_URL=${appBaseUrl}`,
 
             // Store the access token securely
             try {
-                await this.githubOAuthService.storeAccessToken({
+                console.log('💾 [OAuth Callback] Storing token with parameters:', {
                     userId: userId,
                     accountId: accountId,
                     accountName: accountName,
                     enterpriseId: enterpriseId,
                     enterpriseName: enterpriseName,
                     workstream: workstream,
+                    product: product,
+                    service: service,
+                    hasAccessToken: !!access_token,
+                    tokenType: token_type || 'bearer',
+                    scope: scope,
+                });
+
+                const storedToken = await this.githubOAuthService.storeAccessToken({
+                    userId: userId,
+                    accountId: accountId,
+                    accountName: accountName,
+                    enterpriseId: enterpriseId,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    product: product,
+                    service: service,
+                    credentialName: credentialName,
+                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
                 });
+
+                console.log('✅ [OAuth Callback] Token stored successfully:', {
+                    id: storedToken.id,
+                    accountId: storedToken.accountId,
+                    enterpriseId: storedToken.enterpriseId,
+                });
             } catch (storageError) {
-                console.error('Failed to store access token:', storageError);
+                console.error('❌ [OAuth Callback] Failed to store access token:', storageError);
+                console.error('❌ [OAuth Callback] Storage error details:', {
+                    message: (storageError as any)?.message,
+                    stack: (storageError as any)?.stack,
+                    accountId: accountId,
+                    enterpriseId: enterpriseId,
+                });
                 // Continue - token exchange was successful even if storage fails
             }
 
@@ -760,8 +840,8 @@ APP_BASE_URL=${appBaseUrl}`,
                     <script>
                         // Send success message to parent window if opened as popup
                         if (window.opener) {
-                            window.opener.postMessage({
-                                type: 'oauth-success',
+                            window.opener.postMessage({ 
+                                type: 'oauth-success', 
                                 accessToken: '${access_token}',
                                 tokenType: '${token_type || 'bearer'}',
                                 scope: '${scope || 'repo'}'
@@ -822,15 +902,56 @@ class OAuthTokenController {
     async exchangeToken(
         @Res() res: any,
         @Body() body: any,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-        @Query('workstream') workstream?: string,
-        @Query('userId') userId?: string,
+        @Query('accountId') queryAccountId?: string,
+        @Query('accountName') queryAccountName?: string,
+        @Query('enterpriseId') queryEnterpriseId?: string,
+        @Query('enterpriseName') queryEnterpriseName?: string,
+        @Query('workstream') queryWorkstream?: string,
+        @Query('product') queryProduct?: string,
+        @Query('service') queryService?: string,
+        @Query('userId') queryUserId?: string,
+        @Query('credentialName') queryCredentialName?: string,
+        @Query('connectorName') queryConnectorName?: string,
     ) {
         try {
-            const {code, redirectUri: customRedirectUri} = body;
+            const {
+                code,
+                redirectUri: customRedirectUri,
+                accountId: bodyAccountId,
+                accountName: bodyAccountName,
+                enterpriseId: bodyEnterpriseId,
+                enterpriseName: bodyEnterpriseName,
+                workstream: bodyWorkstream,
+                product: bodyProduct,
+                service: bodyService,
+                userId: bodyUserId,
+                credentialName: bodyCredentialName,
+                connectorName: bodyConnectorName,
+            } = body;
+
+            // Use body parameters first, fallback to query parameters
+            const accountId = bodyAccountId || queryAccountId;
+            const accountName = bodyAccountName || queryAccountName;
+            const enterpriseId = bodyEnterpriseId || queryEnterpriseId;
+            const enterpriseName = bodyEnterpriseName || queryEnterpriseName;
+            const workstream = bodyWorkstream || queryWorkstream;
+            const product = bodyProduct || queryProduct;
+            const service = bodyService || queryService;
+            const userId = bodyUserId || queryUserId;
+            const credentialName = bodyCredentialName || queryCredentialName;
+            const connectorName = bodyConnectorName || queryConnectorName;
+
+            console.log('💾 [OAuth Token Exchange] Received parameters:', {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+                userId,
+                hasCode: !!code,
+            });
 
             if (!code) {
                 return res.status(HttpStatus.BAD_REQUEST).json({
@@ -874,8 +995,13 @@ class OAuthTokenController {
                 },
             );
 
-            const {access_token, token_type, scope, error, error_description} =
-                tokenResponse.data;
+            const {
+                access_token,
+                token_type,
+                scope,
+                error,
+                error_description,
+            } = tokenResponse.data;
 
             if (error) {
                 console.error('GitHub OAuth error:', error, error_description);
@@ -897,19 +1023,48 @@ class OAuthTokenController {
 
             // Store the access token securely
             try {
-                await this.githubOAuthService.storeAccessToken({
+                console.log('💾 [OAuth Token Exchange] Storing token with parameters:', {
+                    userId,
+                    accountId,
+                    accountName,
+                    enterpriseId,
+                    enterpriseName,
+                    workstream,
+                    product,
+                    service,
+                    credentialName,
+                    connectorName,
+                    hasAccessToken: !!access_token,
+                    tokenType: token_type || 'bearer',
+                    scope,
+                });
+
+                const storedToken = await this.githubOAuthService.storeAccessToken({
                     userId: userId,
                     accountId: accountId,
                     accountName: accountName,
                     enterpriseId: enterpriseId,
                     enterpriseName: enterpriseName,
                     workstream: workstream,
+                    product: product,
+                    service: service,
+                    credentialName: credentialName,
+                    connectorName: connectorName,
                     accessToken: access_token,
                     tokenType: token_type || 'bearer',
                     scope: scope,
                 });
+
+                console.log('✅ [OAuth Token Exchange] Token stored successfully:', {
+                    id: storedToken.id,
+                    accountId: storedToken.accountId,
+                    enterpriseId: storedToken.enterpriseId,
+                    workstream: storedToken.workstream,
+                    product: storedToken.product,
+                    service: storedToken.service,
+                });
             } catch (storageError) {
-                console.error('Failed to store access token:', storageError);
+                console.error('❌ [OAuth Token Exchange] Failed to store access token:', storageError);
                 // Continue even if storage fails - token exchange was successful
             }
 
@@ -919,8 +1074,7 @@ class OAuthTokenController {
                 accessToken: access_token,
                 tokenType: token_type || 'bearer',
                 scope: scope || 'repo',
-                message:
-                    'GitHub authorization successful. The app will appear in your GitHub Authorized OAuth Apps.',
+                message: 'GitHub authorization successful. The app will appear in your GitHub Authorized OAuth Apps.',
             });
         } catch (error: any) {
             console.error('Token exchange error:', error);
@@ -928,6 +1082,346 @@ class OAuthTokenController {
                 success: false,
                 message:
                     error.message || 'Failed to exchange authorization code',
+            });
+        }
+    }
+}
+
+// ============================================================================
+// GITHUB REPOSITORIES ENDPOINT
+// ============================================================================
+// Endpoint: GET /api/github/repos
+// Purpose: Fetch GitHub repositories using OAuth authentication tokens
+// ============================================================================
+
+@Controller('api/github')
+class GitHubController {
+    private githubOAuthService: GitHubOAuthService;
+
+    constructor() {
+        this.githubOAuthService = new GitHubOAuthService();
+    }
+
+    /**
+     * GET /api/github/repos
+     * Fetches GitHub repositories for a given username using OAuth authentication
+     * 
+     * Query Parameters:
+     * - credentialName: Name of the credential (optional if connectorName provided)
+     * - connectorName: Name of the connector (optional if credentialName provided)
+     * - username: GitHub username (required)
+     * - accountId: Account ID (required)
+     * - enterpriseId: Enterprise ID (required)
+     */
+    @Get('repos')
+    async getRepositories(
+        @Res() res: any,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
+        @Query('username') username?: string,
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
+    ) {
+        try {
+            // Validate required parameters
+            if (!username) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'username parameter is required',
+                });
+            }
+
+            if (!accountId || !enterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'accountId and enterpriseId parameters are required',
+                });
+            }
+
+            // Validate that either credentialName or connectorName is provided
+            if (!credentialName && !connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Either credentialName or connectorName must be provided',
+                });
+            }
+
+            if (credentialName && connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
+                });
+            }
+
+            // Validate username format (basic validation)
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(username)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub username format',
+                });
+            }
+
+            console.log(`[GitHub Repos API] Fetching repos for username: ${username}`);
+            console.log(`[GitHub Repos API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
+
+            // Retrieve OAuth token from database
+            let oauthToken;
+            try {
+                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
+                    credentialName: credentialName || undefined,
+                    connectorName: connectorName || undefined,
+                    accountId: accountId,
+                    enterpriseId: enterpriseId,
+                    accountName: accountName,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    product: product,
+                    service: service,
+                });
+            } catch (error: any) {
+                console.error('[GitHub Repos API] Error retrieving OAuth token:', error);
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error retrieving OAuth token from database',
+                    error: error.message,
+                });
+            }
+
+            if (!oauthToken) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    success: false,
+                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
+                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
+                });
+            }
+
+            // Check if token is expired
+            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    message: 'OAuth token has expired. Please re-authenticate.',
+                    expiresAt: oauthToken.expiresAt,
+                });
+            }
+
+            console.log(`[GitHub Repos API] OAuth token retrieved successfully`);
+
+            // Fetch repositories from GitHub API
+            let repositories;
+            try {
+                repositories = await fetchGitHubRepositories(
+                    username,
+                    oauthToken.accessToken,
+                    oauthToken.tokenType,
+                );
+                console.log(`[GitHub Repos API] Successfully fetched ${repositories.length} repositories`);
+            } catch (error: any) {
+                console.error('[GitHub Repos API] Error fetching repositories from GitHub:', error);
+
+                // Handle specific GitHub API errors
+                if (error.message.includes('401') || error.message.includes('403')) {
+                    return res.status(HttpStatus.UNAUTHORIZED).json({
+                        success: false,
+                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
+                        error: error.message,
+                    });
+                }
+
+                if (error.message.includes('404')) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        message: `GitHub user "${username}" not found`,
+                        error: error.message,
+                    });
+                }
+
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error fetching repositories from GitHub API',
+                    error: error.message,
+                });
+            }
+
+            // Return repositories
+            return res.status(HttpStatus.OK).json(repositories);
+        } catch (error: any) {
+            console.error('[GitHub Repos API] Unexpected error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message,
+            });
+        }
+    }
+
+    /**
+     * GET /api/github/branches
+     * Fetches GitHub repository branches for a given owner/repo using OAuth authentication
+     * 
+     * Query Parameters:
+     * - credentialName: Name of the credential (optional if connectorName provided)
+     * - connectorName: Name of the connector (optional if credentialName provided)
+     * - owner: GitHub repository owner (required)
+     * - repo: GitHub repository name (required)
+     * - accountId: Account ID (required)
+     * - enterpriseId: Enterprise ID (required)
+     */
+    @Get('branches')
+    async getBranches(
+        @Res() res: any,
+        @Query('credentialName') credentialName?: string,
+        @Query('connectorName') connectorName?: string,
+        @Query('owner') owner?: string,
+        @Query('repo') repo?: string,
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
+    ) {
+        try {
+            // Validate required parameters
+            if (!owner || !repo) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'owner and repo parameters are required',
+                });
+            }
+
+            if (!accountId || !enterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'accountId and enterpriseId parameters are required',
+                });
+            }
+
+            // Validate that either credentialName or connectorName is provided
+            if (!credentialName && !connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Either credentialName or connectorName must be provided',
+                });
+            }
+
+            if (credentialName && connectorName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Cannot provide both credentialName and connectorName. Provide only one.',
+                });
+            }
+
+            // Validate owner and repo format (basic validation)
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,38}$/.test(owner)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub owner format',
+                });
+            }
+
+            if (!/^[a-zA-Z0-9]([a-zA-Z0-9]|-(?![.-])){0,100}$/.test(repo)) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    message: 'Invalid GitHub repository name format',
+                });
+            }
+
+            console.log(`[GitHub Branches API] Fetching branches for owner: ${owner}, repo: ${repo}`);
+            console.log(`[GitHub Branches API] Using ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`);
+
+            // Retrieve OAuth token from database
+            let oauthToken;
+            try {
+                oauthToken = await this.githubOAuthService.getAccessTokenByCredentialOrConnector({
+                    credentialName: credentialName || undefined,
+                    connectorName: connectorName || undefined,
+                    accountId: accountId,
+                    enterpriseId: enterpriseId,
+                    accountName: accountName,
+                    enterpriseName: enterpriseName,
+                    workstream: workstream,
+                    product: product,
+                    service: service,
+                });
+            } catch (error: any) {
+                console.error('[GitHub Branches API] Error retrieving OAuth token:', error);
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error retrieving OAuth token from database',
+                    error: error.message,
+                });
+            }
+
+            if (!oauthToken) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    success: false,
+                    message: `OAuth token not found for ${credentialName ? 'credential' : 'connector'}: ${credentialName || connectorName}`,
+                    hint: 'Make sure OAuth authentication has been completed for this credential/connector',
+                });
+            }
+
+            // Check if token is expired
+            if (oauthToken.expiresAt && new Date(oauthToken.expiresAt) < new Date()) {
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    message: 'OAuth token has expired. Please re-authenticate.',
+                    expiresAt: oauthToken.expiresAt,
+                });
+            }
+
+            console.log(`[GitHub Branches API] OAuth token retrieved successfully`);
+
+            // Fetch branches from GitHub API
+            let branches;
+            try {
+                branches = await fetchGitHubBranches(
+                    owner,
+                    repo,
+                    oauthToken.accessToken,
+                    oauthToken.tokenType,
+                );
+                console.log(`[GitHub Branches API] Successfully fetched ${branches.length} branches`);
+            } catch (error: any) {
+                console.error('[GitHub Branches API] Error fetching branches from GitHub:', error);
+
+                // Handle specific GitHub API errors
+                if (error.message.includes('401') || error.message.includes('403')) {
+                    return res.status(HttpStatus.UNAUTHORIZED).json({
+                        success: false,
+                        message: 'GitHub API authentication failed. Token may be invalid or expired.',
+                        error: error.message,
+                    });
+                }
+
+                if (error.message.includes('404')) {
+                    return res.status(HttpStatus.NOT_FOUND).json({
+                        success: false,
+                        message: `GitHub repository "${owner}/${repo}" not found or not accessible`,
+                        error: error.message,
+                    });
+                }
+
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    message: 'Error fetching branches from GitHub API',
+                    error: error.message,
+                });
+            }
+
+            // Return branches (frontend expects array with 'name' field)
+            return res.status(HttpStatus.OK).json(branches);
+        } catch (error: any) {
+            console.error('[GitHub Branches API] Unexpected error:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                message: 'Internal server error',
+                error: error.message,
             });
         }
     }
@@ -942,12 +1436,18 @@ class OAuthTokenController {
 
 @Controller('api/connectors')
 class ConnectorsController {
+    private githubOAuthService: GitHubOAuthService;
+
+    constructor() {
+        this.githubOAuthService = new GitHubOAuthService();
+    }
+
     /**
      * POST /api/connectors/jira/test-connection
-     *
+     * 
      * Tests JIRA connectivity using Username and API key:
      * - Calls: <url>/rest/api/3/myself
-     *
+     * 
      * Request Body:
      * {
      *   "connectorName": "Jira",
@@ -956,7 +1456,7 @@ class ConnectorsController {
      *   "username": "v88654876@gmail.com",
      *   "apiToken": "ATATT3xFfGF0..."
      * }
-     *
+     * 
      * Response:
      * {
      *   "success": true,
@@ -974,7 +1474,7 @@ class ConnectorsController {
     async testJiraConnection(@Res() res: any, @Body() body: any) {
         try {
             // Extract credentials from request body
-            const {url, username, apiToken, credentialName} = body;
+            const { url, username, apiToken, credentialName } = body;
 
             // Log received data for debugging
             console.log('🧪 [JIRA Test] Received request:', {
@@ -983,12 +1483,12 @@ class ConnectorsController {
                 hasApiToken: !!apiToken,
                 hasCredentialName: !!credentialName,
                 originalUrl: url,
-                bodyKeys: Object.keys(body),
+                bodyKeys: Object.keys(body)
             });
 
             // Normalize URL - extract base domain
             let normalizedUrl = url ? url.trim() : '';
-
+            
             if (normalizedUrl) {
                 try {
                     const urlObj = new URL(normalizedUrl);
@@ -999,8 +1499,7 @@ class ConnectorsController {
                     normalizedUrl = normalizedUrl.replace(/\/$/, '');
                 } catch (error) {
                     // If URL parsing fails, try to clean it manually
-                    normalizedUrl = normalizedUrl
-                        .replace(/\/rest\/.*$/, '')
+                    normalizedUrl = normalizedUrl.replace(/\/rest\/.*$/, '')
                         .replace(/\/$/, '');
                 }
             }
@@ -1011,7 +1510,7 @@ class ConnectorsController {
                     success: false,
                     status: 'failed',
                     connected: false,
-                    message: 'Missing required field: url',
+                    message: 'Missing required field: url'
                 });
             }
 
@@ -1022,13 +1521,13 @@ class ConnectorsController {
                     success: false,
                     status: 'failed',
                     connected: false,
-                    message: 'Invalid URL format',
+                    message: 'Invalid URL format'
                 });
             }
 
             console.log('🔗 [JIRA Test] URL normalized:', {
                 original: url,
-                normalized: normalizedUrl,
+                normalized: normalizedUrl
             });
 
             // Validate required fields
@@ -1038,65 +1537,50 @@ class ConnectorsController {
             if (!apiToken) missingFields.push('apiToken');
 
             if (missingFields.length > 0) {
-                const errorMessage = `Missing required fields: ${missingFields.join(
-                    ', ',
-                )}. Please provide url, username, and apiToken.`;
-
+                const errorMessage = `Missing required fields: ${missingFields.join(', ')}. Please provide url, username, and apiToken.`;
+                
                 return res.status(HttpStatus.BAD_REQUEST).json({
                     success: false,
                     status: 'failed',
                     connected: false,
                     message: errorMessage,
-                    missingFields: missingFields,
+                    missingFields: missingFields
                 });
             }
 
             // Test JIRA connection using Username and API key
-            console.log(
-                '👤 [JIRA Test] Using Username authentication (direct API call):',
-                {
-                    url: normalizedUrl,
-                    username: username,
-                    hasApiToken: !!apiToken,
-                },
-            );
+            console.log('👤 [JIRA Test] Using Username authentication (direct API call):', {
+                url: normalizedUrl,
+                username: username,
+                hasApiToken: !!apiToken
+            });
 
             // Convert username:apiToken to Base64 for Basic Authentication
             const credentials = `${username}:${apiToken}`;
-            const base64Credentials =
-                Buffer.from(credentials).toString('base64');
-            console.log(
-                '🔐 [JIRA Test] Base64 credentials generated (length):',
-                base64Credentials.length,
-            );
+            const base64Credentials = Buffer.from(credentials).toString('base64');
+            console.log('🔐 [JIRA Test] Base64 credentials generated (length):', base64Credentials.length);
 
             // Construct JIRA API endpoint for testing connectivity
             // Using /rest/api/3/myself endpoint which returns current user info
             const jiraApiUrl = `${normalizedUrl}/rest/api/3/myself`;
-            console.log(
-                '🌐 [JIRA Test] Calling JIRA API directly:',
-                jiraApiUrl,
-            );
+            console.log('🌐 [JIRA Test] Calling JIRA API directly:', jiraApiUrl);
 
             try {
                 // Make API call to JIRA with Basic Authentication
                 const response = await axios.get(jiraApiUrl, {
                     headers: {
-                        Authorization: `Basic ${base64Credentials}`,
-                        Accept: 'application/json',
-                        'Content-Type': 'application/json',
+                        'Authorization': `Basic ${base64Credentials}`,
+                        'Accept': 'application/json',
+                        'Content-Type': 'application/json'
                     },
-                    timeout: 10000, // 10 second timeout
+                    timeout: 10000 // 10 second timeout
                 });
 
-                console.log(
-                    '✅ [JIRA Test] JIRA API response status:',
-                    response.status,
-                );
+                console.log('✅ [JIRA Test] JIRA API response status:', response.status);
                 console.log('📦 [JIRA Test] JIRA API response data:', {
                     accountId: response.data.accountId,
                     displayName: response.data.displayName,
-                    emailAddress: response.data.emailAddress,
+                    emailAddress: response.data.emailAddress
                 });
 
                 // If we get a successful response (200-299), connection is successful
@@ -1109,22 +1593,19 @@ class ConnectorsController {
                         userInfo: {
                             accountId: response.data.accountId,
                             displayName: response.data.displayName,
-                            emailAddress: response.data.emailAddress,
-                        },
+                            emailAddress: response.data.emailAddress
+                        }
                     });
                 } else {
                     return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                         success: false,
                         status: 'failed',
                         connected: false,
-                        message: `Unexpected response status: ${response.status}`,
+                        message: `Unexpected response status: ${response.status}`
                     });
                 }
             } catch (error: any) {
-                console.error(
-                    '❌ [JIRA Test] Error testing connectivity:',
-                    error,
-                );
+                console.error('❌ [JIRA Test] Error testing connectivity:', error);
 
                 // Handle different types of errors
                 let errorMessage = 'Failed to connect to JIRA';
@@ -1134,14 +1615,11 @@ class ConnectorsController {
                     statusCode = error.response.status;
 
                     if (statusCode === HttpStatus.UNAUTHORIZED) {
-                        errorMessage =
-                            'Authentication failed. Please check your username and API token.';
+                        errorMessage = 'Authentication failed. Please check your username and API token.';
                     } else if (statusCode === HttpStatus.FORBIDDEN) {
-                        errorMessage =
-                            'Access forbidden. Please check your API token permissions.';
+                        errorMessage = 'Access forbidden. Please check your API token permissions.';
                     } else if (statusCode === HttpStatus.NOT_FOUND) {
-                        errorMessage =
-                            'JIRA instance not found. Please check the URL.';
+                        errorMessage = 'JIRA instance not found. Please check the URL.';
                     } else {
                         errorMessage = `JIRA API error: ${error.response.status} - ${error.response.statusText}`;
                     }
@@ -1149,28 +1627,17 @@ class ConnectorsController {
                     console.error('📛 [JIRA Test] JIRA API error response:', {
                         status: error.response.status,
                         statusText: error.response.statusText,
-                        data: error.response.data,
+                        data: error.response.data
                     });
                 } else if (error.request) {
-                    errorMessage =
-                        'No response from JIRA server. Please check the URL and network connectivity.';
-                    console.error(
-                        '📛 [JIRA Test] No response received:',
-                        error.request,
-                    );
+                    errorMessage = 'No response from JIRA server. Please check the URL and network connectivity.';
+                    console.error('📛 [JIRA Test] No response received:', error.request);
                 } else if (error.code === 'ECONNREFUSED') {
-                    errorMessage =
-                        'Connection refused. Please check the JIRA URL.';
-                } else if (
-                    error.code === 'ETIMEDOUT' ||
-                    error.code === 'ECONNABORTED'
-                ) {
-                    errorMessage =
-                        'Connection timeout. Please check the JIRA URL and network connectivity.';
+                    errorMessage = 'Connection refused. Please check the JIRA URL.';
+                } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                    errorMessage = 'Connection timeout. Please check the JIRA URL and network connectivity.';
                 } else {
-                    errorMessage =
-                        error.message ||
-                        'Unknown error occurred while testing connectivity';
+                    errorMessage = error.message || 'Unknown error occurred while testing connectivity';
                 }
 
                 return res.status(statusCode).json({
@@ -1178,18 +1645,12 @@ class ConnectorsController {
                     status: 'failed',
                     connected: false,
                     message: errorMessage,
-                    error:
-                        process.env.NODE_ENV === 'development'
-                            ? error.message
-                            : undefined,
+                    error: process.env.NODE_ENV === 'development' ? error.message : undefined
                 });
             }
         } catch (error: any) {
             // This catch block handles unexpected errors during validation
-            console.error(
-                '❌ [JIRA Test] Unexpected error during validation:',
-                error,
-            );
+            console.error('❌ [JIRA Test] Unexpected error during validation:', error);
 
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
                 success: false,
@@ -1204,781 +1665,603 @@ class ConnectorsController {
             });
         }
     }
-}
-
-@Controller('api/accounts')
-class AccountsController {
-    @Get()
-    async list() {
-        try {
-            console.log('📋 GET /api/accounts - storageMode:', storageMode);
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                console.log('📋 Using DynamoDB service to list accounts');
-                const result = await accountsDynamoDB.list();
-                console.log('✅ Listed', result?.length || 0, 'accounts');
-                return result;
-            }
-            console.log('📋 Using filesystem service to list accounts');
-            return await accounts.list();
-        } catch (error: any) {
-            console.error('❌ Error listing accounts:', error);
-            return {
-                error: 'Failed to list accounts',
-                message: error?.message || 'Unknown error',
-                stack:
-                    process.env.NODE_ENV === 'dev' ? error?.stack : undefined,
-            };
-        }
-    }
-
-    @Get(':id')
-    async get(@Param('id') id: string) {
-        if (storageMode === 'dynamodb' && accountsDynamoDB) {
-            return await accountsDynamoDB.get(id); // String ID for DynamoDB
-        }
-        return await accounts.get(Number(id)); // Number ID for PostgreSQL
-    }
-
-    @Post()
-    async create(@Body() body: any) {
-        try {
-            console.log(
-                '📝 POST /api/accounts - Creating account:',
-                body?.accountName,
-            );
-
-            let result: any;
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                result = await accountsDynamoDB.create(body);
-                console.log('✅ Account created:', result?.id);
-            } else {
-                result = await accounts.create(body);
-            }
-
-            const createdAccountId = result?.id || result?.accountId;
-
-            // Create technical users in User Management table after successful account creation
-            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
-            const createdTechnicalUsers: any[] = [];
-            if (
-                body.technicalUsers &&
-                Array.isArray(body.technicalUsers) &&
-                body.technicalUsers.length > 0 &&
-                createdAccountId &&
-                storageMode === 'dynamodb' &&
-                userManagement
-            ) {
-                console.log(
-                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${createdAccountId}`,
-                );
-
-                for (const techUser of body.technicalUsers) {
-                    try {
-                        // Map technical user fields to User format
-                        const userPayload = {
-                            firstName:
-                                techUser.firstName || techUser.first_name || '',
-                            middleName:
-                                techUser.middleName ||
-                                techUser.middle_name ||
-                                '',
-                            lastName:
-                                techUser.lastName || techUser.last_name || '',
-                            emailAddress:
-                                techUser.adminEmail ||
-                                techUser.email ||
-                                techUser.emailAddress ||
-                                '',
-                            password:
-                                techUser.adminPassword ||
-                                techUser.password ||
-                                'TempPass123!',
-                            status:
-                                techUser.status === true
-                                    ? 'Active'
-                                    : techUser.status === false
-                                    ? 'Inactive'
-                                    : techUser.status || 'Active',
-                            startDate:
-                                techUser.assignmentStartDate ||
-                                techUser.startDate ||
-                                new Date().toISOString(),
-                            endDate:
-                                techUser.assignmentEndDate ||
-                                techUser.endDate ||
-                                '',
-                            technicalUser: true, // Mark as technical user
-                            assignedGroups: techUser.assignedUserGroup
-                                ? [techUser.assignedUserGroup]
-                                : [],
-                        };
-
-                        console.log(
-                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
-                        );
-
-                        // Use userManagement to create user with proper PK/SK structure
-                        const createdUser =
-                            await userManagement.createUserInAccountTable(
-                                userPayload,
-                                createdAccountId,
-                            );
-                        console.log(
-                            `✅ Technical user created with ID: ${createdUser.id}`,
-                        );
-                        createdTechnicalUsers.push(createdUser);
-                    } catch (userError: any) {
-                        console.error(
-                            `❌ Failed to create technical user:`,
-                            userError.message,
-                        );
-                        // Continue with other users even if one fails
-                    }
-                }
-
-                console.log(
-                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
-                );
-            }
-
-            return {
-                ...result,
-                technicalUsersCreated: createdTechnicalUsers.length,
-            };
-        } catch (error: any) {
-            console.error('❌ Error creating account:', error);
-            return {
-                error: 'Failed to create account',
-                message: error?.message || 'Unknown error',
-            };
-        }
-    }
-
-    @Put()
-    async update(@Body() body: any, @Res() res: any) {
-        // Support both 'id' and 'accountId' for flexibility
-        const accountId = body?.id || body?.accountId;
-        if (!accountId) {
-            return res.status(HttpStatus.BAD_REQUEST).json({
-                result: 'failed',
-                msg: 'id or accountId is required',
-            });
-        }
-
-        // Remove id/accountId from updates to avoid duplication
-        const {id, accountId: accId, ...updates} = body || {};
-
-        console.log('🔄 PUT /api/accounts - Updating account:', accountId);
-        console.log('🔄 Update payload:', JSON.stringify(updates, null, 2));
-
-        try {
-            if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                const updated = await accountsDynamoDB.update(
-                    accountId,
-                    updates,
-                );
-                if (!updated) {
-                    return res.status(HttpStatus.NOT_FOUND).json({
-                        result: 'failed',
-                        msg: 'Account not found',
-                        data: {accountId},
-                    });
-                }
-                console.log('✅ Account updated successfully:', accountId);
-                return res.status(HttpStatus.OK).json({
-                    result: 'success',
-                    msg: 'Account updated successfully',
-                    data: updated,
-                });
-            }
-
-            const updated = await accounts.update(Number(accountId), updates);
-            if (!updated) {
-                return res.status(HttpStatus.NOT_FOUND).json({
-                    result: 'failed',
-                    msg: 'Account not found',
-                    data: {accountId},
-                });
-            }
-            console.log('✅ Account updated successfully:', accountId);
-            return res.status(HttpStatus.OK).json({
-                result: 'success',
-                msg: 'Account updated successfully',
-                data: updated,
-            });
-        } catch (error: any) {
-            console.error('❌ Error updating account:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                result: 'failed',
-                msg: `Failed to update account: ${error.message}`,
-            });
-        }
-    }
-
-    // Note: Use DELETE /api/accounts/offboard?accountId=xxx for proper deletion
-    // The @Delete(':id') handler was removed to avoid route conflicts with /offboard
 
     /**
-     * Onboard a new account
-     * POST /api/accounts/onboard
-     *
-     * Required fields: accountName, masterAccount, subscriptionTier
-     * Optional fields: addressDetails, technicalUser, email, firstName, lastName, etc.
+     * POST /api/connectors/github/test-connection
+     * 
+     * Tests GitHub connectivity using OAuth authentication:
+     * - Supports Account URLs (e.g., https://github.com/Vipin-Gup) - NEW
+     * - Supports Repository URLs (e.g., https://github.com/owner/repo.git) - EXISTING
+     * - Looks up OAuth token by credentialName and account/enterprise context
+     * - Calls GitHub API to verify account or repository access
+     * 
+     * Request Body (Account URL):
+     * {
+     *   "connectorName": "GitHub",
+     *   "url": "https://github.com/Vipin-Gup",
+     *   "urlType": "Account",
+     *   "connectionType": "HTTP",
+     *   "authenticationType": "OAuth",
+     *   "credentialName": "Github_Cred_Fin",
+     *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
+     *   "accountName": "Accenture Digital",
+     *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
+     *   "enterpriseName": "SAP",
+     *   "workstream": "Fin_Acc_SAP",
+     *   "product": "DevOps",
+     *   "service": "Extension"
+     * }
+     * 
+     * Request Body (Repository URL):
+     * {
+     *   "connectorName": "GitHub",
+     *   "url": "https://github.com/tripleh1701-dev/ppp-fe.git",
+     *   "urlType": "Repository",
+     *   "connectionType": "HTTP",
+     *   "authenticationType": "OAuth",
+     *   "credentialName": "Github_Cred_Fin",
+     *   "accountId": "243c7cd0-4e7b-4da0-a570-8922a7837e4a",
+     *   "accountName": "Accenture Digital",
+     *   "enterpriseId": "a248a56f-c187-438b-97f8-955030f4bbe3",
+     *   "enterpriseName": "SAP",
+     *   "workstream": "Fin_Acc_SAP"
+     * }
+     * 
+     * Response:
+     * {
+     *   "success": true,
+     *   "status": "success",
+     *   "connected": true,
+     *   "message": "Successfully connected to GitHub account \"Vipin-Gup\"",
+     *   "userInfo": {
+     *     "login": "...",
+     *     "name": "...",
+     *     "email": "..."
+     *   }
+     * }
      */
-    @Post('onboard')
-    async onboard(@Body() body: any, @Req() req: any, @Res() res: any) {
-        try {
-            // Get authorization header to forward to infrastructure API
-            const authHeader =
-                req.headers?.authorization || req.headers?.Authorization || '';
-
-            // Validate required fields
-            const requiredFields = [
-                'accountName',
-                'masterAccount',
-                'subscriptionTier',
-            ];
-            const missingFields = requiredFields.filter(
-                (field) => !body[field],
-            );
-
-            if (missingFields.length > 0) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    result: 'failed',
-                    msg: `Missing required fields: ${missingFields.join(', ')}`,
-                });
-            }
-
-            // Validate mandatory arrays: licenses and technicalUsers
-            const hasLicenses =
-                body.licenses &&
-                Array.isArray(body.licenses) &&
-                body.licenses.length > 0;
-            const hasTechnicalUsers =
-                body.technicalUsers &&
-                Array.isArray(body.technicalUsers) &&
-                body.technicalUsers.length > 0;
-
-            const missingArrays: string[] = [];
-            if (!hasLicenses) missingArrays.push('At least one License');
-            if (!hasTechnicalUsers)
-                missingArrays.push('At least one Technical User');
-
-            if (missingArrays.length > 0) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    result: 'failed',
-                    msg: `Missing mandatory data: ${missingArrays.join(', ')}`,
-                });
-            }
-
-            // Validate subscription tier
-            const validTiers = ['public', 'private', 'platform'];
-            if (!validTiers.includes(body.subscriptionTier)) {
-                return res.status(HttpStatus.BAD_REQUEST).json({
-                    result: 'failed',
-                    msg: `Invalid subscriptionTier. Must be one of: ${validTiers.join(
-                        ', ',
-                    )}`,
-                });
-            }
-
-            console.log('🚀 Onboarding new account:', body.accountName);
-
-            const now = new Date();
-            let infraProvisioningResult: any = null;
-            let savedAccount: any = null;
-
-            // If infrastructure API is configured, let it handle persistence
-            // to avoid duplicate entries in DynamoDB
-            if (INFRA_PROVISIONING_API_BASE_URL) {
-                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/onboard`;
-
-                try {
-                    console.log(
-                        '🔧 Triggering infrastructure provisioning:',
-                        infraApiUrl,
-                    );
-
-                    // Build payload for infrastructure API
-                    // Generate default email if not provided (infra API requires email)
-                    const sanitizedAccountName = body.accountName
-                        .toLowerCase()
-                        .replace(/[^a-z0-9]/g, '');
-                    const defaultEmail = `admin@${sanitizedAccountName}.local`;
-
-                    const infraPayload = {
-                        accountName: body.accountName,
-                        subscriptionTier: body.subscriptionTier,
-                        email: body.email || body.adminEmail || defaultEmail,
-                        firstName: body.firstName || 'Admin',
-                        lastName: body.lastName || body.accountName,
-                        adminUsername: body.adminUsername || 'admin',
-                        adminEmail:
-                            body.adminEmail || body.email || defaultEmail,
-                        adminPassword: body.adminPassword || 'TempPass123!',
-                        createdBy: body.createdBy || 'admin',
-                    };
-
-                    console.log('📦 Infrastructure payload:', {
-                        ...infraPayload,
-                        adminPassword: '***hidden***',
-                    });
-
-                    // Build headers - forward auth token if present
-                    const infraHeaders: Record<string, string> = {
-                        'Content-Type': 'application/json',
-                    };
-                    if (authHeader) {
-                        infraHeaders['Authorization'] = authHeader;
-                        console.log(
-                            '🔐 Forwarding authorization header to infra API',
-                        );
-                    } else {
-                        console.log('⚠️ No authorization header to forward');
-                    }
-
-                    const infraResponse = await axios.post(
-                        infraApiUrl,
-                        infraPayload,
-                        {
-                            headers: infraHeaders,
-                            timeout: 30000, // 30 second timeout
-                        },
-                    );
-
-                    infraProvisioningResult = infraResponse.data;
-                    console.log(
-                        '✅ Infrastructure provisioning initiated:',
-                        infraProvisioningResult,
-                    );
-
-                    // Use the account created by infra API as the source of truth
-                    if (infraProvisioningResult?.data) {
-                        const infraAccountId =
-                            infraProvisioningResult.data.accountId;
-
-                        savedAccount = {
-                            id: infraAccountId,
-                            accountId: infraAccountId,
-                            accountName:
-                                infraProvisioningResult.data.accountName ||
-                                body.accountName,
-                            masterAccount: body.masterAccount,
-                            subscriptionTier:
-                                infraProvisioningResult.data.subscriptionTier ||
-                                body.subscriptionTier,
-                            email: infraProvisioningResult.data.email,
-                            firstName: infraProvisioningResult.data.firstName,
-                            lastName: infraProvisioningResult.data.lastName,
-                            provisioningState:
-                                infraProvisioningResult.data.provisioningState,
-                            stepFunctionExecutionArn:
-                                infraProvisioningResult.data
-                                    .stepFunctionExecutionArn,
-                            createdAt:
-                                infraProvisioningResult.data.registeredOn ||
-                                now.toISOString(),
-                            updatedAt:
-                                infraProvisioningResult.data.lastModified ||
-                                now.toISOString(),
-                            // Include arrays from frontend request
-                            addresses: body.addresses || [],
-                            technicalUsers: body.technicalUsers || [],
-                            licenses: body.licenses || [],
-                        };
-
-                        // Update the account in DynamoDB with additional fields
-                        // (addresses, technicalUsers, licenses) that infra API doesn't handle
-                        if (
-                            storageMode === 'dynamodb' &&
-                            accountsDynamoDB &&
-                            infraAccountId
-                        ) {
-                            try {
-                                console.log(
-                                    '📝 Updating account with additional details:',
-                                    infraAccountId,
-                                );
-                                await accountsDynamoDB.update(infraAccountId, {
-                                    addresses: body.addresses || [],
-                                    technicalUsers: body.technicalUsers || [],
-                                    licenses: body.licenses || [],
-                                    // Also store address details in flat format
-                                    addressLine1:
-                                        body.addressDetails?.addressLine1 || '',
-                                    addressLine2:
-                                        body.addressDetails?.addressLine2 || '',
-                                    city: body.addressDetails?.city || '',
-                                    state: body.addressDetails?.state || '',
-                                    country: body.addressDetails?.country || '',
-                                    // Technical user info
-                                    technicalUsername:
-                                        body.technicalUser?.adminUsername || '',
-                                } as any);
-                                console.log(
-                                    '✅ Account updated with addresses, technicalUsers, licenses',
-                                );
-                            } catch (updateError: any) {
-                                console.error(
-                                    '⚠️ Failed to update account with additional fields:',
-                                    updateError.message,
-                                );
-                            }
-                        }
-                    }
-                } catch (infraError: any) {
-                    console.error(
-                        '❌ Infrastructure provisioning failed:',
-                        infraError?.response?.data || infraError.message,
-                    );
-
-                    // Step Functions/Infra API failed - return error immediately
-                    // DO NOT save to DynamoDB if infrastructure provisioning fails
-                    const errorMessage =
-                        infraError?.response?.data?.msg ||
-                        infraError?.response?.data?.message ||
-                        infraError.message ||
-                        'Infrastructure provisioning failed';
-
-                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                        result: 'failed',
-                        msg: `Account creation failed: ${errorMessage}`,
-                        error: 'INFRASTRUCTURE_PROVISIONING_FAILED',
-                        details: infraError?.response?.data || null,
-                    });
-                }
-            } else {
-                // Infra API not configured - save locally to DynamoDB
-                console.log(
-                    '⚠️ INFRA_PROVISIONING_API_URL not configured - saving locally only',
-                );
-
-                // Generate account ID
-                const dateStr = now
-                    .toISOString()
-                    .slice(0, 10)
-                    .replace(/-/g, '');
-                const randomSuffix = Math.floor(Math.random() * 99)
-                    .toString()
-                    .padStart(2, '0');
-                const accountId = `${dateStr.slice(0, 6)}${randomSuffix}`;
-
-                // Build account data
-                const accountData: any = {
-                    id: accountId,
-                    accountId: accountId,
-                    accountName: body.accountName,
-                    masterAccount: body.masterAccount,
-                    subscriptionTier: body.subscriptionTier,
-                    provisioningState: 'active',
-                    status: 'ACTIVE',
-                    createdAt: now.toISOString(),
-                    updatedAt: now.toISOString(),
-                    createdBy: body.createdBy || 'admin',
-                };
-
-                // Add optional fields if provided
-                if (body.email) accountData.email = body.email;
-                if (body.firstName) accountData.firstName = body.firstName;
-                if (body.lastName) accountData.lastName = body.lastName;
-                if (body.adminUsername)
-                    accountData.adminUsername = body.adminUsername;
-                if (body.adminEmail) accountData.adminEmail = body.adminEmail;
-                if (body.addressDetails)
-                    accountData.addressDetails = body.addressDetails;
-                if (body.technicalUser)
-                    accountData.technicalUser = body.technicalUser;
-
-                // Add arrays for full data persistence
-                accountData.addresses = body.addresses || [];
-                accountData.technicalUsers = body.technicalUsers || [];
-                accountData.licenses = body.licenses || [];
-
-                // Flatten address details for easier querying
-                if (body.addressDetails) {
-                    accountData.addressLine1 =
-                        body.addressDetails.addressLine1 || '';
-                    accountData.addressLine2 =
-                        body.addressDetails.addressLine2 || '';
-                    accountData.city = body.addressDetails.city || '';
-                    accountData.state = body.addressDetails.state || '';
-                    accountData.country = body.addressDetails.country || '';
-                }
-
-                // Technical user info for display
-                if (body.technicalUser) {
-                    accountData.technicalUsername =
-                        body.technicalUser.adminUsername || '';
-                }
-
-                // Save to DynamoDB or PostgreSQL
-                if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                    savedAccount = await accountsDynamoDB.create(accountData);
-                } else {
-                    savedAccount = await accounts.create(accountData);
-                }
-
-                console.log(
-                    '✅ Account saved to local database:',
-                    savedAccount?.id,
-                );
-
-                infraProvisioningResult = {
-                    skipped: true,
-                    message:
-                        'Infrastructure provisioning API not configured - saved locally',
-                };
-            }
-
-            const finalAccountId =
-                savedAccount?.id || savedAccount?.accountId || 'unknown';
-            console.log('✅ Account onboarded successfully:', finalAccountId);
-
-            // Create technical users in User Management table
-            // PK: ACCOUNT#<accountId>, SK: USER#<userId>
-            const createdTechnicalUsers: any[] = [];
-            if (
-                body.technicalUsers &&
-                Array.isArray(body.technicalUsers) &&
-                body.technicalUsers.length > 0
-            ) {
-                console.log(
-                    `👥 Creating ${body.technicalUsers.length} technical user(s) for account ${finalAccountId}`,
-                );
-
-                for (const techUser of body.technicalUsers) {
-                    try {
-                        // Map technical user fields to User format
-                        const userPayload = {
-                            firstName:
-                                techUser.firstName || techUser.first_name || '',
-                            middleName:
-                                techUser.middleName ||
-                                techUser.middle_name ||
-                                '',
-                            lastName:
-                                techUser.lastName || techUser.last_name || '',
-                            emailAddress:
-                                techUser.adminEmail ||
-                                techUser.email ||
-                                techUser.emailAddress ||
-                                '',
-                            password:
-                                techUser.adminPassword ||
-                                techUser.password ||
-                                'TempPass123!',
-                            status: techUser.status || 'Active',
-                            startDate:
-                                techUser.assignmentStartDate ||
-                                techUser.startDate ||
-                                new Date().toISOString(),
-                            endDate:
-                                techUser.assignmentEndDate ||
-                                techUser.endDate ||
-                                '',
-                            technicalUser: true, // Mark as technical user
-                            assignedGroups: techUser.assignedUserGroup
-                                ? [techUser.assignedUserGroup]
-                                : [],
-                        };
-
-                        console.log(
-                            `👤 Creating technical user: ${userPayload.firstName} ${userPayload.lastName} (${userPayload.emailAddress})`,
-                        );
-
-                        // Use userManagement to create user with proper PK/SK structure
-                        // PK: ACCOUNT#<accountId>, SK: USER#<userId>
-                        if (storageMode === 'dynamodb' && userManagement) {
-                            const createdUser =
-                                await userManagement.createUserInAccountTable(
-                                    userPayload,
-                                    finalAccountId,
-                                );
-                            console.log(
-                                `✅ Technical user created with ID: ${createdUser.id}`,
-                            );
-                            createdTechnicalUsers.push(createdUser);
-                        } else {
-                            console.warn(
-                                '⚠️ DynamoDB not available - skipping technical user creation',
-                            );
-                        }
-                    } catch (userError: any) {
-                        console.error(
-                            `❌ Failed to create technical user:`,
-                            userError.message,
-                        );
-                        // Continue with other users even if one fails
-                    }
-                }
-
-                console.log(
-                    `✅ Created ${createdTechnicalUsers.length} technical user(s) successfully`,
-                );
-            }
-
-            return res.status(HttpStatus.CREATED).json({
-                result: 'success',
-                msg: 'Account onboarded successfully',
-                data: {
-                    ...savedAccount,
-                    infraProvisioning: infraProvisioningResult,
-                    technicalUsersCreated: createdTechnicalUsers.length,
-                },
-                accountId: finalAccountId,
-            });
-        } catch (error: any) {
-            console.error('❌ Error onboarding account:', error);
-            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                result: 'failed',
-                msg: `Failed to onboard account: ${error.message}`,
-            });
-        }
-    }
-
-    /**
-     * Offboard (delete) an account
-     * DELETE /api/accounts/offboard?accountId=xxx
-     *
-     * This deletes the account from the local database.
-     * Infrastructure deprovisioning is handled separately if configured.
-     */
-    @Delete('offboard')
-    async offboard(
-        @Query('accountId') accountId: string,
-        @Req() req: any,
+    @Post('github/test-connection')
+    async testGitHubConnection(
         @Res() res: any,
+        @Body() body: any,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('workstream') workstream?: string,
+        @Query('product') product?: string,
+        @Query('service') service?: string,
     ) {
         try {
-            // Get authorization header to forward to infrastructure API
-            const authHeader =
-                req.headers?.authorization || req.headers?.Authorization || '';
+            // Extract credentials from request body or query params
+            const {
+                url,
+                credentialName,
+                authenticationType,
+                urlType,
+                connectionType,
+                accountId: bodyAccountId,
+                accountName: bodyAccountName,
+                enterpriseId: bodyEnterpriseId,
+                enterpriseName: bodyEnterpriseName,
+                workstream: bodyWorkstream,
+                product: bodyProduct,
+                service: bodyService,
+            } = body;
 
-            if (!accountId) {
+            // Use body values first, fall back to query params
+            const finalAccountId = bodyAccountId || accountId;
+            const finalAccountName = bodyAccountName || accountName;
+            const finalEnterpriseId = bodyEnterpriseId || enterpriseId;
+            const finalEnterpriseName = bodyEnterpriseName || enterpriseName;
+            const finalWorkstream = bodyWorkstream || workstream;
+            const finalProduct = bodyProduct || product;
+            const finalService = bodyService || service;
+
+            // Log received data for debugging
+            console.log('🧪 [GitHub Test] Received request:', {
+                hasUrl: !!url,
+                hasCredentialName: !!credentialName,
+                authenticationType: authenticationType,
+                urlType: urlType,
+                connectionType: connectionType,
+                hasAccountId: !!finalAccountId,
+                hasEnterpriseId: !!finalEnterpriseId,
+                hasWorkstream: !!finalWorkstream,
+                hasProduct: !!finalProduct,
+                hasService: !!finalService,
+                originalUrl: url,
+                bodyKeys: Object.keys(body),
+            });
+
+            // Validate required fields
+            const missingFields: string[] = [];
+            if (!url) missingFields.push('url');
+            if (!credentialName) missingFields.push('credentialName');
+            
+            // Validate authentication type
+            if (authenticationType && authenticationType !== 'OAuth') {
                 return res.status(HttpStatus.BAD_REQUEST).json({
-                    result: 'failed',
-                    msg: 'accountId query parameter is required',
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'GitHub test-connection endpoint only supports OAuth authentication',
                 });
             }
 
-            console.log('🗑️ Offboarding account:', accountId);
+            if (missingFields.length > 0) {
+                const errorMessage = `Missing required fields: ${missingFields.join(', ')}`;
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: errorMessage,
+                    missingFields: missingFields,
+                });
+            }
 
-            let infraDeprovisioningResult: any = null;
-            let infraApiCalled = false;
+            // Validate accountId and enterpriseId for OAuth
+            if (!finalAccountId || !finalEnterpriseId) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'accountId and enterpriseId are required for OAuth authentication',
+                });
+            }
 
-            // Try infrastructure API first if configured (for infra cleanup)
-            if (INFRA_PROVISIONING_API_BASE_URL) {
-                const infraApiUrl = `${INFRA_PROVISIONING_API_BASE_URL}/offboard`;
-                infraApiCalled = true;
+            // Normalize URL
+            let normalizedUrl = url ? url.trim() : '';
+            if (!normalizedUrl) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Missing required field: url',
+                });
+            }
 
-                try {
-                    console.log(
-                        '🔧 Triggering infrastructure deprovisioning:',
-                        infraApiUrl,
-                    );
+            // Determine URL type if not explicitly provided (for backward compatibility)
+            const detectedUrlType = urlType || this.detectGitHubUrlType(normalizedUrl);
+            
+            console.log('🔍 [GitHub Test] URL type detection:', {
+                provided: urlType,
+                detected: detectedUrlType,
+                url: normalizedUrl,
+            });
 
-                    // Build headers - forward auth token if present
-                    const infraHeaders: Record<string, string> = {
-                        'Content-Type': 'application/json',
-                    };
-                    if (authHeader) {
-                        infraHeaders['Authorization'] = authHeader;
-                        console.log(
-                            '🔐 Forwarding authorization header to infra API',
-                        );
-                    } else {
-                        console.log('⚠️ No authorization header to forward');
-                    }
+            // Extract product and service from body if provided
+            console.log('🔑 [GitHub Test] Looking up OAuth token with parameters:', {
+                accountId: finalAccountId,
+                accountName: finalAccountName,
+                enterpriseId: finalEnterpriseId,
+                enterpriseName: finalEnterpriseName,
+                workstream: finalWorkstream,
+                product: finalProduct,
+                service: finalService,
+            });
 
-                    const infraResponse = await axios.delete(
-                        `${infraApiUrl}?accountId=${accountId}`,
-                        {
-                            headers: infraHeaders,
-                            timeout: 30000, // 30 second timeout
-                        },
-                    );
+            const oauthToken = await this.githubOAuthService.getAccessToken({
+                accountId: finalAccountId,
+                accountName: finalAccountName,
+                enterpriseId: finalEnterpriseId,
+                enterpriseName: finalEnterpriseName,
+                workstream: finalWorkstream,
+                product: finalProduct,
+                service: finalService,
+            });
 
-                    infraDeprovisioningResult = infraResponse.data;
-                    console.log(
-                        '✅ Infrastructure API response:',
-                        infraDeprovisioningResult,
-                    );
-                } catch (infraError: any) {
-                    console.error(
-                        '⚠️ Infrastructure deprovisioning API call failed:',
-                        infraError?.response?.data || infraError.message,
-                    );
-                    infraDeprovisioningResult = {
-                        warning: 'Infrastructure API call failed',
-                        message:
-                            infraError?.response?.data?.msg ||
-                            infraError.message,
-                        note: 'Proceeding with local database deletion',
-                    };
-                    // Continue with local deletion even if infra API fails
-                }
+            if (!oauthToken) {
+                console.error('❌ [GitHub Test] OAuth token lookup failed. Parameters used:', {
+                    accountId: finalAccountId,
+                    accountName: finalAccountName,
+                    enterpriseId: finalEnterpriseId,
+                    enterpriseName: finalEnterpriseName,
+                    workstream: finalWorkstream,
+                    product: finalProduct,
+                    service: finalService,
+                });
+                return res.status(HttpStatus.UNAUTHORIZED).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'OAuth token not found. Please ensure OAuth is configured in Manage Credentials.',
+                });
+            }
+
+            console.log('✅ [GitHub Test] OAuth token found (length):', oauthToken.length);
+
+            // Route to appropriate test function based on URL type
+            if (detectedUrlType === 'Account') {
+                return await this.testGitHubAccountConnectivity(
+                    res,
+                    normalizedUrl,
+                    oauthToken,
+                );
             } else {
-                console.log(
-                    '⚠️ INFRA_PROVISIONING_API_URL not configured - deleting locally only',
+                // Repository URL (existing logic)
+                return await this.testGitHubRepositoryConnectivity(
+                    res,
+                    normalizedUrl,
+                    oauthToken,
                 );
-                infraDeprovisioningResult = {
-                    skipped: true,
-                    message:
-                        'Infrastructure API not configured - deleted locally only',
-                };
+            }
+        } catch (error: any) {
+            // This catch block handles unexpected errors during validation
+            console.error('❌ [GitHub Test] Unexpected error during validation:', error);
+
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'An unexpected error occurred while processing the request',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            });
+        }
+    }
+
+    /**
+     * Detect GitHub URL type (Account or Repository)
+     */
+    private detectGitHubUrlType(url: string): 'Account' | 'Repository' {
+        try {
+            // Check if it's an SSH URL (always repository)
+            if (url.startsWith('git@')) {
+                return 'Repository';
             }
 
-            // ALWAYS delete from local database regardless of infra API result
-            // This ensures the account is removed from the database
-            try {
-                if (storageMode === 'dynamodb' && accountsDynamoDB) {
-                    console.log(
-                        '🗑️ Deleting account from DynamoDB:',
-                        accountId,
-                    );
-                    await accountsDynamoDB.remove(accountId);
-                    console.log('✅ Account deleted from DynamoDB');
-                } else {
-                    console.log(
-                        '🗑️ Deleting account from local storage:',
-                        accountId,
-                    );
-                    await accounts.remove(Number(accountId));
-                    console.log('✅ Account deleted from local storage');
+            // Parse HTTP/HTTPS URL
+            const urlObj = new URL(url);
+            if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
+                const pathParts = urlObj.pathname.split('/').filter((p) => p);
+                // Account URL: https://github.com/username (1 part)
+                // Repository URL: https://github.com/owner/repo (2+ parts)
+                if (pathParts.length === 1) {
+                    return 'Account';
+                } else if (pathParts.length >= 2) {
+                    return 'Repository';
                 }
-            } catch (deleteError: any) {
-                console.error(
-                    '❌ Database deletion failed:',
-                    deleteError.message,
-                );
-                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                    result: 'failed',
-                    msg: `Failed to delete account from database: ${deleteError.message}`,
-                    data: {
-                        accountId: accountId,
-                        infraDeprovisioning: infraDeprovisioningResult,
-                        dbError: deleteError.message,
-                    },
+            }
+        } catch (error) {
+            console.error('❌ [GitHub Test] Error detecting URL type:', error);
+        }
+        
+        // Default to Repository for backward compatibility
+        return 'Repository';
+    }
+
+    /**
+     * Test GitHub Account URL connectivity with OAuth
+     */
+    private async testGitHubAccountConnectivity(
+        res: any,
+        accountUrl: string,
+        oauthToken: string,
+    ) {
+        try {
+            // Extract account username from URL
+            // Example: https://github.com/Vipin-Gup -> Vipin-Gup
+            const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
+            if (!urlMatch || !urlMatch[1]) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Invalid GitHub Account URL format. Expected: https://github.com/USERNAME',
                 });
             }
 
-            console.log('✅ Account offboarded successfully:', accountId);
+            const accountUsername = urlMatch[1];
 
-            return res.status(HttpStatus.OK).json({
-                result: 'success',
-                msg: 'Account offboarded successfully',
-                data: {
-                    accountId: accountId,
-                    deletedAt: new Date().toISOString(),
-                    infraDeprovisioning: infraDeprovisioningResult,
-                    infraApiCalled: infraApiCalled,
+            console.log('👤 [GitHub Test] Testing Account URL:', {
+                originalUrl: accountUrl,
+                username: accountUsername,
+            });
+
+            // Test connectivity by making an authenticated API call to GitHub
+            // Use GitHub REST API v3: GET /users/{username}
+            const githubApiUrl = `https://api.github.com/users/${accountUsername}`;
+
+            console.log('🌐 [GitHub Test] Calling GitHub API:', githubApiUrl);
+
+            const response = await axios.get(githubApiUrl, {
+                headers: {
+                    Authorization: `Bearer ${oauthToken}`,
+                    Accept: 'application/vnd.github.v3+json',
+                    'User-Agent': 'DevOps-Automate-Backend',
                 },
+                timeout: 10000, // 10 second timeout
+            });
+
+            console.log('✅ [GitHub Test] GitHub API response status:', response.status);
+            console.log('📦 [GitHub Test] GitHub user info:', {
+                login: response.data.login,
+                name: response.data.name,
+                email: response.data.email,
+                publicRepos: response.data.public_repos,
+            });
+
+            // Verify that the account exists and is accessible
+            if (response.status >= 200 && response.status < 300) {
+                const userData = response.data;
+                if (userData.login && userData.login.toLowerCase() === accountUsername.toLowerCase()) {
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        status: 'success',
+                        connected: true,
+                        message: `Successfully connected to GitHub account "${accountUsername}"`,
+                        userInfo: {
+                            login: userData.login,
+                            name: userData.name,
+                            email: userData.email,
+                            avatarUrl: userData.avatar_url,
+                            publicRepos: userData.public_repos,
+                            followers: userData.followers,
+                            following: userData.following,
+                        },
+                    });
+                }
+            }
+
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'Unable to verify GitHub account connectivity',
             });
         } catch (error: any) {
-            console.error('❌ Error offboarding account:', error);
+            console.error('❌ [GitHub Test] Error testing Account connectivity:', error);
+
+            // Handle different types of errors
+            let errorMessage = 'Failed to connect to GitHub account';
+            let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+
+            if (error.response) {
+                statusCode = error.response.status;
+
+                if (statusCode === HttpStatus.UNAUTHORIZED) {
+                    errorMessage =
+                        'OAuth token is invalid or expired. Please re-authenticate in Manage Credentials.';
+                } else if (statusCode === HttpStatus.NOT_FOUND) {
+                    const urlMatch = accountUrl.match(/github\.com\/([\w.-]+)/i);
+                    const username = urlMatch ? urlMatch[1] : 'unknown';
+                    errorMessage = `GitHub account "${username}" not found. Please verify the account URL.`;
+                } else {
+                    const errorData = error.response.data || {};
+                    errorMessage = `GitHub API error: ${errorData.message || error.response.statusText}`;
+                }
+
+                console.error('📛 [GitHub Test] GitHub API error response:', {
+                    status: error.response.status,
+                    statusText: error.response.statusText,
+                    data: error.response.data,
+                });
+            } else if (error.request) {
+                errorMessage =
+                    'No response from GitHub server. Please check the URL and network connectivity.';
+                console.error('📛 [GitHub Test] No response received:', error.request);
+            } else if (error.code === 'ECONNREFUSED') {
+                errorMessage = 'Connection refused. Please check network connectivity.';
+            } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                errorMessage =
+                    'Connection timeout. Please check the GitHub URL and network connectivity.';
+            } else {
+                errorMessage = error.message || 'Unknown error occurred while testing connectivity';
+            }
+
+            return res.status(statusCode).json({
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: errorMessage,
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+            });
+        }
+    }
+
+    /**
+     * Test GitHub Repository URL connectivity with OAuth
+     */
+    private async testGitHubRepositoryConnectivity(
+        res: any,
+        repoUrl: string,
+        oauthToken: string,
+    ) {
+        try {
+            // Validate URL format and extract repository information
+            // Support formats:
+            // - https://github.com/owner/repo.git
+            // - https://github.com/owner/repo
+            // - git@github.com:owner/repo.git
+            // - git@github.com:owner/repo
+            let repoOwner: string | null = null;
+            let repoName: string | null = null;
+            let isSSHUrl = false;
+
+            // Check if it's an SSH URL (git@github.com:owner/repo.git)
+            if (repoUrl.startsWith('git@')) {
+                isSSHUrl = true;
+                // Parse SSH URL: git@github.com:owner/repo.git
+                const sshMatch = repoUrl.match(/^git@([^:]+):(.+)$/);
+                if (sshMatch) {
+                    const hostname = sshMatch[1];
+                    const repoPath = sshMatch[2];
+
+                    if (hostname === 'github.com' || hostname.includes('github')) {
+                        const pathParts = repoPath.split('/').filter((p: string) => p);
+                        if (pathParts.length >= 2) {
+                            repoOwner = pathParts[0];
+                            repoName = pathParts[1].replace(/\.git$/, '');
+                        }
+                    }
+                }
+            } else {
+                // Parse HTTP/HTTPS URL
+                try {
+                    const urlObj = new URL(repoUrl);
+                    if (urlObj.hostname === 'github.com' || urlObj.hostname.includes('github')) {
+                        const pathParts = urlObj.pathname.split('/').filter((p) => p);
+                        if (pathParts.length >= 2) {
+                            repoOwner = pathParts[0];
+                            repoName = pathParts[1].replace(/\.git$/, '');
+                        }
+                    }
+                } catch (error) {
+                    console.error('❌ [GitHub Test] Error parsing URL:', error);
+                }
+            }
+
+            if (!repoOwner || !repoName) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Invalid GitHub repository URL. Expected format: https://github.com/owner/repo or git@github.com:owner/repo.git',
+                });
+            }
+
+            console.log('🔗 [GitHub Test] Extracted repository info:', {
+                original: repoUrl,
+                isSSHUrl: isSSHUrl,
+                owner: repoOwner,
+                repo: repoName,
+            });
+
+            // Test GitHub connection using OAuth token
+            // First, verify the token works by calling GitHub user API
+            try {
+                // Get authenticated user info
+                const userResponse = await axios.get('https://api.github.com/user', {
+                    headers: {
+                        Authorization: `Bearer ${oauthToken}`,
+                        Accept: 'application/vnd.github.v3+json',
+                        'User-Agent': 'DevOps-Automate-Backend',
+                    },
+                    timeout: 10000, // 10 second timeout
+                });
+
+                console.log('✅ [GitHub Test] GitHub user API response status:', userResponse.status);
+                console.log('📦 [GitHub Test] GitHub user info:', {
+                    login: userResponse.data.login,
+                    name: userResponse.data.name,
+                    email: userResponse.data.email,
+                });
+
+                // Verify repository access
+                const repoApiUrl = `https://api.github.com/repos/${repoOwner}/${repoName}`;
+                console.log('🌐 [GitHub Test] Testing repository access:', repoApiUrl);
+
+                const repoResponse = await axios.get(repoApiUrl, {
+                    headers: {
+                        Authorization: `Bearer ${oauthToken}`,
+                        Accept: 'application/vnd.github.v3+json',
+                        'User-Agent': 'DevOps-Automate-Backend',
+                    },
+                    timeout: 10000,
+                });
+
+                console.log('✅ [GitHub Test] Repository access verified:', {
+                    repo: repoResponse.data.full_name,
+                    private: repoResponse.data.private,
+                    defaultBranch: repoResponse.data.default_branch,
+                });
+
+                // If we get successful responses, connection is successful
+                if (
+                    userResponse.status >= 200 &&
+                    userResponse.status < 300 &&
+                    repoResponse.status >= 200 &&
+                    repoResponse.status < 300
+                ) {
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        status: 'success',
+                        connected: true,
+                        message: 'Successfully connected to GitHub',
+                        userInfo: {
+                            login: userResponse.data.login,
+                            name: userResponse.data.name,
+                            email: userResponse.data.email,
+                            avatarUrl: userResponse.data.avatar_url,
+                        },
+                        repositoryInfo: {
+                            fullName: repoResponse.data.full_name,
+                            private: repoResponse.data.private,
+                            defaultBranch: repoResponse.data.default_branch,
+                            url: repoResponse.data.html_url,
+                        },
+                    });
+                } else {
+                    return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: `Unexpected response status: User=${userResponse.status}, Repo=${repoResponse.status}`,
+                    });
+                }
+            } catch (error: any) {
+                console.error('❌ [GitHub Test] Error testing Repository connectivity:', error);
+
+                // Handle different types of errors
+                let errorMessage = 'Failed to connect to GitHub repository';
+                let statusCode = HttpStatus.INTERNAL_SERVER_ERROR;
+
+                if (error.response) {
+                    statusCode = error.response.status;
+
+                    if (statusCode === HttpStatus.UNAUTHORIZED) {
+                        errorMessage =
+                            'Authentication failed. OAuth token may be invalid or expired. Please re-authorize.';
+                    } else if (statusCode === HttpStatus.FORBIDDEN) {
+                        errorMessage =
+                            'Access forbidden. OAuth token does not have permission to access this repository.';
+                    } else if (statusCode === HttpStatus.NOT_FOUND) {
+                        if (error.response.config?.url?.includes('/repos/')) {
+                            errorMessage = `Repository not found: ${repoOwner}/${repoName}. Please check the URL and repository access permissions.`;
+                        } else {
+                            errorMessage = 'GitHub resource not found. Please check the URL.';
+                        }
+                    } else {
+                        errorMessage = `GitHub API error: ${error.response.status} - ${error.response.statusText}`;
+                    }
+
+                    console.error('📛 [GitHub Test] GitHub API error response:', {
+                        status: error.response.status,
+                        statusText: error.response.statusText,
+                        data: error.response.data,
+                        url: error.response.config?.url,
+                    });
+                } else if (error.request) {
+                    errorMessage =
+                        'No response from GitHub server. Please check the URL and network connectivity.';
+                    console.error('📛 [GitHub Test] No response received:', error.request);
+                } else if (error.code === 'ECONNREFUSED') {
+                    errorMessage = 'Connection refused. Please check network connectivity.';
+                } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNABORTED') {
+                    errorMessage =
+                        'Connection timeout. Please check the GitHub URL and network connectivity.';
+                } else {
+                    errorMessage = error.message || 'Unknown error occurred while testing connectivity';
+                }
+
+                return res.status(statusCode).json({
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: errorMessage,
+                    error: process.env.NODE_ENV === 'development' ? error.message : undefined,
+                });
+            }
+        } catch (error: any) {
+            // This catch block handles unexpected errors during validation
+            console.error('❌ [GitHub Test] Unexpected error during validation:', error);
+
             return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
-                result: 'failed',
-                msg: `Failed to offboard account: ${error.message}`,
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: 'An unexpected error occurred while processing the request',
+                error: process.env.NODE_ENV === 'development' ? error.message : undefined,
             });
         }
     }
@@ -3397,6 +3680,318 @@ class PipelineCanvasController {
         }
         return {success: true};
     }
+
+    @Get('search/by-name')
+    async searchByName(
+        @Query('name') name: string,
+        @Res() res: any,
+    ) {
+        try {
+            if (!name) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
+                });
+            }
+
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                // Get all pipelines and filter by name
+                const allPipelines = await pipelineCanvasDynamoDB.list();
+                const matchingPipelines = allPipelines.filter(
+                    (pipeline) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    found: matchingPipelines.length > 0,
+                    count: matchingPipelines.length,
+                    pipelines: matchingPipelines,
+                });
+            } else {
+                // For non-DynamoDB mode
+                const allPipelines = await pipelineCanvas.list();
+                const matchingPipelines = allPipelines.filter(
+                    (pipeline: any) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    found: matchingPipelines.length > 0,
+                    count: matchingPipelines.length,
+                    pipelines: matchingPipelines,
+                });
+            }
+        } catch (error: any) {
+            console.error('Error searching pipeline by name:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: error.message || 'Failed to search pipeline',
+            });
+        }
+    }
+
+    @Get('check/yaml')
+    async checkYamlContent(
+        @Query('name') name: string,
+        @Res() res: any,
+    ) {
+        try {
+            if (!name) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
+                });
+            }
+
+            let matchingPipelines: any[] = [];
+
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                // Get all pipelines and filter by name
+                const allPipelines = await pipelineCanvasDynamoDB.list();
+                matchingPipelines = allPipelines.filter(
+                    (pipeline) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+            } else {
+                // For non-DynamoDB mode
+                const allPipelines = await pipelineCanvas.list();
+                matchingPipelines = allPipelines.filter(
+                    (pipeline: any) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+            }
+
+            if (matchingPipelines.length === 0) {
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    pipelineExists: false,
+                    pipelineName: name,
+                    message: `Pipeline "${name}" not found in database`,
+                });
+            }
+
+            // Check YAML content for each matching pipeline
+            const results = matchingPipelines.map((pipeline) => {
+                const hasYaml = !!pipeline.yamlContent;
+                const yamlLength = pipeline.yamlContent
+                    ? pipeline.yamlContent.length
+                    : 0;
+                const yamlPreview = pipeline.yamlContent
+                    ? pipeline.yamlContent.substring(0, 200) + '...'
+                    : null;
+
+                return {
+                    id: pipeline.id,
+                    pipelineName: pipeline.pipelineName,
+                    hasYamlContent: hasYaml,
+                    yamlContentLength: yamlLength,
+                    yamlContentPreview: yamlPreview,
+                    accountId: pipeline.accountId,
+                    accountName: pipeline.accountName,
+                    enterpriseId: pipeline.enterpriseId,
+                    enterpriseName: pipeline.enterpriseName,
+                    createdAt: pipeline.createdAt,
+                    updatedAt: pipeline.updatedAt,
+                };
+            });
+
+            const hasYamlCount = results.filter((r) => r.hasYamlContent).length;
+            const noYamlCount = results.length - hasYamlCount;
+
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                pipelineExists: true,
+                pipelineName: name,
+                totalMatches: results.length,
+                summary: {
+                    pipelinesWithYaml: hasYamlCount,
+                    pipelinesWithoutYaml: noYamlCount,
+                },
+                pipelines: results,
+                confirmation: hasYamlCount > 0
+                    ? `✅ YAML content EXISTS for pipeline "${name}" (${hasYamlCount} pipeline(s) with YAML)`
+                    : `❌ YAML content DOES NOT EXIST for pipeline "${name}" (${noYamlCount} pipeline(s) found but no YAML content)`,
+            });
+        } catch (error: any) {
+            console.error('Error checking YAML content:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: error.message || 'Failed to check YAML content',
+            });
+        }
+    }
+
+    @Get('yaml/by-name')
+    async getYamlByName(
+        @Query('name') name: string,
+        @Res() res: any,
+    ) {
+        try {
+            if (!name) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Pipeline name is required. Use ?name=YourPipelineName',
+                });
+            }
+
+            let matchingPipelines: any[] = [];
+
+            if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
+                // Get all pipelines and filter by name
+                const allPipelines = await pipelineCanvasDynamoDB.list();
+                matchingPipelines = allPipelines.filter(
+                    (pipeline) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+            } else {
+                // For non-DynamoDB mode
+                const allPipelines = await pipelineCanvas.list();
+                matchingPipelines = allPipelines.filter(
+                    (pipeline: any) =>
+                        pipeline.pipelineName?.toLowerCase() ===
+                        name.toLowerCase(),
+                );
+            }
+
+            if (matchingPipelines.length === 0) {
+                return res.status(HttpStatus.NOT_FOUND).json({
+                    success: false,
+                    error: `Pipeline "${name}" not found in database`,
+                });
+            }
+
+            // If multiple pipelines found, return all with their YAML
+            // If single pipeline found, return just that one
+            const results = matchingPipelines.map((pipeline) => ({
+                id: pipeline.id,
+                pipelineName: pipeline.pipelineName,
+                accountId: pipeline.accountId,
+                accountName: pipeline.accountName,
+                enterpriseId: pipeline.enterpriseId,
+                enterpriseName: pipeline.enterpriseName,
+                createdAt: pipeline.createdAt,
+                updatedAt: pipeline.updatedAt,
+                hasYamlContent: !!pipeline.yamlContent,
+                yamlContent: pipeline.yamlContent || null,
+                yamlContentLength: pipeline.yamlContent
+                    ? pipeline.yamlContent.length
+                    : 0,
+            }));
+
+            // If only one pipeline, return simplified response
+            if (results.length === 1) {
+                const pipeline = results[0];
+                if (!pipeline.hasYamlContent) {
+                    return res.status(HttpStatus.OK).json({
+                        success: true,
+                        pipelineName: name,
+                        hasYamlContent: false,
+                        message: `Pipeline "${name}" exists but has no YAML content`,
+                        pipeline: {
+                            id: pipeline.id,
+                            pipelineName: pipeline.pipelineName,
+                            accountId: pipeline.accountId,
+                            accountName: pipeline.accountName,
+                            enterpriseId: pipeline.enterpriseId,
+                            enterpriseName: pipeline.enterpriseName,
+                        },
+                    });
+                }
+
+                return res.status(HttpStatus.OK).json({
+                    success: true,
+                    pipelineName: name,
+                    hasYamlContent: true,
+                    yamlContent: pipeline.yamlContent,
+                    yamlContentLength: pipeline.yamlContentLength,
+                    pipeline: {
+                        id: pipeline.id,
+                        pipelineName: pipeline.pipelineName,
+                        accountId: pipeline.accountId,
+                        accountName: pipeline.accountName,
+                        enterpriseId: pipeline.enterpriseId,
+                        enterpriseName: pipeline.enterpriseName,
+                        createdAt: pipeline.createdAt,
+                        updatedAt: pipeline.updatedAt,
+                    },
+                });
+            }
+
+            // Multiple pipelines found
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                pipelineName: name,
+                totalMatches: results.length,
+                message: `Found ${results.length} pipeline(s) with name "${name}"`,
+                pipelines: results,
+            });
+        } catch (error: any) {
+            console.error('Error fetching YAML by name:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: error.message || 'Failed to fetch YAML content',
+            });
+        }
+    }
+
+    @Get('debug/yaml-content')
+    async getAllYamlContent(@Res() res: any) {
+        try {
+            if (storageMode !== 'dynamodb' || !pipelineCanvasDynamoDB) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    error: 'YAML content debug endpoint only available in DynamoDB mode',
+                });
+            }
+
+            // Get all pipelines
+            const pipelines = await pipelineCanvasDynamoDB.list();
+
+            // Format response with YAML content
+            const pipelinesWithYaml = pipelines.map((pipeline) => ({
+                id: pipeline.id,
+                pipelineName: pipeline.pipelineName,
+                accountId: pipeline.accountId,
+                accountName: pipeline.accountName,
+                enterpriseId: pipeline.enterpriseId,
+                enterpriseName: pipeline.enterpriseName,
+                createdAt: pipeline.createdAt,
+                updatedAt: pipeline.updatedAt,
+                hasYamlContent: !!pipeline.yamlContent,
+                yamlContentLength: pipeline.yamlContent
+                    ? pipeline.yamlContent.length
+                    : 0,
+                yamlContent: pipeline.yamlContent || null,
+            }));
+
+            // Count pipelines with and without YAML
+            const withYaml = pipelinesWithYaml.filter((p) => p.hasYamlContent)
+                .length;
+            const withoutYaml = pipelinesWithYaml.length - withYaml;
+
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                summary: {
+                    totalPipelines: pipelinesWithYaml.length,
+                    pipelinesWithYaml: withYaml,
+                    pipelinesWithoutYaml: withoutYaml,
+                },
+                pipelines: pipelinesWithYaml,
+            });
+        } catch (error: any) {
+            console.error('Error fetching YAML content:', error);
+            return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                success: false,
+                error: error.message || 'Failed to fetch YAML content',
+            });
+        }
+    }
 }
 
 @Controller('api/users')
@@ -3405,8 +4000,6 @@ class UsersController {
     async list(
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         try {
             if (storageMode === 'dynamodb' && userManagement) {
@@ -3419,14 +4012,6 @@ class UsersController {
                     accountName === '' ||
                     accountName.toLowerCase() === 'systiva';
 
-                // Determine if filtering by enterprise
-                const isGlobalEnterprise =
-                    !enterpriseId ||
-                    enterpriseId === '' ||
-                    !enterpriseName ||
-                    enterpriseName === '' ||
-                    enterpriseName.toLowerCase() === 'global';
-
                 let usersFromDB;
                 if (isSystivaAccount) {
                     usersFromDB = await userManagement.listUsers();
@@ -3437,28 +4022,17 @@ class UsersController {
                     );
                 }
 
-                // Filter by enterprise if not Global
-                if (!isGlobalEnterprise && usersFromDB) {
-                    usersFromDB = usersFromDB.filter(
-                        (user: any) =>
-                            !user.enterpriseId ||
-                            user.enterpriseId === enterpriseId ||
-                            user.enterpriseName?.toLowerCase() ===
-                                enterpriseName?.toLowerCase(),
-                    );
-                }
-
                 // Fetch assigned groups for each user
                 const usersWithGroups = await Promise.all(
-                    usersFromDB.map(async (user: any) => {
+                    usersFromDB.map(async (user) => {
                         try {
                             const assignedGroups =
                                 await userManagement.getUserGroups(
                                     user.id,
-                                    accountId, // Pass account context
-                                    accountName, // Pass account context
-                                    enterpriseId, // Pass enterprise context
-                                    enterpriseName, // Pass enterprise context
+                                    accountId,      // Pass account context
+                                    accountName,    // Pass account context
+                                    undefined,      // enterpriseId (not available in /api/users)
+                                    undefined       // enterpriseName (not available in /api/users)
                                 );
                             return {
                                 ...user,
@@ -4864,10 +5438,7 @@ class UsersController {
         @Res() res: any,
     ) {
         try {
-            console.log(
-                `🔗 Assigning group to user ${id}, body:`,
-                JSON.stringify(body, null, 2),
-            );
+            console.log(`🔗 Assigning group to user ${id}, body:`, JSON.stringify(body, null, 2));
 
             // Check if this is a single group assignment {groupId: "..."} or bulk assignment {groupIds: [...]}
             if (body.groupId) {
@@ -4927,11 +5498,9 @@ class UsersController {
                         success: true,
                         message: 'Groups assigned successfully',
                         data: {
-                            assignedGroups: body.groupIds.map(
-                                (groupId: string) => ({
-                                    id: groupId,
-                                }),
-                            ),
+                            assignedGroups: body.groupIds.map((groupId: string) => ({
+                                id: groupId,
+                            })),
                         },
                     });
                 } else {
@@ -4968,14 +5537,9 @@ class UsersController {
             } else if (body.groups && Array.isArray(body.groups)) {
                 // New format: array of complete group objects (create-and-assign)
                 if (storageMode === 'dynamodb' && userManagement) {
-                    console.log(
-                        `📦 Processing ${body.groups.length} group(s) for create-and-assign`,
-                    );
-                    console.log(
-                        `📦 Groups received:`,
-                        JSON.stringify(body.groups, null, 2),
-                    );
-
+                    console.log(`📦 Processing ${body.groups.length} group(s) for create-and-assign`);
+                    console.log(`📦 Groups received:`, JSON.stringify(body.groups, null, 2));
+                    
                     const user = await userManagement.getUser(id);
                     if (!user) {
                         return res.status(HttpStatus.NOT_FOUND).json({
@@ -4985,126 +5549,79 @@ class UsersController {
                     }
 
                     let groupIds: string[] = [];
-
+                    
                     // Get all existing groups to match by name
                     const allExistingGroups = await userManagement.listGroups();
-                    console.log(
-                        `📋 Found ${allExistingGroups.length} existing groups in database`,
-                    );
-
+                    console.log(`📋 Found ${allExistingGroups.length} existing groups in database`);
+                    
                     // Process each group
                     const seenGroupIds = new Set<string>(); // Track unique group IDs
                     for (const groupData of body.groups) {
                         const groupName = groupData.groupName || groupData.name;
-                        console.log(
-                            `🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`,
-                        );
-
+                        console.log(`🔍 Processing group: "${groupName}" (frontend ID: ${groupData.id})`);
+                        
                         // Try to find group by NAME (not by frontend-generated ID)
-                        let existingGroup = allExistingGroups.find(
-                            (g) => g.name === groupName,
-                        );
-
+                        let existingGroup = allExistingGroups.find(g => g.name === groupName);
+                        
                         if (existingGroup) {
-                            console.log(
-                                `✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`,
-                            );
-
+                            console.log(`✅ Found existing group by name: "${groupName}" (DB ID: ${existingGroup.id})`);
+                            
                             // Skip if we've already processed this group ID (deduplication)
                             if (seenGroupIds.has(existingGroup.id)) {
-                                console.log(
-                                    `⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`,
-                                );
+                                console.log(`⚠️  Skipping duplicate group ID: ${existingGroup.id} (${groupName})`);
                                 continue;
                             }
                             seenGroupIds.add(existingGroup.id);
-
+                            
                             // Get current group data from database to preserve correct values
-                            const currentGroup = await userManagement.getGroup(
-                                existingGroup.id,
-                            );
+                            const currentGroup = await userManagement.getGroup(existingGroup.id);
                             if (!currentGroup) {
-                                console.log(
-                                    `⚠️  Could not fetch current group data, skipping update`,
-                                );
+                                console.log(`⚠️  Could not fetch current group data, skipping update`);
                                 groupIds.push(existingGroup.id);
                                 continue;
                             }
-
+                            
                             // Only update fields that actually changed and are provided
                             const updates: any = {};
-                            if (
-                                groupData.name &&
-                                groupData.name !== currentGroup.name
-                            ) {
+                            if (groupData.name && groupData.name !== currentGroup.name) {
                                 updates.name = groupData.name;
                             }
                             // Only update description if it's different and not empty
                             // Protect against overwriting with incorrect/stale data from frontend
-                            if (
-                                groupData.description !== undefined &&
+                            if (groupData.description !== undefined && 
                                 groupData.description !== null &&
                                 groupData.description.trim() !== '' &&
-                                groupData.description !==
-                                    currentGroup.description
-                            ) {
-                                console.log(
-                                    `📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`,
-                                );
+                                groupData.description !== currentGroup.description) {
+                                console.log(`📝 Updating description: "${currentGroup.description}" -> "${groupData.description}"`);
                                 updates.description = groupData.description;
-                            } else if (
-                                groupData.description !== undefined &&
-                                groupData.description !==
-                                    currentGroup.description
-                            ) {
-                                console.log(
-                                    `⚠️  Skipping description update - empty or matches current value`,
-                                );
+                            } else if (groupData.description !== undefined && 
+                                      groupData.description !== currentGroup.description) {
+                                console.log(`⚠️  Skipping description update - empty or matches current value`);
                             }
-                            if (
-                                groupData.entity !== undefined &&
-                                groupData.entity !== currentGroup.entity
-                            ) {
+                            if (groupData.entity !== undefined && groupData.entity !== currentGroup.entity) {
                                 updates.entity = groupData.entity;
                             }
-                            if (
-                                groupData.product !== undefined &&
-                                groupData.product !== currentGroup.product
-                            ) {
+                            if (groupData.product !== undefined && groupData.product !== currentGroup.product) {
                                 updates.product = groupData.product;
                             }
-                            if (
-                                groupData.service !== undefined &&
-                                groupData.service !== currentGroup.service
-                            ) {
+                            if (groupData.service !== undefined && groupData.service !== currentGroup.service) {
                                 updates.service = groupData.service;
                             }
                             if (groupData.assignedRoles !== undefined) {
-                                updates.assignedRoles =
-                                    groupData.assignedRoles || [];
+                                updates.assignedRoles = groupData.assignedRoles || [];
                             }
-
+                            
                             // Only update if there are actual changes
                             if (Object.keys(updates).length > 0) {
-                                console.log(
-                                    `🔄 Updating group with changes:`,
-                                    JSON.stringify(updates, null, 2),
-                                );
-                                await userManagement.updateGroup(
-                                    existingGroup.id,
-                                    updates,
-                                );
+                                console.log(`🔄 Updating group with changes:`, JSON.stringify(updates, null, 2));
+                                await userManagement.updateGroup(existingGroup.id, updates);
                             } else {
-                                console.log(
-                                    `ℹ️  No changes detected, skipping update`,
-                                );
+                                console.log(`ℹ️  No changes detected, skipping update`);
                             }
-
+                            
                             groupIds.push(existingGroup.id);
                         } else {
-                            console.log(
-                                `🆕 Creating new group: "${groupName}"`,
-                            );
+                            console.log(`🆕 Creating new group: "${groupName}"`);
                             // Create new group (let it generate its own ID)
                             const newGroup = await userManagement.createGroup({
                                 name: groupName,
@@ -5114,15 +5631,11 @@ class UsersController {
                                 service: groupData.service || '',
                                 assignedRoles: groupData.assignedRoles || [],
                             });
-                            console.log(
-                                `✅ Created new group with ID: ${newGroup.id}`,
-                            );
-
+                            console.log(`✅ Created new group with ID: ${newGroup.id}`);
+                            
                             // Skip if duplicate
                             if (seenGroupIds.has(newGroup.id)) {
-                                console.log(
-                                    `⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`,
-                                );
+                                console.log(`⚠️  Skipping duplicate newly created group ID: ${newGroup.id}`);
                                 continue;
                             }
                             seenGroupIds.add(newGroup.id);
@@ -5133,32 +5646,20 @@ class UsersController {
                     // Deduplicate final group IDs array
                     const uniqueGroupIds = Array.from(new Set(groupIds));
                     if (uniqueGroupIds.length !== groupIds.length) {
-                        console.log(
-                            `⚠️  Removed ${
-                                groupIds.length - uniqueGroupIds.length
-                            } duplicate group ID(s)`,
-                        );
+                        console.log(`⚠️  Removed ${groupIds.length - uniqueGroupIds.length} duplicate group ID(s)`);
                         console.log(`   Before: ${JSON.stringify(groupIds)}`);
-                        console.log(
-                            `   After:  ${JSON.stringify(uniqueGroupIds)}`,
-                        );
+                        console.log(`   After:  ${JSON.stringify(uniqueGroupIds)}`);
                     }
                     groupIds = uniqueGroupIds;
 
-                    console.log(
-                        `📋 Final group IDs to assign: ${JSON.stringify(
-                            groupIds,
-                        )}`,
-                    );
+                    console.log(`📋 Final group IDs to assign: ${JSON.stringify(groupIds)}`);
 
                     // Assign all groups to user
                     await userManagement.updateUser(id, {
                         assignedGroups: groupIds,
                     });
 
-                    console.log(
-                        `✅ Assigned ${groupIds.length} unique group(s) to user ${id}`,
-                    );
+                    console.log(`✅ Assigned ${groupIds.length} unique group(s) to user ${id}`);
 
                     return res.status(HttpStatus.OK).json({
                         success: true,
@@ -6176,15 +6677,13 @@ class RolesController {
         @Query('groupId') groupId?: string,
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         console.log('📋 listRoles API called with:', {
             groupId,
             accountId,
             accountName,
-            enterpriseId,
-            enterpriseName,
+            accountIdType: typeof accountId,
+            accountNameType: typeof accountName,
         });
 
         if (storageMode === 'dynamodb' && userManagement) {
@@ -6200,45 +6699,29 @@ class RolesController {
                 accountName === '' ||
                 accountName.toLowerCase() === 'systiva';
 
-            // Determine if this is a Global enterprise request
-            const isGlobalEnterprise =
-                !enterpriseId ||
-                enterpriseId === '' ||
-                !enterpriseName ||
-                enterpriseName === '' ||
-                enterpriseName.toLowerCase() === 'global';
-
-            console.log('📋 Filter check:', {
+            console.log('📋 isSystivaAccount check:', {
                 isSystivaAccount,
-                isGlobalEnterprise,
+                checks: {
+                    noAccountId: !accountId,
+                    emptyAccountId: accountId === '',
+                    noAccountName: !accountName,
+                    emptyAccountName: accountName === '',
+                    isSystivaName: accountName?.toLowerCase() === 'systiva',
+                },
             });
 
-            let roles;
             if (isSystivaAccount) {
                 console.log('📋 Calling listRoles() for Systiva');
-                roles = await userManagement.listRoles();
+                return await userManagement.listRoles();
             } else {
                 console.log(
                     `📋 Calling listRolesByAccount() for ${accountName}`,
                 );
-                roles = await userManagement.listRolesByAccount(
+                return await userManagement.listRolesByAccount(
                     accountId,
                     accountName,
                 );
             }
-
-            // Filter by enterprise if not Global
-            if (!isGlobalEnterprise && roles) {
-                roles = roles.filter(
-                    (role: any) =>
-                        !role.enterpriseId ||
-                        role.enterpriseId === enterpriseId ||
-                        role.enterpriseName?.toLowerCase() ===
-                            enterpriseName?.toLowerCase(),
-                );
-            }
-
-            return roles;
         } else {
             if (groupId) {
                 return await roles.getRolesForGroup(groupId);
@@ -6341,36 +6824,22 @@ class RolesController {
         if (!searchTerm) {
             return await this.list(undefined, accountId, accountName);
         }
-
+        
         if (storageMode === 'dynamodb' && userManagement) {
-            const allRoles =
-                accountId && accountName
-                    ? await userManagement.listRolesByAccount(
-                          accountId,
-                          accountName,
-                      )
-                    : await userManagement.listRoles();
-
-            const filtered = allRoles.filter(
-                (role: any) =>
-                    role.name
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()) ||
-                    role.description
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()),
+            const allRoles = accountId && accountName 
+                ? await userManagement.listRolesByAccount(accountId, accountName)
+                : await userManagement.listRoles();
+            
+            const filtered = allRoles.filter((role: any) => 
+                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
             );
             return filtered;
         } else {
             const allRoles = await roles.list();
-            const filtered = allRoles.filter(
-                (role: any) =>
-                    role.name
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()) ||
-                    role.description
-                        ?.toLowerCase()
-                        .includes(searchTerm.toLowerCase()),
+            const filtered = allRoles.filter((role: any) => 
+                role.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
+                role.description?.toLowerCase().includes(searchTerm.toLowerCase())
             );
             return filtered;
         }
@@ -6411,7 +6880,7 @@ class RolesController {
                 // Get all users and filter by roles through their assigned groups
                 const allUsers = await userManagement.listUsers();
                 const allGroups = await userManagement.listGroups();
-
+                
                 // Find groups that have this role
                 const groupsWithRole = allGroups.filter(
                     (group) =>
@@ -6419,16 +6888,14 @@ class RolesController {
                         group.assignedRoles.includes(roleId),
                 );
                 const groupIds = groupsWithRole.map((g) => g.id);
-
+                
                 // Find users that belong to those groups
                 const roleUsers = allUsers.filter(
                     (user) =>
                         user.assignedGroups &&
-                        user.assignedGroups.some((gId: string) =>
-                            groupIds.includes(gId),
-                        ),
+                        user.assignedGroups.some((gId: string) => groupIds.includes(gId)),
                 );
-
+                
                 return res.status(HttpStatus.OK).json({
                     success: true,
                     data: {users: roleUsers},
@@ -6517,7 +6984,7 @@ class RolesController {
                 await userManagement.updateGroup(groupId, {
                     assignedRoles: updatedRoles,
                 });
-
+                
                 return res.status(HttpStatus.NO_CONTENT).send();
             } else {
                 await roles.removeRoleFromGroup(groupId, roleId);
@@ -6703,68 +7170,17 @@ class BreadcrumbController {
 @Controller('api/groups')
 class GroupsController {
     @Get()
-    async list(
-        @Query('search') search?: string,
-        @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
-        @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
-    ) {
+    async list(@Query('search') search?: string) {
         if (storageMode === 'dynamodb' && userManagement) {
-            let allGroups = await userManagement.listGroups();
-
-            // Filter by account if provided (skip for Systiva)
-            const isSystivaAccount =
-                !accountId ||
-                accountId === '' ||
-                !accountName ||
-                accountName === '' ||
-                accountName.toLowerCase() === 'systiva';
-
-            if (!isSystivaAccount) {
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        !group.accountId ||
-                        group.accountId === accountId ||
-                        group.accountName?.toLowerCase() ===
-                            accountName?.toLowerCase(),
-                );
-            }
-
-            // Filter by enterprise if provided (skip for Global)
-            const isGlobalEnterprise =
-                !enterpriseId ||
-                enterpriseId === '' ||
-                !enterpriseName ||
-                enterpriseName === '' ||
-                enterpriseName.toLowerCase() === 'global';
-
-            if (!isGlobalEnterprise) {
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        !group.enterpriseId ||
-                        group.enterpriseId === enterpriseId ||
-                        group.enterpriseName?.toLowerCase() ===
-                            enterpriseName?.toLowerCase() ||
-                        group.entity?.toLowerCase() ===
-                            enterpriseName?.toLowerCase(),
-                );
-            }
-
-            // Apply search filter
-            if (search) {
-                const searchLower = search.toLowerCase();
-                allGroups = allGroups.filter(
-                    (group: any) =>
-                        group.name.toLowerCase().includes(searchLower) ||
-                        (group.description &&
-                            group.description
-                                .toLowerCase()
-                                .includes(searchLower)),
-                );
-            }
-
-            return allGroups;
+            const allGroups = await userManagement.listGroups();
+            if (!search) return allGroups;
+            const searchLower = search.toLowerCase();
+            return allGroups.filter(
+                (group) =>
+                    group.name.toLowerCase().includes(searchLower) ||
+                    (group.description &&
+                        group.description.toLowerCase().includes(searchLower)),
+            );
         } else {
             return groups.list(search);
         }
@@ -7258,30 +7674,80 @@ class EnvironmentsController {
     @Get()
     async getAll(
         @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            return {
+                error:
+                    'accountId, accountName, enterpriseId, and enterpriseName are required',
+            };
+        }
+
+        // DynamoDB: use context-aware query to avoid full table scans and enforce context.
+        if (storageMode === 'dynamodb' && environments?.getAllForContext) {
+            return await environments.getAllForContext({
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+            });
+        }
+
         const allEnvironments = await environments.getAll();
 
         // Filter by accountId and enterpriseId if provided
         let filtered = allEnvironments;
-        if (accountId) {
-            filtered = filtered.filter(
-                (env: any) => env.accountId === accountId,
-            );
-        }
-        if (enterpriseId) {
-            filtered = filtered.filter(
-                (env: any) => env.enterpriseId === enterpriseId,
-            );
-        }
+        filtered = filtered.filter((env: any) => env.accountId === accountId);
+        filtered = filtered.filter(
+            (env: any) => env.enterpriseId === enterpriseId,
+        );
+        filtered = filtered.filter((env: any) => env.accountName === accountName);
+        filtered = filtered.filter(
+            (env: any) => env.enterpriseName === enterpriseName,
+        );
 
         return filtered;
     }
 
     @Get(':id')
-    async getById(@Param('id') id: string) {
-        const environment = await environments.getById(id);
+    async getById(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            return {
+                error:
+                    'accountId, accountName, enterpriseId, and enterpriseName are required',
+            };
+        }
+
+        let environment: any = null;
+
+        if (storageMode === 'dynamodb' && environments?.getByIdForContext) {
+            environment = await environments.getByIdForContext(id, {
+                accountId,
+                accountName,
+            });
+        } else {
+            environment = await environments.getById(id);
+        }
+
         if (!environment) {
+            return {error: 'Environment not found', status: 404};
+        }
+
+        // Enforce context match
+        if (
+            environment.accountId !== accountId ||
+            environment.accountName !== accountName ||
+            environment.enterpriseId !== enterpriseId ||
+            environment.enterpriseName !== enterpriseName
+        ) {
             return {error: 'Environment not found', status: 404};
         }
         return environment;
@@ -7289,12 +7755,52 @@ class EnvironmentsController {
 
     @Post()
     async create(@Body() body: any) {
+        const {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        } = body || {};
+
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            return {
+                error:
+                    'accountId, accountName, enterpriseId, and enterpriseName are required',
+            };
+        }
         return await environments.create(body);
     }
 
     @Put(':id')
-    async update(@Param('id') id: string, @Body() body: any) {
-        const updated = await environments.update(id, body);
+    async update(
+        @Param('id') id: string,
+        @Body() body: any,
+        @Query('accountId') queryAccountId?: string,
+        @Query('accountName') queryAccountName?: string,
+        @Query('enterpriseId') queryEnterpriseId?: string,
+        @Query('enterpriseName') queryEnterpriseName?: string,
+    ) {
+        const accountId = body?.accountId || queryAccountId;
+        const accountName = body?.accountName || queryAccountName;
+        const enterpriseId = body?.enterpriseId || queryEnterpriseId;
+        const enterpriseName = body?.enterpriseName || queryEnterpriseName;
+
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            return {
+                error:
+                    'accountId, accountName, enterpriseId, and enterpriseName are required',
+            };
+        }
+
+        const payload = {
+            ...(body || {}),
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        };
+
+        const updated = await environments.update(id, payload);
         if (!updated) {
             return {error: 'Environment not found', status: 404};
         }
@@ -7302,12 +7808,864 @@ class EnvironmentsController {
     }
 
     @Delete(':id')
-    async delete(@Param('id') id: string) {
+    async delete(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+            return {
+                error:
+                    'accountId, accountName, enterpriseId, and enterpriseName are required',
+            };
+        }
+
+        // DynamoDB: delete by PK/SK (no scan)
+        if (storageMode === 'dynamodb' && environments?.deleteForContext) {
+            const deleted = await environments.deleteForContext(id, {
+                accountId,
+                accountName,
+            });
+            if (!deleted) {
+                return {error: 'Environment not found', status: 404};
+            }
+            return {success: true};
+        }
+
+        // Non-dynamodb: enforce context by checking record first
+        const existing = await environments.getById(id);
+        if (
+            !existing ||
+            existing.accountId !== accountId ||
+            existing.accountName !== accountName ||
+            existing.enterpriseId !== enterpriseId ||
+            existing.enterpriseName !== enterpriseName
+        ) {
+            return {error: 'Environment not found', status: 404};
+        }
+
         const deleted = await environments.delete(id);
         if (!deleted) {
             return {error: 'Environment not found', status: 404};
         }
         return {success: true};
+    }
+
+    /**
+     * POST /api/environments/cloudfoundry/test-connection
+     *
+     * Frontend sends context + hostUrl + credentialName + auth details.
+     * Backend must NOT lookup credentials; it uses payload directly.
+     */
+    @Post('cloudfoundry/test-connection')
+    async testCloudFoundryConnection(@Res() res: any, @Body() body: any) {
+        const startedAt = Date.now();
+        const finish = async (statusCode: number, payload: any) => {
+            const elapsed = Date.now() - startedAt;
+            if (elapsed < MIN_CONNECTIVITY_TEST_MS) {
+                await sleep(MIN_CONNECTIVITY_TEST_MS - elapsed);
+            }
+            return res.status(statusCode).json(payload);
+        };
+
+        try {
+            const {
+                // context
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+
+                // target
+                credentialName,
+                hostUrl,
+
+                // auth
+                authenticationType,
+                oauth2ClientId,
+                oauth2ClientSecret,
+                oauth2TokenUrl,
+                username,
+                apiKey,
+            } = body || {};
+
+            // Validate required context fields
+            const requiredFields: Array<[string, any]> = [
+                ['accountId', accountId],
+                ['accountName', accountName],
+                ['enterpriseId', enterpriseId],
+                ['enterpriseName', enterpriseName],
+                ['workstream', workstream],
+                ['product', product],
+                ['service', service],
+                ['credentialName', credentialName],
+                ['hostUrl', hostUrl],
+                ['authenticationType', authenticationType],
+            ];
+            for (const [name, value] of requiredFields) {
+                if (typeof value !== 'string' || value.trim().length === 0) {
+                    return await finish(HttpStatus.BAD_REQUEST, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: `Missing ${name}`,
+                    });
+                }
+            }
+
+            // Validate URLs + SSRF guardrails
+            let host: URL;
+            try {
+                host = validateOutboundUrl(hostUrl, 'hostUrl');
+            } catch (e: any) {
+                return await finish(HttpStatus.BAD_REQUEST, {
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: e?.message || 'Invalid hostUrl',
+                });
+            }
+
+            const authType = String(authenticationType).trim();
+
+            // Log (no secrets)
+            console.log('🧪 [Env CF Test] Received request:', {
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+                credentialName,
+                authenticationType: authType,
+                hostUrl: host.toString(),
+                hostHostname: host.hostname,
+                hasUsername: !!username,
+                apiKeyLength: typeof apiKey === 'string' ? apiKey.length : 0,
+                hasOauth2ClientId: !!oauth2ClientId,
+                oauth2ClientSecretLength:
+                    typeof oauth2ClientSecret === 'string'
+                        ? oauth2ClientSecret.length
+                        : 0,
+                oauth2TokenUrlHostname:
+                    typeof oauth2TokenUrl === 'string'
+                        ? (() => {
+                              try {
+                                  return new URL(oauth2TokenUrl).hostname;
+                              } catch {
+                                  return null;
+                              }
+                          })()
+                        : null,
+            });
+
+            const axiosClient = axios.create({
+                timeout: 10_000,
+                maxRedirects: 0,
+                validateStatus: () => true, // we will handle status codes ourselves
+            });
+
+            // OAuth2 client credentials
+            if (authType === 'OAuth2') {
+                if (
+                    typeof oauth2ClientId !== 'string' ||
+                    oauth2ClientId.trim().length === 0
+                ) {
+                    return await finish(HttpStatus.BAD_REQUEST, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: 'Missing oauth2ClientId',
+                    });
+                }
+                if (
+                    typeof oauth2ClientSecret !== 'string' ||
+                    oauth2ClientSecret.trim().length === 0
+                ) {
+                    return await finish(HttpStatus.BAD_REQUEST, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: 'Missing oauth2ClientSecret',
+                    });
+                }
+                if (
+                    typeof oauth2TokenUrl !== 'string' ||
+                    oauth2TokenUrl.trim().length === 0
+                ) {
+                    return await finish(HttpStatus.BAD_REQUEST, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: 'Missing oauth2TokenUrl',
+                    });
+                }
+
+                let tokenUrl: URL;
+                try {
+                    tokenUrl = validateOutboundUrl(oauth2TokenUrl, 'oauth2TokenUrl');
+                } catch (e: any) {
+                    return await finish(HttpStatus.BAD_REQUEST, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: e?.message || 'Invalid oauth2TokenUrl',
+                    });
+                }
+
+                // Token request (form-urlencoded)
+                const form = new URLSearchParams();
+                form.set('grant_type', 'client_credentials');
+                form.set('client_id', oauth2ClientId);
+                form.set('client_secret', oauth2ClientSecret);
+
+                const tokenResp = await axiosClient.post(tokenUrl.toString(), form, {
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                });
+
+                console.log('🧪 [Env CF Test] OAuth2 token response:', {
+                    status: tokenResp.status,
+                    tokenHost: tokenUrl.hostname,
+                });
+
+                if (tokenResp.status < 200 || tokenResp.status >= 300) {
+                    return await finish(HttpStatus.OK, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: `OAuth2 token request failed (status ${tokenResp.status})`,
+                    });
+                }
+
+                const accessToken = (tokenResp.data as any)?.access_token;
+                if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
+                    return await finish(HttpStatus.OK, {
+                        success: false,
+                        status: 'failed',
+                        connected: false,
+                        message: 'OAuth2 token response missing access_token',
+                    });
+                }
+
+                const hostResp = await axiosClient.get(host.toString(), {
+                    headers: {Authorization: `Bearer ${accessToken}`},
+                });
+
+                console.log('🧪 [Env CF Test] Host response:', {
+                    status: hostResp.status,
+                    host: host.hostname,
+                });
+
+                if (hostResp.status >= 200 && hostResp.status < 300) {
+                    return await finish(HttpStatus.OK, {
+                        success: true,
+                        status: 'success',
+                        connected: true,
+                        message: 'Connection successful',
+                    });
+                }
+
+                return await finish(HttpStatus.OK, {
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: `Host request failed (status ${hostResp.status})`,
+                });
+            }
+
+            // Basic-style auth (default)
+            if (typeof username !== 'string' || username.trim().length === 0) {
+                return await finish(HttpStatus.BAD_REQUEST, {
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Missing username',
+                });
+            }
+            if (typeof apiKey !== 'string' || apiKey.trim().length === 0) {
+                return await finish(HttpStatus.BAD_REQUEST, {
+                    success: false,
+                    status: 'failed',
+                    connected: false,
+                    message: 'Missing apiKey',
+                });
+            }
+
+            const basic = Buffer.from(`${username}:${apiKey}`, 'utf8').toString('base64');
+            const hostResp = await axiosClient.get(host.toString(), {
+                headers: {Authorization: `Basic ${basic}`},
+            });
+
+            console.log('🧪 [Env CF Test] Host response:', {
+                status: hostResp.status,
+                host: host.hostname,
+            });
+
+            if (hostResp.status >= 200 && hostResp.status < 300) {
+                return await finish(HttpStatus.OK, {
+                    success: true,
+                    status: 'success',
+                    connected: true,
+                    message: 'Connection successful',
+                });
+            }
+
+            return await finish(HttpStatus.OK, {
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: `Host request failed (status ${hostResp.status})`,
+            });
+        } catch (error: any) {
+            console.error('❌ [Env CF Test] Unexpected error:', {
+                message: error?.message,
+                name: error?.name,
+            });
+            return await finish(HttpStatus.INTERNAL_SERVER_ERROR, {
+                success: false,
+                status: 'failed',
+                connected: false,
+                message: `Connection failed: ${error?.message || 'Unexpected error'}`,
+            });
+        }
+    }
+}
+
+@Controller('api/integration-artifacts')
+class IntegrationArtifactsController {
+    /**
+     * POST /api/integration-artifacts/fetch-packages
+     *
+     * Fetches Integration Packages and their artifacts from SAP Cloud Platform Integration (CPI)
+     * based on authentication credentials provided by the frontend.
+     *
+     * For each package returned, makes 3 parallel API calls to fetch:
+     * - IntegrationDesigntimeArtifacts
+     * - ValueMappingDesigntimeArtifacts
+     * - ScriptCollectionDesigntimeArtifacts
+     *
+     * Request Body:
+     * {
+     *   "apiUrl": "https://.../api/v1/IntegrationPackages",
+     *   "authenticationType": "OAuth2" | "Basic" | "Username and API Key",
+     *   "accountId": "string",
+     *   "accountName": "string",
+     *   "enterpriseId": "string",
+     *   "enterpriseName": "string",
+     *   "workstream": "string",
+     *   "product": "string",
+     *   "service": "string",
+     *   "environmentName": "string",
+     *   "credentialName": "string",
+     *   // OAuth2 fields:
+     *   "oauth2ClientId": "string",
+     *   "oauth2ClientSecret": "string",
+     *   "oauth2TokenUrl": "string",
+     *   // Basic Auth fields:
+     *   "username": "string",
+     *   "apiKey": "string"
+     * }
+     *
+     * Response:
+     * {
+     *   "success": true,
+     *   "data": [
+     *     {
+     *       "Name": "MyIntegrationPackage",
+     *       "Version": "1.0.0",
+     *       "Id": "package-id-123",
+     *       "IntegrationDesigntimeArtifacts": [
+     *         { "Name": "MyIFlow", "Version": "1.0.0", "Id": "iflow-id-456" }
+     *       ],
+     *       "ValueMappingDesigntimeArtifacts": [
+     *         { "Name": "MyValueMapping", "Version": "1.0.0", "Id": "vm-id-789" }
+     *       ],
+     *       "ScriptCollectionDesigntimeArtifacts": [
+     *         { "Name": "MyScriptCollection", "Version": "1.0.0", "Id": "sc-id-012" }
+     *       ]
+     *     }
+     *   ],
+     *   "count": 1
+     * }
+     */
+    @Post('fetch-packages')
+    async fetchPackages(@Res() res: any, @Body() body: any) {
+        try {
+            const {
+                apiUrl,
+                authenticationType,
+                oauth2ClientId,
+                oauth2ClientSecret,
+                oauth2TokenUrl,
+                username,
+                apiKey,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+                environmentName,
+                credentialName,
+            } = body || {};
+
+            console.log('📡 [IntegrationArtifacts] Received request:', {
+                apiUrl,
+                authenticationType,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                workstream,
+                product,
+                service,
+                environmentName,
+                credentialName,
+                hasOAuth2Credentials: !!(oauth2ClientId && oauth2ClientSecret),
+                hasBasicCredentials: !!(username && apiKey),
+            });
+
+            // Validate required fields
+            if (!apiUrl) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'API URL is required',
+                });
+            }
+
+            if (!authenticationType) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Authentication type is required',
+                });
+            }
+
+            // Validate URL format
+            try {
+                const urlObj = new URL(apiUrl);
+                if (!['http:', 'https:'].includes(urlObj.protocol)) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        success: false,
+                        error: 'API URL must use http or https protocol',
+                    });
+                }
+            } catch (urlError) {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: 'Invalid API URL format',
+                });
+            }
+
+            // Get authentication headers based on authentication type
+            let authHeaders: Record<string, string> = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            };
+
+            if (authenticationType === 'OAuth2') {
+                // Validate OAuth2 fields
+                if (!oauth2ClientId || !oauth2ClientSecret || !oauth2TokenUrl) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        success: false,
+                        error: 'OAuth2 credentials are incomplete. Client ID, Client Secret, and Token URL are required.',
+                    });
+                }
+
+                // Validate OAuth2 token URL
+                try {
+                    const tokenUrlObj = new URL(oauth2TokenUrl);
+                    if (!['http:', 'https:'].includes(tokenUrlObj.protocol)) {
+                        return res.status(HttpStatus.BAD_REQUEST).json({
+                            success: false,
+                            error: 'OAuth2 Token URL must use http or https protocol',
+                        });
+                    }
+                } catch (urlError) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        success: false,
+                        error: 'Invalid OAuth2 Token URL format',
+                    });
+                }
+
+                console.log('🔑 [IntegrationArtifacts] Getting OAuth2 token from:', {
+                    tokenUrl: oauth2TokenUrl,
+                    clientId: oauth2ClientId,
+                    hasClientSecret: !!oauth2ClientSecret,
+                });
+
+                // Step 1: Get OAuth2 access token
+                const accessToken = await this.getOAuth2Token(
+                    oauth2ClientId,
+                    oauth2ClientSecret,
+                    oauth2TokenUrl,
+                );
+
+                if (!accessToken) {
+                    return res.status(HttpStatus.UNAUTHORIZED).json({
+                        success: false,
+                        error: 'Failed to obtain OAuth2 access token',
+                    });
+                }
+
+                // Step 2: Set Authorization header with Bearer token
+                authHeaders['Authorization'] = `Bearer ${accessToken}`;
+            } else if (
+                authenticationType === 'Basic' ||
+                authenticationType === 'Username and API Key'
+            ) {
+                // Validate Basic Auth fields
+                if (!username || !apiKey) {
+                    return res.status(HttpStatus.BAD_REQUEST).json({
+                        success: false,
+                        error: 'Username and API Key are required for Basic authentication',
+                    });
+                }
+
+                // Create Basic Auth header
+                const credentials = Buffer.from(`${username}:${apiKey}`).toString(
+                    'base64',
+                );
+                authHeaders['Authorization'] = `Basic ${credentials}`;
+            } else {
+                return res.status(HttpStatus.BAD_REQUEST).json({
+                    success: false,
+                    error: `Unsupported authentication type: ${authenticationType}`,
+                });
+            }
+
+            console.log('🌐 [IntegrationArtifacts] Fetching packages from:', {
+                apiUrl,
+                authenticationType,
+                hasAuthHeader: !!authHeaders['Authorization'],
+            });
+
+            // Step 3: Make GET request to fetch Integration Packages
+            const response = await axios.get(apiUrl, {
+                headers: authHeaders,
+                timeout: 30000, // 30 seconds timeout
+            });
+
+            console.log('✅ [IntegrationArtifacts] API response received:', {
+                status: response.status,
+                dataType: typeof response.data,
+                isArray: Array.isArray(response.data),
+            });
+
+            // Step 4: Parse and transform the response
+            let packages: any[] = [];
+            if (Array.isArray(response.data)) {
+                packages = response.data;
+            } else if (response.data?.d?.results) {
+                packages = response.data.d.results;
+            } else if (response.data?.results) {
+                packages = response.data.results;
+            } else if (response.data?.d) {
+                packages = Array.isArray(response.data.d)
+                    ? response.data.d
+                    : [response.data.d];
+            } else {
+                packages = [];
+            }
+
+            console.log(`📦 [IntegrationArtifacts] Found ${packages.length} packages`);
+
+            // Step 5: Extract base URL for constructing artifact URLs
+            // Keep the full path including /IntegrationPackages
+            const baseUrlObj = new URL(apiUrl);
+            const baseUrl = `${baseUrlObj.protocol}//${baseUrlObj.host}${baseUrlObj.pathname}`;
+
+            // Step 6: Extract Name, Version, and Id from packages
+            const transformedPackages = packages.map((pkg: any) => {
+                return {
+                    Name: pkg.Name || pkg.name || pkg.Id || pkg.id || 'Unknown',
+                    Version:
+                        pkg.Version ||
+                        pkg.version ||
+                        pkg.VersionId ||
+                        pkg.versionId ||
+                        'Unknown',
+                    Id: pkg.Id || pkg.id || pkg.Name || pkg.name || null,
+                };
+            });
+
+            // Step 7: For each package, fetch artifacts in parallel and build nested structure
+            const packagesWithArtifacts = await Promise.all(
+                transformedPackages.map(async (pkg: any) => {
+                    const packageId = pkg.Id;
+                    const packageName = pkg.Name;
+                    const packageVersion = pkg.Version;
+
+                    if (!packageId) {
+                        console.warn(
+                            `⚠️ [IntegrationArtifacts] Package missing Id field, skipping artifact fetch:`,
+                            pkg,
+                        );
+                        return {
+                            Name: packageName,
+                            Version: packageVersion,
+                            Id: null,
+                            IntegrationDesigntimeArtifacts: [],
+                            ValueMappingDesigntimeArtifacts: [],
+                            ScriptCollectionDesigntimeArtifacts: [],
+                        };
+                    }
+
+                    // Construct the 3 artifact URLs
+                    const artifactUrls = [
+                        `${baseUrl}('${packageId}')/IntegrationDesigntimeArtifacts`,
+                        `${baseUrl}('${packageId}')/ValueMappingDesigntimeArtifacts`,
+                        `${baseUrl}('${packageId}')/ScriptCollectionDesigntimeArtifacts`,
+                    ];
+
+                    console.log(
+                        `🔍 [IntegrationArtifacts] Fetching artifacts for package: ${packageName} (${packageId})`,
+                    );
+
+                    // Fetch all 3 artifact types in parallel for this package
+                    const [integrationArtifacts, valueMappingArtifacts, scriptCollectionArtifacts] =
+                        await Promise.all([
+                            // Fetch IntegrationDesigntimeArtifacts (IFLOW)
+                            this.fetchArtifacts(
+                                artifactUrls[0],
+                                authHeaders,
+                                packageName,
+                                'IntegrationDesigntimeArtifacts',
+                            ),
+                            // Fetch ValueMappingDesigntimeArtifacts (VALUE MAPPING)
+                            this.fetchArtifacts(
+                                artifactUrls[1],
+                                authHeaders,
+                                packageName,
+                                'ValueMappingDesigntimeArtifacts',
+                            ),
+                            // Fetch ScriptCollectionDesigntimeArtifacts (SCRIPT COLLECTION)
+                            this.fetchArtifacts(
+                                artifactUrls[2],
+                                authHeaders,
+                                packageName,
+                                'ScriptCollectionDesigntimeArtifacts',
+                            ),
+                        ]);
+
+                    console.log(
+                        `✅ [IntegrationArtifacts] Package ${packageName} - IFLOW: ${integrationArtifacts.length}, VALUE MAPPING: ${valueMappingArtifacts.length}, SCRIPT COLLECTION: ${scriptCollectionArtifacts.length}`,
+                    );
+
+                    return {
+                        Name: packageName,
+                        Version: packageVersion,
+                        Id: packageId,
+                        IntegrationDesigntimeArtifacts: integrationArtifacts,
+                        ValueMappingDesigntimeArtifacts: valueMappingArtifacts,
+                        ScriptCollectionDesigntimeArtifacts: scriptCollectionArtifacts,
+                    };
+                }),
+            );
+
+            console.log(
+                `✅ [IntegrationArtifacts] Total packages with artifacts: ${packagesWithArtifacts.length}`,
+            );
+
+            // Step 8: Return success response with nested structure
+            return res.status(HttpStatus.OK).json({
+                success: true,
+                data: packagesWithArtifacts,
+                count: packagesWithArtifacts.length,
+            });
+        } catch (error: any) {
+            console.error('❌ [IntegrationArtifacts] Error fetching packages:', {
+                message: error?.message,
+                name: error?.name,
+                hasResponse: !!error?.response,
+                responseStatus: error?.response?.status,
+            });
+
+            // Handle specific error cases
+            if (error.response) {
+                // API returned an error response
+                const errorMessage =
+                    error.response.data?.error?.message?.value ||
+                    error.response.data?.error?.message ||
+                    error.response.data?.message ||
+                    `API request failed with status ${error.response.status}`;
+
+                console.error('❌ [IntegrationArtifacts] API error response:', {
+                    status: error.response.status,
+                    error: errorMessage,
+                });
+
+                return res.status(error.response.status || HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    error: errorMessage,
+                    details: error.response.data,
+                });
+            } else if (error.request) {
+                // Request was made but no response received
+                console.error('❌ [IntegrationArtifacts] No response received');
+                return res.status(HttpStatus.SERVICE_UNAVAILABLE).json({
+                    success: false,
+                    error: 'No response received from the API. Please check the API URL and network connectivity.',
+                });
+            } else {
+                // Error in request setup
+                console.error('❌ [IntegrationArtifacts] Request setup error:', error.message);
+                return res.status(HttpStatus.INTERNAL_SERVER_ERROR).json({
+                    success: false,
+                    error:
+                        error.message ||
+                        'An unexpected error occurred while fetching integration packages',
+                });
+            }
+        }
+    }
+
+    /**
+     * Get OAuth2 access token using client credentials flow
+     */
+    private async getOAuth2Token(
+        clientId: string,
+        clientSecret: string,
+        tokenUrl: string,
+    ): Promise<string | null> {
+        try {
+            console.log('🔑 [IntegrationArtifacts] Requesting OAuth2 token:', {
+                tokenUrl,
+                clientId,
+                hasClientSecret: !!clientSecret,
+            });
+
+            const response = await axios.post(
+                tokenUrl,
+                new URLSearchParams({
+                    grant_type: 'client_credentials',
+                    client_id: clientId,
+                    client_secret: clientSecret,
+                }),
+                {
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Accept': 'application/json',
+                    },
+                    timeout: 30000, // 30 seconds timeout
+                },
+            );
+
+            console.log('✅ [IntegrationArtifacts] OAuth2 token response received:', {
+                status: response.status,
+                hasAccessToken: !!(response.data?.access_token || response.data?.accessToken || response.data?.token),
+            });
+
+            // Extract access token from response
+            // Different OAuth2 providers may return tokens in different formats
+            const accessToken =
+                response.data.access_token ||
+                response.data.accessToken ||
+                response.data.token;
+
+            if (!accessToken) {
+                console.error('❌ [IntegrationArtifacts] Access token not found in OAuth2 response:', {
+                    responseKeys: Object.keys(response.data || {}),
+                });
+                throw new Error('Access token not found in OAuth2 response');
+            }
+
+            console.log('✅ [IntegrationArtifacts] OAuth2 token obtained successfully');
+            return accessToken;
+        } catch (error: any) {
+            console.error('❌ [IntegrationArtifacts] Error obtaining OAuth2 token:', {
+                message: error?.message,
+                name: error?.name,
+                hasResponse: !!error?.response,
+                responseStatus: error?.response?.status,
+            });
+
+            if (error.response) {
+                const errorDescription =
+                    error.response.data?.error_description ||
+                    error.response.data?.error ||
+                    'Unknown error';
+                console.error('❌ [IntegrationArtifacts] OAuth2 error response:', {
+                    status: error.response.status,
+                    error: errorDescription,
+                });
+                throw new Error(
+                    `OAuth2 authentication failed: ${errorDescription}`,
+                );
+            }
+            throw error;
+        }
+    }
+
+    /**
+     * Fetch artifacts from a given URL
+     * @param url - The artifact API URL
+     * @param authHeaders - Authentication headers
+     * @param packageName - Package name for logging
+     * @param artifactType - Type of artifact for logging
+     * @returns Array of artifacts with Name, Version, and Id
+     */
+    private async fetchArtifacts(
+        url: string,
+        authHeaders: Record<string, string>,
+        packageName: string,
+        artifactType: string,
+    ): Promise<Array<{Name: string; Version: string; Id: string | undefined}>> {
+        try {
+            const artifactResponse = await axios.get(url, {
+                headers: authHeaders,
+                timeout: 30000, // 30 seconds timeout
+            });
+
+            // Parse artifact response
+            let artifacts: any[] = [];
+            if (Array.isArray(artifactResponse.data)) {
+                artifacts = artifactResponse.data;
+            } else if (artifactResponse.data?.d?.results) {
+                artifacts = artifactResponse.data.d.results;
+            } else if (artifactResponse.data?.results) {
+                artifacts = artifactResponse.data.results;
+            } else if (artifactResponse.data?.d) {
+                artifacts = Array.isArray(artifactResponse.data.d)
+                    ? artifactResponse.data.d
+                    : [artifactResponse.data.d];
+            }
+
+            // Transform artifacts to extract Name, Version, and Id
+            return artifacts.map((artifact: any) => ({
+                Name:
+                    artifact.Name ||
+                    artifact.name ||
+                    artifact.Id ||
+                    artifact.id ||
+                    'Unknown',
+                Version:
+                    artifact.Version ||
+                    artifact.version ||
+                    artifact.VersionId ||
+                    artifact.versionId ||
+                    'Unknown',
+                Id: artifact.Id || artifact.id,
+            }));
+        } catch (artifactError: any) {
+            // Log error but don't fail the entire request
+            console.error(
+                `❌ [IntegrationArtifacts] Error fetching ${artifactType} for package ${packageName}:`,
+                {
+                    message: artifactError?.message,
+                    status: artifactError?.response?.status,
+                    url,
+                },
+            );
+            // Return empty array if fetch fails
+            return [];
+        }
     }
 }
 
@@ -7718,7 +9076,9 @@ class UserManagementController {
     @Get('users')
     async listUsers(
         @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
@@ -7726,66 +9086,63 @@ class UserManagementController {
             };
         }
 
-        console.log(
-            '📋 GET /api/user-management/users called with query params:',
-            {
-                accountId,
-                enterpriseId,
-            },
-        );
+        console.log('📋 GET /api/user-management/users called with query params:', {
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        });
 
-        // Check if account context is provided (only accountId required)
-        const hasAccountContext = !!accountId;
-
+        // Check if account context is provided
+        const hasAccountContext = accountId && accountName;
+        
         if (hasAccountContext) {
-            console.log(`✅ Listing users for accountId: ${accountId}`);
-            if (enterpriseId) {
-                console.log(`   Filtering by enterpriseId: ${enterpriseId}`);
+            console.log(`✅ Listing users for account: ${accountName} (${accountId})`);
+            if (enterpriseId && enterpriseName) {
+                console.log(`   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`);
             }
-
+            
             const users = await userManagement.listUsersByAccount(
-                accountId,
-                undefined, // accountName not required
-                enterpriseId, // Pass enterprise filter
-                undefined, // enterpriseName not required
+                accountId, 
+                accountName,
+                enterpriseId,  // Pass enterprise filter
+                enterpriseName  // Pass enterprise filter
             );
-
+            
             // Fetch assigned groups for each user
             const usersWithGroups = await Promise.all(
                 users.map(async (user: any) => {
                     try {
-                        // Use accountId/enterpriseId from the user record or query params
+                        // IMPORTANT: Use the account/enterprise from the user record itself
+                        // Not from the query parameters, as they might differ
                         const userAccountId = user.accountId || accountId;
-                        const userEnterpriseId =
-                            user.enterpriseId || enterpriseId;
-
+                        const userAccountName = user.accountName || accountName;
+                        const userEnterpriseId = user.enterpriseId || enterpriseId;
+                        const userEnterpriseName = user.enterpriseName || enterpriseName;
+                        
                         console.log(`🔍 Fetching groups for user ${user.id}:`, {
                             userAccountId,
+                            userAccountName,
                             userEnterpriseId,
+                            userEnterpriseName,
                         });
-
-                        const assignedGroups =
-                            await userManagement.getUserGroups(
-                                user.id,
-                                userAccountId,
-                                undefined, // accountName not required
-                                userEnterpriseId,
-                                undefined, // enterpriseName not required
-                            );
-
-                        console.log(
-                            `✅ Got ${assignedGroups.length} group(s) for user ${user.id}`,
+                        
+                        const assignedGroups = await userManagement.getUserGroups(
+                            user.id,
+                            userAccountId,      // Use user's account context
+                            userAccountName,    // Use user's account context
+                            userEnterpriseId,   // Use user's enterprise context
+                            userEnterpriseName  // Use user's enterprise context
                         );
-
+                        
+                        console.log(`✅ Got ${assignedGroups.length} group(s) for user ${user.id}`);
+                        
                         return {
                             ...user,
                             assignedUserGroups: assignedGroups,
                         };
                     } catch (error) {
-                        console.error(
-                            `❌ Failed to get groups for user ${user.id}:`,
-                            error,
-                        );
+                        console.error(`❌ Failed to get groups for user ${user.id}:`, error);
                         return {
                             ...user,
                             assignedUserGroups: [],
@@ -7793,7 +9150,7 @@ class UserManagementController {
                     }
                 }),
             );
-
+            
             return usersWithGroups;
         } else {
             console.log('✅ Listing Systiva users (no account context)');
@@ -7831,21 +9188,21 @@ class UserManagementController {
 
         console.log('💾 POST /api/user-management/users called with body:', {
             accountId: body.accountId,
+            accountName: body.accountName,
             enterpriseId: body.enterpriseId,
+            enterpriseName: body.enterpriseName,
             firstName: body.firstName,
             lastName: body.lastName,
             emailAddress: body.emailAddress,
         });
 
-        // Check if account context is provided (only accountId required)
-        const hasAccountContext = !!body.accountId;
-
+        // Check if account context is provided
+        const hasAccountContext = body.accountId && body.accountName;
+        
         if (hasAccountContext) {
-            console.log(`✅ Creating user in account table: ${body.accountId}`);
-            if (body.enterpriseId) {
-                console.log(`   EnterpriseId: ${body.enterpriseId}`);
-            }
-
+            console.log(`✅ Creating user in account table: ${body.accountName} (${body.accountId})`);
+            console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
+            
             // Prepare user data for account-specific creation (include enterprise context)
             const userPayload = {
                 firstName: body.firstName,
@@ -7854,30 +9211,23 @@ class UserManagementController {
                 emailAddress: body.emailAddress,
                 password: body.password,
                 status: body.status || 'ACTIVE',
-                startDate:
-                    body.startDate || new Date().toISOString().split('T')[0],
+                startDate: body.startDate || new Date().toISOString().split('T')[0],
                 endDate: body.endDate,
-                technicalUser:
-                    body.technicalUser === true ||
-                    body.technicalUser === 'true',
+                technicalUser: body.technicalUser === true || body.technicalUser === 'true',
                 assignedGroups: body.assignedUserGroups
-                    ? body.assignedUserGroups.map(
-                          (group: any) => group.id || group,
-                      )
+                    ? body.assignedUserGroups.map((group: any) => group.id || group)
                     : [],
-                enterpriseId: body.enterpriseId, // Pass enterprise context (optional)
-                enterpriseName: body.enterpriseName, // Pass enterprise context (optional)
+                enterpriseId: body.enterpriseId,  // Pass enterprise context
+                enterpriseName: body.enterpriseName,  // Pass enterprise context
             };
 
             return await userManagement.createUserInAccountTable(
                 userPayload,
                 body.accountId,
-                body.accountName, // Optional - can be undefined
+                body.accountName,
             );
         } else {
-            console.log(
-                '✅ Creating user in Systiva table (no account context)',
-            );
+            console.log('✅ Creating user in Systiva table (no account context)');
             return await userManagement.createUser(body);
         }
     }
@@ -7900,17 +9250,13 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = body.accountId && body.accountName;
-
+        
         if (hasAccountContext) {
-            console.log(
-                `✅ Updating user in account table: ${body.accountName} (${body.accountId})`,
-            );
+            console.log(`✅ Updating user in account table: ${body.accountName} (${body.accountId})`);
             if (body.enterpriseId && body.enterpriseName) {
-                console.log(
-                    `   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`,
-                );
+                console.log(`   Enterprise: ${body.enterpriseName} (${body.enterpriseId})`);
             }
-
+            
             const updatePayload: any = {
                 firstName: body.firstName,
                 middleName: body.middleName,
@@ -7920,16 +9266,14 @@ class UserManagementController {
                 startDate: body.startDate,
                 endDate: body.endDate,
                 technicalUser: body.technicalUser,
-                enterpriseId: body.enterpriseId, // Pass enterprise context
-                enterpriseName: body.enterpriseName, // Pass enterprise context
+                enterpriseId: body.enterpriseId,  // Pass enterprise context
+                enterpriseName: body.enterpriseName,  // Pass enterprise context
             };
 
             // ⚠️  DO NOT update assignedUserGroups via PUT endpoint
             // Group assignments should ONLY be updated via POST /users/:id/groups endpoint
             // This prevents frontend temporary IDs from being saved to database
-            console.log(
-                '⚠️  Ignoring assignedUserGroups in PUT request (use POST /users/:id/groups instead)',
-            );
+            console.log('⚠️  Ignoring assignedUserGroups in PUT request (use POST /users/:id/groups instead)');
 
             // Handle password if provided
             if (body.password) {
@@ -7943,9 +9287,7 @@ class UserManagementController {
                 body.accountName,
             );
         } else {
-            console.log(
-                '✅ Updating user in Systiva table (no account context)',
-            );
+            console.log('✅ Updating user in Systiva table (no account context)');
             return await userManagement.updateUser(id, body);
         }
     }
@@ -7974,28 +9316,18 @@ class UserManagementController {
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
-
+        
         if (hasAccountContext) {
-            console.log(
-                `✅ Deleting user from account table: ${accountName} (${accountId})`,
-            );
+            console.log(`✅ Deleting user from account table: ${accountName} (${accountId})`);
             if (enterpriseId && enterpriseName) {
-                console.log(
-                    `   Enterprise context: ${enterpriseName} (${enterpriseId})`,
-                );
+                console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
             }
-            await userManagement.deleteUserFromAccountTable(
-                id,
-                accountId,
-                accountName,
-            );
+            await userManagement.deleteUserFromAccountTable(id, accountId, accountName);
         } else {
-            console.log(
-                '✅ Deleting user from Systiva table (no account context)',
-            );
+            console.log('✅ Deleting user from Systiva table (no account context)');
             await userManagement.deleteUser(id);
         }
-
+        
         return {};
     }
 
@@ -8034,14 +9366,9 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                console.log(
-                    `✅ Looking for user in account table: ${accountName} (${accountId})`,
-                );
-                const users = await userManagement.listUsersByAccount(
-                    accountId,
-                    accountName,
-                );
-                user = users.find((u) => u.id === id);
+                console.log(`✅ Looking for user in account table: ${accountName} (${accountId})`);
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
             } else {
                 console.log('✅ Looking for user in Systiva table');
                 user = await userManagement.getUser(id);
@@ -8072,18 +9399,10 @@ class UserManagementController {
                 // Bulk assignment (replace all)
                 console.log('📋 Bulk group assignment:', body.groupIds);
                 requestedGroupIds = body.groupIds;
-            } else if (
-                body.assignedUserGroups &&
-                Array.isArray(body.assignedUserGroups)
-            ) {
+            } else if (body.assignedUserGroups && Array.isArray(body.assignedUserGroups)) {
                 // Frontend format
-                console.log(
-                    '📋 assignedUserGroups format:',
-                    body.assignedUserGroups,
-                );
-                requestedGroupIds = body.assignedUserGroups.map(
-                    (g: any) => g.id || g,
-                );
+                console.log('📋 assignedUserGroups format:', body.assignedUserGroups);
+                requestedGroupIds = body.assignedUserGroups.map((g: any) => g.id || g);
             } else {
                 return {
                     success: false,
@@ -8092,16 +9411,10 @@ class UserManagementController {
             }
 
             // ✅ VALIDATE AND PRIORITIZE ACCOUNT-SPECIFIC GROUPS
-            console.log(
-                `\n🔍 Validating ${requestedGroupIds.length} requested group(s)...`,
-            );
+            console.log(`\n🔍 Validating ${requestedGroupIds.length} requested group(s)...`);
             const validatedGroupIds: string[] = [];
             const warnings: string[] = [];
-            const replacements: Array<{
-                original: string;
-                replacement: string;
-                groupName: string;
-            }> = [];
+            const replacements: Array<{original: string, replacement: string, groupName: string}> = [];
 
             for (const groupId of requestedGroupIds) {
                 const validation = await userManagement.validateGroupScope(
@@ -8116,70 +9429,47 @@ class UserManagementController {
                     console.log(`✅ Group ${groupId} is valid for this scope`);
                     validatedGroupIds.push(groupId);
                 } else {
-                    console.warn(
-                        `⚠️  Group ${groupId} validation failed: ${validation.warning}`,
-                    );
+                    console.warn(`⚠️  Group ${groupId} validation failed: ${validation.warning}`);
                     warnings.push(validation.warning || 'Validation failed');
 
                     // If it's a Systiva group in account context, try to find account-specific alternative
-                    if (
-                        validation.scopeType === 'systiva' &&
-                        validation.group &&
-                        hasAccountContext
-                    ) {
-                        console.log(
-                            `🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`,
+                    if (validation.scopeType === 'systiva' && validation.group && hasAccountContext) {
+                        console.log(`🔄 Attempting to find account-specific alternative for "${validation.group.name}"...`);
+                        
+                        const alternative = await userManagement.findAccountSpecificGroupByName(
+                            validation.group.name,
+                            accountId!,
+                            accountName!,
+                            enterpriseId,
+                            enterpriseName,
                         );
 
-                        const alternative =
-                            await userManagement.findAccountSpecificGroupByName(
-                                validation.group.name,
-                                accountId!,
-                                accountName!,
-                                enterpriseId,
-                                enterpriseName,
-                            );
-
                         if (alternative) {
-                            console.log(
-                                `✅ Found account-specific alternative: ${alternative.name} (${alternative.id})`,
-                            );
+                            console.log(`✅ Found account-specific alternative: ${alternative.name} (${alternative.id})`);
                             validatedGroupIds.push(alternative.id);
                             replacements.push({
                                 original: groupId,
                                 replacement: alternative.id,
                                 groupName: alternative.name,
                             });
-                            warnings.push(
-                                `Replaced Systiva group "${validation.group.name}" with account-specific version (${alternative.id})`,
-                            );
+                            warnings.push(`Replaced Systiva group "${validation.group.name}" with account-specific version (${alternative.id})`);
                         } else {
-                            console.error(
-                                `❌ No account-specific alternative found for "${validation.group.name}"`,
-                            );
-                            warnings.push(
-                                `Group "${validation.group.name}" (${groupId}) is Systiva-level with no account-specific alternative. Skipped.`,
-                            );
+                            console.error(`❌ No account-specific alternative found for "${validation.group.name}"`);
+                            warnings.push(`Group "${validation.group.name}" (${groupId}) is Systiva-level with no account-specific alternative. Skipped.`);
                         }
                     } else {
-                        console.error(
-                            `❌ Group ${groupId} cannot be assigned: ${validation.warning}`,
-                        );
+                        console.error(`❌ Group ${groupId} cannot be assigned: ${validation.warning}`);
                     }
                 }
             }
 
-            if (
-                validatedGroupIds.length === 0 &&
-                requestedGroupIds.length > 0
-            ) {
+            if (validatedGroupIds.length === 0 && requestedGroupIds.length > 0) {
                 console.error('❌ No valid groups to assign after validation');
                 return {
                     success: false,
                     error: 'No valid groups to assign',
                     warnings,
-                    details:
-                        'All requested groups failed validation. Ensure groups belong to the correct account and enterprise.',
+                    details: 'All requested groups failed validation. Ensure groups belong to the correct account and enterprise.',
                 };
             }
 
@@ -8188,22 +9478,18 @@ class UserManagementController {
             console.log(`   Validated: ${validatedGroupIds.length} groups`);
             console.log(`   Replacements: ${replacements.length}`);
             if (replacements.length > 0) {
-                replacements.forEach((r) => {
-                    console.log(
-                        `      - ${r.groupName}: ${r.original} → ${r.replacement}`,
-                    );
+                replacements.forEach(r => {
+                    console.log(`      - ${r.groupName}: ${r.original} → ${r.replacement}`);
                 });
             }
             console.log('');
 
             // Update user with validated group assignments
             if (hasAccountContext) {
-                console.log(
-                    `✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`,
-                );
+                console.log(`✅ Updating user in account table with ${validatedGroupIds.length} validated group(s)`);
                 await userManagement.updateUserInAccountTable(
                     id,
-                    {
+                    { 
                         assignedGroups: validatedGroupIds,
                         enterpriseId,
                         enterpriseName,
@@ -8212,24 +9498,20 @@ class UserManagementController {
                     accountName,
                 );
             } else {
-                console.log(
-                    `✅ Updating user in Systiva table with ${validatedGroupIds.length} validated group(s)`,
-                );
+                console.log(`✅ Updating user in Systiva table with ${validatedGroupIds.length} validated group(s)`);
                 await userManagement.updateUser(id, {
                     assignedGroups: validatedGroupIds,
                 });
             }
 
-            console.log(
-                `✅ Successfully assigned ${validatedGroupIds.length} group(s) to user ${id}`,
-            );
+            console.log(`✅ Successfully assigned ${validatedGroupIds.length} group(s) to user ${id}`);
 
             const response: any = {
                 success: true,
                 message: 'Groups assigned successfully',
                 data: {
                     userId: id,
-                    assignedGroups: validatedGroupIds.map((gId) => ({id: gId})),
+                    assignedGroups: validatedGroupIds.map(gId => ({ id: gId })),
                     validatedCount: validatedGroupIds.length,
                     requestedCount: requestedGroupIds.length,
                 },
@@ -8266,17 +9548,14 @@ class UserManagementController {
             };
         }
 
-        console.log(
-            '🗑️  DELETE /api/user-management/users/:id/groups called:',
-            {
-                userId: id,
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-                groupIds: body.groupIds,
-            },
-        );
+        console.log('🗑️  DELETE /api/user-management/users/:id/groups called:', {
+            userId: id,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            groupIds: body.groupIds,
+        });
 
         // Check if account context is provided
         const hasAccountContext = accountId && accountName;
@@ -8285,19 +9564,12 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                console.log(
-                    `✅ Looking for user in account table: ${accountName}`,
-                );
+                console.log(`✅ Looking for user in account table: ${accountName}`);
                 if (enterpriseId && enterpriseName) {
-                    console.log(
-                        `   Enterprise context: ${enterpriseName} (${enterpriseId})`,
-                    );
+                    console.log(`   Enterprise context: ${enterpriseName} (${enterpriseId})`);
                 }
-                const users = await userManagement.listUsersByAccount(
-                    accountId,
-                    accountName,
-                );
-                user = users.find((u) => u.id === id);
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
             } else {
                 console.log('✅ Looking for user in Systiva table');
                 user = await userManagement.getUser(id);
@@ -8323,18 +9595,16 @@ class UserManagementController {
                 (groupId) => !body.groupIds.includes(groupId),
             );
 
-            console.log(
-                `📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`,
-            );
+            console.log(`📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`);
 
             // Update user
             if (hasAccountContext) {
                 await userManagement.updateUserInAccountTable(
                     id,
-                    {
+                    { 
                         assignedGroups: updatedGroups,
-                        enterpriseId, // Preserve enterprise context
-                        enterpriseName, // Preserve enterprise context
+                        enterpriseId,      // Preserve enterprise context
+                        enterpriseName     // Preserve enterprise context
                     },
                     accountId,
                     accountName,
@@ -8345,9 +9615,7 @@ class UserManagementController {
                 });
             }
 
-            console.log(
-                `✅ Removed ${body.groupIds.length} group(s) from user ${id}`,
-            );
+            console.log(`✅ Removed ${body.groupIds.length} group(s) from user ${id}`);
 
             return {
                 success: true,
@@ -8392,11 +9660,8 @@ class UserManagementController {
             // Get the user from the correct table
             let user;
             if (hasAccountContext) {
-                const users = await userManagement.listUsersByAccount(
-                    accountId,
-                    accountName,
-                );
-                user = users.find((u) => u.id === id);
+                const users = await userManagement.listUsersByAccount(accountId, accountName);
+                user = users.find(u => u.id === id);
             } else {
                 user = await userManagement.getUser(id);
             }
@@ -8409,16 +9674,16 @@ class UserManagementController {
             }
 
             const groups = await userManagement.getUserGroups(
-                id,
-                accountId,
+                id, 
+                accountId, 
                 accountName,
-                enterpriseId, // Pass enterprise context
-                enterpriseName, // Pass enterprise context
+                enterpriseId,      // Pass enterprise context
+                enterpriseName     // Pass enterprise context
             );
 
             return {
                 success: true,
-                data: {groups},
+                data: { groups },
             };
         } catch (error: any) {
             console.error('❌ Error getting user groups:', error);
@@ -8452,12 +9717,7 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        const groups = await userManagement.listGroups(
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        const groups = await userManagement.listGroups(accountId, accountName, enterpriseId, enterpriseName);
         console.log(`📋 listGroups returning ${groups.length} groups`);
         return groups;
     }
@@ -8475,13 +9735,7 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroup(
-            id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        return await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
     }
 
     @Get('groups/:id/roles')
@@ -8497,25 +9751,13 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getGroupRoles(
-            id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        return await userManagement.getGroupRoles(id, accountId, accountName, enterpriseId, enterpriseName);
     }
 
     @Post('groups/:id/roles')
     async assignRoleToGroup(
         @Param('id') id: string,
-        @Body()
-        body: {
-            roleId?: string;
-            roleIds?: string[];
-            roleName?: string;
-            groupId?: string;
-        },
+        @Body() body: {roleId?: string; roleIds?: string[]; roleName?: string; groupId?: string},
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
@@ -8537,20 +9779,9 @@ class UserManagementController {
                 enterpriseName,
             });
 
-            const group = await userManagement.getGroup(
-                id,
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-            );
+            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
             if (!group) {
-                console.error(`❌ Group not found: ${id} with context:`, {
-                    accountId,
-                    accountName,
-                    enterpriseId,
-                    enterpriseName,
-                });
+                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
                 return {
                     success: false,
                     error: 'Group not found',
@@ -8575,9 +9806,7 @@ class UserManagementController {
             }
 
             // Add only new roles (avoid duplicates)
-            const newRoles = rolesToAdd.filter(
-                (roleId) => !currentRoles.includes(roleId),
-            );
+            const newRoles = rolesToAdd.filter(roleId => !currentRoles.includes(roleId));
             const updatedRoles = [...currentRoles, ...newRoles];
 
             await userManagement.updateGroup(id, {
@@ -8588,9 +9817,7 @@ class UserManagementController {
                 selectedEnterpriseName: enterpriseName,
             });
 
-            console.log(
-                `✅ Assigned ${newRoles.length} new role(s) to group ${id}. Total roles: ${updatedRoles.length}`,
-            );
+            console.log(`✅ Assigned ${newRoles.length} new role(s) to group ${id}. Total roles: ${updatedRoles.length}`);
 
             return {
                 success: true,
@@ -8626,30 +9853,16 @@ class UserManagementController {
         }
 
         try {
-            console.log(
-                `🗑️  Removing role ${roleId} from group ${id} with context:`,
-                {
-                    accountId,
-                    accountName,
-                    enterpriseId,
-                    enterpriseName,
-                },
-            );
-
-            const group = await userManagement.getGroup(
-                id,
+            console.log(`🗑️  Removing role ${roleId} from group ${id} with context:`, {
                 accountId,
                 accountName,
                 enterpriseId,
                 enterpriseName,
-            );
+            });
+
+            const group = await userManagement.getGroup(id, accountId, accountName, enterpriseId, enterpriseName);
             if (!group) {
-                console.error(`❌ Group not found: ${id} with context:`, {
-                    accountId,
-                    accountName,
-                    enterpriseId,
-                    enterpriseName,
-                });
+                console.error(`❌ Group not found: ${id} with context:`, {accountId, accountName, enterpriseId, enterpriseName});
                 return {
                     success: false,
                     error: 'Group not found',
@@ -8660,7 +9873,7 @@ class UserManagementController {
 
             const currentRoles = group.assignedRoles || [];
             const updatedRoles = currentRoles.filter((r) => r !== roleId);
-
+            
             await userManagement.updateGroup(id, {
                 assignedRoles: updatedRoles,
                 selectedAccountId: accountId,
@@ -8669,9 +9882,7 @@ class UserManagementController {
                 selectedEnterpriseName: enterpriseName,
             });
 
-            console.log(
-                `✅ Role ${roleId} removed from group ${id}. Remaining roles: ${updatedRoles.length}`,
-            );
+            console.log(`✅ Role ${roleId} removed from group ${id}. Remaining roles: ${updatedRoles.length}`);
 
             return {
                 success: true,
@@ -8699,17 +9910,17 @@ class UserManagementController {
             };
         }
         console.log('🆕 createGroup API called with body:', body);
-
+        
         // Map frontend field names to backend expected names
         const groupData = {
             ...body,
-            name: body.groupName || body.name, // Frontend sends 'groupName', backend expects 'name'
+            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
             selectedAccountId: body.accountId,
             selectedAccountName: body.accountName,
             selectedEnterpriseId: body.enterpriseId,
             selectedEnterpriseName: body.enterpriseName,
         };
-
+        
         console.log('🆕 createGroup mapped data:', groupData);
         const result = await userManagement.createGroup(groupData);
         console.log('🆕 createGroup created group:', result);
@@ -8724,19 +9935,17 @@ class UserManagementController {
             };
         }
         console.log(`🔄 updateGroup API called for id: ${id} with body:`, body);
-
+        
         // Map frontend field names to backend expected names
         const updateData = {
             ...body,
-            name: body.groupName || body.name, // Frontend sends 'groupName', backend expects 'name'
+            name: body.groupName || body.name,  // Frontend sends 'groupName', backend expects 'name'
             selectedAccountId: body.accountId || body.selectedAccountId,
             selectedAccountName: body.accountName || body.selectedAccountName,
-            selectedEnterpriseId:
-                body.enterpriseId || body.selectedEnterpriseId,
-            selectedEnterpriseName:
-                body.enterpriseName || body.selectedEnterpriseName,
+            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
         };
-
+        
         console.log(`🔄 updateGroup mapped data:`, updateData);
         const result = await userManagement.updateGroup(id, updateData);
         console.log(`🔄 updateGroup result:`, result);
@@ -8762,13 +9971,7 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        await userManagement.deleteGroup(
-            id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        await userManagement.deleteGroup(id, accountId, accountName, enterpriseId, enterpriseName);
         return {};
     }
 
@@ -8818,12 +10021,7 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        const roles = await userManagement.listRoles(
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        const roles = await userManagement.listRoles(accountId, accountName, enterpriseId, enterpriseName);
         console.log(`📋 listRoles returning ${roles.length} roles`);
         return roles;
     }
@@ -8841,13 +10039,7 @@ class UserManagementController {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        return await userManagement.getRole(
-            id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        return await userManagement.getRole(id, accountId, accountName, enterpriseId, enterpriseName);
     }
 
     @Post('roles')
@@ -8858,17 +10050,17 @@ class UserManagementController {
             };
         }
         console.log('🆕 createRole API called with body:', body);
-
+        
         // Map frontend field names to backend expected names (similar to createGroup)
         const roleData = {
             ...body,
-            name: body.roleName || body.name, // Frontend might send 'roleName', backend expects 'name'
+            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
             selectedAccountId: body.accountId,
             selectedAccountName: body.accountName,
             selectedEnterpriseId: body.enterpriseId,
             selectedEnterpriseName: body.enterpriseName,
         };
-
+        
         console.log('🆕 createRole mapped data:', roleData);
         const result = await userManagement.createRole(roleData);
         console.log('🆕 createRole created role:', result);
@@ -8883,19 +10075,17 @@ class UserManagementController {
             };
         }
         console.log(`🔄 updateRole API called for id: ${id} with body:`, body);
-
+        
         // Map frontend field names to backend expected names (similar to updateGroup)
         const updateData = {
             ...body,
-            name: body.roleName || body.name, // Frontend might send 'roleName', backend expects 'name'
+            name: body.roleName || body.name,  // Frontend might send 'roleName', backend expects 'name'
             selectedAccountId: body.accountId || body.selectedAccountId,
             selectedAccountName: body.accountName || body.selectedAccountName,
-            selectedEnterpriseId:
-                body.enterpriseId || body.selectedEnterpriseId,
-            selectedEnterpriseName:
-                body.enterpriseName || body.selectedEnterpriseName,
+            selectedEnterpriseId: body.enterpriseId || body.selectedEnterpriseId,
+            selectedEnterpriseName: body.enterpriseName || body.selectedEnterpriseName,
         };
-
+        
         console.log(`🔄 updateRole mapped data:`, updateData);
         const result = await userManagement.updateRole(id, updateData);
         console.log(`🔄 updateRole result:`, result);
@@ -8921,13 +10111,7 @@ class UserManagementController {
             enterpriseId,
             enterpriseName,
         });
-        await userManagement.deleteRole(
-            id,
-            accountId,
-            accountName,
-            enterpriseId,
-            enterpriseName,
-        );
+        await userManagement.deleteRole(id, accountId, accountName, enterpriseId, enterpriseName);
         return {};
     }
 
@@ -8960,15 +10144,13 @@ class GlobalSettingsController {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-
+        
         // If no query parameters provided, return all records
         if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
-            console.log(
-                '📋 getEntities API called - fetching all global settings',
-            );
+            console.log('📋 getEntities API called - fetching all global settings');
             return await globalSettings.getAllEntities();
         }
-
+        
         // Otherwise, filter by account and enterprise
         console.log(
             `📋 getEntities API called for account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
@@ -9063,7 +10245,10 @@ class GlobalSettingsController {
     }
 
     @Put(':id')
-    async updateEntity(@Param('id') recordId: string, @Body() body: any) {
+    async updateEntity(
+        @Param('id') recordId: string,
+        @Body() body: any,
+    ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
@@ -9078,7 +10263,7 @@ class GlobalSettingsController {
             entities,
             configuration,
         } = body || {};
-
+        
         if (
             !accountId ||
             !accountName ||
@@ -9090,19 +10275,19 @@ class GlobalSettingsController {
                 error: 'accountId, accountName, enterpriseId, enterpriseName, and configuration are required',
             };
         }
-
+        
         // Extract entity name from entities array if provided, otherwise use entityName
         let finalEntityName = entityName;
         if (entities && Array.isArray(entities) && entities.length > 0) {
             finalEntityName = entities[0]; // Use first element of entities array
         }
-
+        
         if (!finalEntityName) {
             return {
                 error: 'entityName or entities array with entity name is required',
             };
         }
-
+        
         console.log(
             `🔄 updateEntity API called for record ID: ${recordId}, entity: ${finalEntityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
@@ -9155,6 +10340,7 @@ class GlobalSettingsController {
         AuthController,
         OAuthController,
         OAuthTokenController,
+        GitHubController,
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,
@@ -9168,6 +10354,7 @@ class GlobalSettingsController {
         PipelineYamlController,
         PipelineConfigController,
         EnvironmentsController,
+        IntegrationArtifactsController,
         ServicesController,
         ProductsController,
         PipelinesController,
@@ -9193,11 +10380,10 @@ async function bootstrap() {
         console.log('Storage Mode:', process.env.STORAGE_MODE || 'postgres');
 
         // Check GitHub OAuth configuration
-        if (
-            !process.env.GITHUB_CLIENT_ID ||
-            !process.env.GITHUB_CLIENT_SECRET
-        ) {
-            console.warn('⚠️  WARNING: GitHub OAuth is not configured!');
+        if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) {
+            console.warn(
+                '⚠️  WARNING: GitHub OAuth is not configured!',
+            );
             console.warn(
                 '   Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET environment variables',
             );
@@ -9226,7 +10412,7 @@ async function bootstrap() {
             console.log('✅ Token encryption key configured');
         }
 
-        // Load environment variables from config.env file (for local development)
+        // Load environment variables from config.env file
         dotenv.config({path: 'config.env'});
         dotenv.config(); // Also load from .env if it exists
 
@@ -9315,6 +10501,7 @@ async function bootstrap() {
             pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
             buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
             buildsDynamoDB = new BuildsDynamoDBService();
+            // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
         } else if (currentStorageMode !== 'dynamodb' && !enterprises) {
             console.log('⚠️ Re-initializing filesystem services in bootstrap');
