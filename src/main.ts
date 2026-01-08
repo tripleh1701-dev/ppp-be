@@ -9793,9 +9793,7 @@ class UserManagementController {
     @Get('users')
     async listUsers(
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
@@ -9804,90 +9802,84 @@ class UserManagementController {
         }
 
         console.log(
-            '📋 GET /api/user-management/users called with query params:',
-            {
-                accountId,
-                accountName,
-                enterpriseId,
-                enterpriseName,
-            },
+            '📋 GET /api/v1/user-management/users called with query params:',
+            {accountId, enterpriseId},
         );
 
-        // Check if account context is provided
-        const hasAccountContext = accountId && accountName;
-
-        if (hasAccountContext) {
-            console.log(
-                `✅ Listing users for account: ${accountName} (${accountId})`,
-            );
-            if (enterpriseId && enterpriseName) {
-                console.log(
-                    `   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
-                );
-            }
-
-            const users = await userManagement.listUsersByAccount(
-                accountId,
-                accountName,
-                enterpriseId, // Pass enterprise filter
-                enterpriseName, // Pass enterprise filter
-            );
-
-            // Fetch assigned groups for each user
-            const usersWithGroups = await Promise.all(
-                users.map(async (user: any) => {
-                    try {
-                        // IMPORTANT: Use the account/enterprise from the user record itself
-                        // Not from the query parameters, as they might differ
-                        const userAccountId = user.accountId || accountId;
-                        const userAccountName = user.accountName || accountName;
-                        const userEnterpriseId =
-                            user.enterpriseId || enterpriseId;
-                        const userEnterpriseName =
-                            user.enterpriseName || enterpriseName;
-
-                        console.log(`🔍 Fetching groups for user ${user.id}:`, {
-                            userAccountId,
-                            userAccountName,
-                            userEnterpriseId,
-                            userEnterpriseName,
-                        });
-
-                        const assignedGroups =
-                            await userManagement.getUserGroups(
-                                user.id,
-                                userAccountId, // Use user's account context
-                                userAccountName, // Use user's account context
-                                userEnterpriseId, // Use user's enterprise context
-                                userEnterpriseName, // Use user's enterprise context
-                            );
-
-                        console.log(
-                            `✅ Got ${assignedGroups.length} group(s) for user ${user.id}`,
-                        );
-
-                        return {
-                            ...user,
-                            assignedUserGroups: assignedGroups,
-                        };
-                    } catch (error) {
-                        console.error(
-                            `❌ Failed to get groups for user ${user.id}:`,
-                            error,
-                        );
-                        return {
-                            ...user,
-                            assignedUserGroups: [],
-                        };
-                    }
-                }),
-            );
-
-            return usersWithGroups;
-        } else {
-            console.log('✅ Listing Systiva users (no account context)');
-            return await userManagement.listUsers();
+        // Require accountId
+        if (!accountId) {
+            return {error: 'accountId is required'};
         }
+
+        // Look up account name from accountId
+        let accountName = '';
+        if (accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (!accountName) {
+            return {error: `Account not found for accountId: ${accountId}`};
+        }
+
+        // Look up enterprise name from enterpriseId (optional)
+        let enterpriseName = '';
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
+        console.log(
+            `✅ Listing users for account: ${accountName} (${accountId})`,
+        );
+        if (enterpriseId) {
+            console.log(
+                `   Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+            );
+        }
+
+        const users = await userManagement.listUsersByAccount(
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+        );
+
+        // Fetch assigned groups for each user
+        const usersWithGroups = await Promise.all(
+            users.map(async (user: any) => {
+                try {
+                    const userAccountId = user.accountId || accountId;
+                    const userAccountName = user.accountName || accountName;
+                    const userEnterpriseId = user.enterpriseId || enterpriseId;
+                    const userEnterpriseName =
+                        user.enterpriseName || enterpriseName;
+
+                    const assignedGroups = await userManagement.getUserGroups(
+                        user.id,
+                        userAccountId,
+                        userAccountName,
+                        userEnterpriseId,
+                        userEnterpriseName,
+                    );
+
+                    return {
+                        ...user,
+                        assignedUserGroups: assignedGroups,
+                    };
+                } catch (error) {
+                    console.error(
+                        `❌ Failed to get groups for user ${user.id}:`,
+                        error,
+                    );
+                    return {
+                        ...user,
+                        assignedUserGroups: [],
+                    };
+                }
+            }),
+        );
+
+        return usersWithGroups;
     }
 
     @Get('users/:id')
@@ -10439,6 +10431,7 @@ class UserManagementController {
         @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
         @Query('enterpriseName') enterpriseName?: string,
+        @Query('groupId') queryGroupId?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
@@ -10446,15 +10439,20 @@ class UserManagementController {
             };
         }
 
+        // Support groupId from query param OR body
+        const groupIdsFromBody =
+            body?.groupIds || (body?.groupId ? [body.groupId] : []);
+        const groupIdsFromQuery = queryGroupId ? [queryGroupId] : [];
+        const effectiveGroupIds =
+            groupIdsFromBody.length > 0 ? groupIdsFromBody : groupIdsFromQuery;
+
         console.log(
             '🗑️  DELETE /api/user-management/users/:id/groups called:',
             {
                 userId: id,
                 accountId,
-                accountName,
                 enterpriseId,
-                enterpriseName,
-                groupIds: body.groupIds,
+                groupIds: effectiveGroupIds,
             },
         );
 
@@ -10490,21 +10488,21 @@ class UserManagementController {
                 };
             }
 
-            if (!body.groupIds || !Array.isArray(body.groupIds)) {
+            if (!effectiveGroupIds || effectiveGroupIds.length === 0) {
                 return {
                     success: false,
-                    error: 'groupIds array is required',
+                    error: 'groupId or groupIds is required',
                 };
             }
 
             // Remove specified groups
             const currentGroups = user.assignedGroups || [];
             const updatedGroups = currentGroups.filter(
-                (groupId) => !body.groupIds.includes(groupId),
+                (groupId) => !effectiveGroupIds.includes(groupId),
             );
 
             console.log(
-                `📋 Removing ${body.groupIds.length} group(s), ${updatedGroups.length} will remain`,
+                `📋 Removing ${effectiveGroupIds.length} group(s), ${updatedGroups.length} will remain`,
             );
 
             // Update user
@@ -10526,7 +10524,7 @@ class UserManagementController {
             }
 
             console.log(
-                `✅ Removed ${body.groupIds.length} group(s) from user ${id}`,
+                `✅ Removed ${effectiveGroupIds.length} group(s) from user ${id}`,
             );
 
             return {
@@ -10617,21 +10615,45 @@ class UserManagementController {
     @Get('groups')
     async listGroups(
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        console.log('📋 listGroups API called with full context:', {
+
+        console.log('📋 GET /api/v1/user-management/groups called with:', {
             accountId,
-            accountName,
             enterpriseId,
-            enterpriseName,
         });
+
+        // Require accountId
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        // Look up account name from accountId
+        let accountName = '';
+        if (accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (!accountName) {
+            return {error: `Account not found for accountId: ${accountId}`};
+        }
+
+        // Look up enterprise name from enterpriseId (optional)
+        let enterpriseName = '';
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
+        console.log(
+            `📋 listGroups for account: ${accountName} (${accountId}), enterprise: ${enterpriseName} (${enterpriseId})`,
+        );
+
         const groups = await userManagement.listGroups(
             accountId,
             accountName,
@@ -10646,15 +10668,26 @@ class UserManagementController {
     async getGroup(
         @Param('id') id: string,
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
+
+        // Look up names from IDs
+        let accountName = '';
+        let enterpriseName = '';
+        if (accountId && accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
         return await userManagement.getGroup(
             id,
             accountId,
@@ -10668,15 +10701,26 @@ class UserManagementController {
     async getGroupRoles(
         @Param('id') id: string,
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
+
+        // Look up names from IDs
+        let accountName = '';
+        let enterpriseName = '';
+        if (accountId && accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
         return await userManagement.getGroupRoles(
             id,
             accountId,
@@ -10983,21 +11027,45 @@ class UserManagementController {
     @Get('roles')
     async listRoles(
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
-        console.log('📋 listRoles API called with full context:', {
+
+        console.log('📋 GET /api/v1/user-management/roles called with:', {
             accountId,
-            accountName,
             enterpriseId,
-            enterpriseName,
         });
+
+        // Require accountId
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        // Look up account name from accountId
+        let accountName = '';
+        if (accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (!accountName) {
+            return {error: `Account not found for accountId: ${accountId}`};
+        }
+
+        // Look up enterprise name from enterpriseId (optional)
+        let enterpriseName = '';
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
+        console.log(
+            `📋 listRoles for account: ${accountName} (${accountId}), enterprise: ${enterpriseName} (${enterpriseId})`,
+        );
+
         const roles = await userManagement.listRoles(
             accountId,
             accountName,
@@ -11012,15 +11080,26 @@ class UserManagementController {
     async getRole(
         @Param('id') id: string,
         @Query('accountId') accountId?: string,
-        @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
-        @Query('enterpriseName') enterpriseName?: string,
     ) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'User management in systiva table only available in DynamoDB mode',
             };
         }
+
+        // Look up names from IDs
+        let accountName = '';
+        let enterpriseName = '';
+        if (accountId && accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            accountName = account?.accountName || '';
+        }
+        if (enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            enterpriseName = enterprise?.name || '';
+        }
+
         return await userManagement.getRole(
             id,
             accountId,
