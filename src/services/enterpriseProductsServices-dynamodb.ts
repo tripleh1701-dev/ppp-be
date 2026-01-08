@@ -432,22 +432,173 @@ export class EnterpriseProductsServicesDynamoDBService {
         },
     ): Promise<EnterpriseProductService | null> {
         try {
-            // For simplicity, we'll delete and recreate the linkage
-            // In a production system, you might want to do a more granular update
+            // Get existing linkage to preserve ID and timestamps
             const existing = await this.get(id);
             if (!existing) {
                 return null;
             }
 
-            await this.remove(id);
+            const now = new Date().toISOString();
+            const newEnterpriseId = body.enterpriseId || existing.enterpriseId;
+            const newProductId = body.productId || existing.productId;
+            const newServiceIds = body.serviceIds || existing.serviceIds;
 
-            const updated = await this.create({
-                enterpriseId: body.enterpriseId || existing.enterpriseId,
-                productId: body.productId || existing.productId,
-                serviceIds: body.serviceIds || existing.serviceIds,
+            // Check if enterprise or product changed - if so, we need to update lookup records
+            const enterpriseChanged = newEnterpriseId !== existing.enterpriseId;
+            const productChanged = newProductId !== existing.productId;
+            const servicesChanged =
+                JSON.stringify(newServiceIds.sort()) !==
+                JSON.stringify(existing.serviceIds.sort());
+
+            // Update the main linkage record in-place (preserving the same ID)
+            const updateResult = await withDynamoDB(async (client) => {
+                const {UpdateCommand} = await import('@aws-sdk/lib-dynamodb');
+                const response = await client.send(
+                    new UpdateCommand({
+                        TableName: this.tableName,
+                        Key: {
+                            PK: `LINKAGE#${id}`,
+                            SK: `LINKAGE#${id}`,
+                        },
+                        UpdateExpression:
+                            'SET enterprise_id = :eid, product_id = :pid, service_ids = :sids, updated_date = :updated, updatedAt = :updated',
+                        ExpressionAttributeValues: {
+                            ':eid': newEnterpriseId,
+                            ':pid': newProductId,
+                            ':sids': newServiceIds,
+                            ':updated': now,
+                        },
+                        ReturnValues: 'ALL_NEW',
+                    }),
+                );
+                return response.Attributes;
             });
 
-            return updated;
+            // If enterprise changed, update enterprise lookup records
+            if (enterpriseChanged) {
+                // Delete old enterprise lookup
+                await DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: `ENTERPRISE#${existing.enterpriseId}`,
+                    SK: `LINKAGE#${id}`,
+                }).catch(() => {});
+
+                // Create new enterprise lookup
+                await DynamoDBOperations.putItem(this.tableName, {
+                    PK: `ENTERPRISE#${newEnterpriseId}`,
+                    SK: `LINKAGE#${id}`,
+                    linkage_id: id,
+                    product_id: newProductId,
+                    service_ids: newServiceIds,
+                    created_date: existing.createdAt,
+                    updated_date: now,
+                    entity_type: 'enterprise_linkage',
+                });
+            } else {
+                // Just update the existing enterprise lookup
+                await withDynamoDB(async (client) => {
+                    const {UpdateCommand} = await import(
+                        '@aws-sdk/lib-dynamodb'
+                    );
+                    await client.send(
+                        new UpdateCommand({
+                            TableName: this.tableName,
+                            Key: {
+                                PK: `ENTERPRISE#${newEnterpriseId}`,
+                                SK: `LINKAGE#${id}`,
+                            },
+                            UpdateExpression:
+                                'SET product_id = :pid, service_ids = :sids, updated_date = :updated',
+                            ExpressionAttributeValues: {
+                                ':pid': newProductId,
+                                ':sids': newServiceIds,
+                                ':updated': now,
+                            },
+                        }),
+                    );
+                }).catch(() => {});
+            }
+
+            // If product changed, update product lookup records
+            if (productChanged) {
+                // Delete old product lookup
+                await DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: `PRODUCT#${existing.productId}`,
+                    SK: `LINKAGE#${id}`,
+                }).catch(() => {});
+
+                // Create new product lookup
+                await DynamoDBOperations.putItem(this.tableName, {
+                    PK: `PRODUCT#${newProductId}`,
+                    SK: `LINKAGE#${id}`,
+                    linkage_id: id,
+                    enterprise_id: newEnterpriseId,
+                    service_ids: newServiceIds,
+                    created_date: existing.createdAt,
+                    updated_date: now,
+                    entity_type: 'product_linkage',
+                });
+            } else {
+                // Just update the existing product lookup
+                await withDynamoDB(async (client) => {
+                    const {UpdateCommand} = await import(
+                        '@aws-sdk/lib-dynamodb'
+                    );
+                    await client.send(
+                        new UpdateCommand({
+                            TableName: this.tableName,
+                            Key: {
+                                PK: `PRODUCT#${newProductId}`,
+                                SK: `LINKAGE#${id}`,
+                            },
+                            UpdateExpression:
+                                'SET enterprise_id = :eid, service_ids = :sids, updated_date = :updated',
+                            ExpressionAttributeValues: {
+                                ':eid': newEnterpriseId,
+                                ':sids': newServiceIds,
+                                ':updated': now,
+                            },
+                        }),
+                    );
+                }).catch(() => {});
+            }
+
+            // If services changed, update service lookup records
+            if (servicesChanged) {
+                // Delete old service lookups
+                for (const serviceId of existing.serviceIds) {
+                    await DynamoDBOperations.deleteItem(this.tableName, {
+                        PK: `SERVICE#${serviceId}`,
+                        SK: `LINKAGE#${id}`,
+                    }).catch(() => {});
+                }
+
+                // Create new service lookups
+                for (const serviceId of newServiceIds) {
+                    await DynamoDBOperations.putItem(this.tableName, {
+                        PK: `SERVICE#${serviceId}`,
+                        SK: `LINKAGE#${id}`,
+                        linkage_id: id,
+                        enterprise_id: newEnterpriseId,
+                        product_id: newProductId,
+                        created_date: existing.createdAt,
+                        updated_date: now,
+                        entity_type: 'service_linkage',
+                    });
+                }
+            }
+
+            console.log(
+                `✅ Updated linkage ${id} in-place (ID preserved). Enterprise: ${newEnterpriseId}, Product: ${newProductId}`,
+            );
+
+            return {
+                id: id, // SAME ID - preserved!
+                enterpriseId: newEnterpriseId,
+                productId: newProductId,
+                serviceIds: newServiceIds,
+                createdAt: existing.createdAt,
+                updatedAt: now,
+            };
         } catch (error) {
             console.error(
                 'Error updating enterprise-product-service linkage:',
