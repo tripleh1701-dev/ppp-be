@@ -9784,7 +9784,7 @@ class AccountLicensesController {
     }
 }
 
-@Controller('api/user-management')
+@Controller('api/v1/user-management')
 class UserManagementController {
     // ==========================================
     // USER ENDPOINTS
