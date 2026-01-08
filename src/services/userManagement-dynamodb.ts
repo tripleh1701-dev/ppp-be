@@ -562,13 +562,18 @@ export class UserManagementDynamoDBService {
 
             // Filter by enterprise if specified (same logic as groups)
             let filteredItems = items;
-            if (enterpriseId && enterpriseName) {
+            if (enterpriseId) {
                 console.log(
-                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                    `📋 🔍 Filtering by enterprise: ${
+                        enterpriseName || 'N/A'
+                    } (${enterpriseId})`,
                 );
                 filteredItems = items.filter((item) => {
+                    // Match if enterprise_id matches OR if user has no enterprise (systiva/null/undefined)
                     const matchesEnterprise =
-                        item.enterprise_id === enterpriseId;
+                        item.enterprise_id === enterpriseId ||
+                        !item.enterprise_id ||
+                        item.enterprise_id === 'systiva';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out user ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
@@ -1894,13 +1899,18 @@ export class UserManagementDynamoDBService {
 
             // Filter by enterprise if specified
             let filteredItems = items;
-            if (enterpriseId && enterpriseName) {
+            if (enterpriseId) {
                 console.log(
-                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                    `📋 🔍 Filtering by enterprise: ${
+                        enterpriseName || 'N/A'
+                    } (${enterpriseId})`,
                 );
                 filteredItems = items.filter((item) => {
+                    // Match if enterprise_id matches OR if group has no enterprise (systiva/null/undefined)
                     const matchesEnterprise =
-                        item.enterprise_id === enterpriseId;
+                        item.enterprise_id === enterpriseId ||
+                        !item.enterprise_id ||
+                        item.enterprise_id === 'systiva';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out group ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
@@ -2334,13 +2344,18 @@ export class UserManagementDynamoDBService {
 
             // Filter by enterprise if specified
             let filteredItems = items;
-            if (enterpriseId && enterpriseName) {
+            if (enterpriseId) {
                 console.log(
-                    `📋 🔍 Filtering by enterprise: ${enterpriseName} (${enterpriseId})`,
+                    `📋 🔍 Filtering by enterprise: ${
+                        enterpriseName || 'N/A'
+                    } (${enterpriseId})`,
                 );
                 filteredItems = items.filter((item) => {
+                    // Match if enterprise_id matches OR if role has no enterprise (systiva/null/undefined)
                     const matchesEnterprise =
-                        item.enterprise_id === enterpriseId;
+                        item.enterprise_id === enterpriseId ||
+                        !item.enterprise_id ||
+                        item.enterprise_id === 'systiva';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out role ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
