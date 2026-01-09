@@ -2882,22 +2882,57 @@ class AccountsController {
                     );
 
                     // Build payload for infrastructure API
-                    // Generate default email if not provided (infra API requires email)
+                    // Use the first technical user from technicalUsers array for Cognito user creation
+                    const firstTechnicalUser = body.technicalUsers?.[0];
+
+                    // Generate default email only if no technical user is provided
                     const sanitizedAccountName = body.accountName
                         .toLowerCase()
                         .replace(/[^a-z0-9]/g, '');
                     const defaultEmail = `admin@${sanitizedAccountName}.local`;
 
+                    // Prefer technical user details over body-level admin fields
+                    const adminEmail =
+                        firstTechnicalUser?.emailAddress ||
+                        body.adminEmail ||
+                        body.email ||
+                        defaultEmail;
+                    const adminFirstName =
+                        firstTechnicalUser?.firstName ||
+                        body.firstName ||
+                        'Admin';
+                    const adminLastName =
+                        firstTechnicalUser?.lastName ||
+                        body.lastName ||
+                        body.accountName;
+                    const adminUsername =
+                        firstTechnicalUser?.emailAddress?.split('@')[0] ||
+                        body.adminUsername ||
+                        'admin';
+                    const adminPassword =
+                        firstTechnicalUser?.password ||
+                        body.adminPassword ||
+                        'TempPass123!';
+
+                    console.log('👤 Using technical user for Cognito:', {
+                        email: adminEmail,
+                        firstName: adminFirstName,
+                        lastName: adminLastName,
+                        username: adminUsername,
+                        hasPassword:
+                            !!adminPassword && adminPassword !== 'TempPass123!',
+                        fromTechnicalUser: !!firstTechnicalUser,
+                    });
+
                     const infraPayload = {
                         accountName: body.accountName,
                         subscriptionTier: body.subscriptionTier,
-                        email: body.email || body.adminEmail || defaultEmail,
-                        firstName: body.firstName || 'Admin',
-                        lastName: body.lastName || body.accountName,
-                        adminUsername: body.adminUsername || 'admin',
-                        adminEmail:
-                            body.adminEmail || body.email || defaultEmail,
-                        adminPassword: body.adminPassword || 'TempPass123!',
+                        email: adminEmail,
+                        firstName: adminFirstName,
+                        lastName: adminLastName,
+                        adminUsername: adminUsername,
+                        adminEmail: adminEmail,
+                        adminPassword: adminPassword,
                         createdBy: body.createdBy || 'admin',
                     };
 
