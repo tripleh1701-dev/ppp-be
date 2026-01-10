@@ -664,7 +664,8 @@ export class UserManagementDynamoDBService {
                 }
 
                 return {
-                    id: item.id,
+                    // Extract userId from SK (USER#<userId>), not PK (ACCOUNT#<accountId>)
+                    id: item.id || item.SK?.split('#').pop(),
                     firstName: item.first_name,
                     middleName: item.middle_name,
                     lastName: item.last_name,
@@ -900,7 +901,8 @@ export class UserManagementDynamoDBService {
                     }
 
                     return {
-                        id: item.id,
+                        // Extract userId from SK (USER#<userId>), not PK (ACCOUNT#<accountId>)
+                        id: item.id || item.SK?.split('#').pop(),
                         firstName: item.first_name,
                         middleName: item.middle_name,
                         lastName: item.last_name,
@@ -1890,7 +1892,8 @@ export class UserManagementDynamoDBService {
 
             const groups = filteredItems
                 .map((item) => ({
-                    id: item.id || item.PK?.split('#').pop(),
+                    // Extract groupId from SK (GROUP#<groupId>), not PK (ACCOUNT#<accountId>)
+                    id: item.id || item.SK?.split('#').pop(),
                     name: item.group_name || item.name,
                     description: item.description,
                     entity: item.entity || '',
@@ -2313,7 +2316,8 @@ export class UserManagementDynamoDBService {
 
             const roles = filteredItems
                 .map((item) => ({
-                    id: item.id || item.PK?.split('#').pop(),
+                    // Extract roleId from SK (ROLE#<roleId>), not PK (ACCOUNT#<accountId>)
+                    id: item.id || item.SK?.split('#').pop(),
                     roleName: item.role_name || item.name,
                     name: item.role_name || item.name, // Keep for backwards compatibility
                     description: item.description,
@@ -2376,7 +2380,8 @@ export class UserManagementDynamoDBService {
             }
 
             return items.map((item) => ({
-                id: item.id,
+                // Extract roleId from SK (ROLE#<roleId>), not PK (ACCOUNT#<accountId>)
+                id: item.id || item.SK?.split('#').pop(),
                 roleName: item.role_name || item.name,
                 name: item.role_name || item.name, // Keep for backwards compatibility
                 description: item.description,

@@ -49,7 +49,11 @@ import {EnvironmentsService} from './services/environments';
 import {EnvironmentsDynamoDBService} from './services/environments-dynamodb';
 import {GlobalSettingsDynamoDBService} from './services/globalSettings-dynamodb';
 import {testConnection, withPg} from './db';
-import {testDynamoDBConnection, getStorageMode} from './dynamodb';
+import {
+    testDynamoDBConnection,
+    getStorageMode,
+    DynamoDBOperations,
+} from './dynamodb';
 import {validatePasswordEncryptionConfig} from './utils/passwordEncryption';
 import * as pipelineCanvas from './services/pipelineCanvas';
 import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
@@ -3754,6 +3758,47 @@ class EnterprisesController {
             return {
                 error: error instanceof Error ? error.message : 'Unknown error',
                 storageMode,
+            };
+        }
+    }
+
+    @Delete('cleanup/systiva-entries')
+    async cleanupSystivaEntries() {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'DynamoDB not enabled', storageMode};
+        }
+
+        try {
+            const tableName =
+                process.env.DYNAMODB_TABLE ||
+                process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
+                `systiva-admin-${
+                    process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+                }`;
+
+            // Scan for all SYSTIVA# entries
+            const allItems = await DynamoDBOperations.scanItems(tableName);
+            const systivaItems = allItems.filter(
+                (item: any) =>
+                    item.PK && item.PK.toString().startsWith('SYSTIVA'),
+            );
+
+            const deleted: any[] = [];
+            for (const item of systivaItems) {
+                await DynamoDBOperations.deleteItem(tableName, {
+                    PK: item.PK,
+                    SK: item.SK,
+                });
+                deleted.push({PK: item.PK, SK: item.SK});
+            }
+
+            return {
+                message: `Deleted ${deleted.length} SYSTIVA entries`,
+                deleted,
+            };
+        } catch (error) {
+            return {
+                error: error instanceof Error ? error.message : 'Unknown error',
             };
         }
     }

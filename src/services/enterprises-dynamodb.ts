@@ -165,7 +165,7 @@ export class EnterprisesDynamoDBService {
 
     async get(id: string): Promise<Enterprise | null> {
         try {
-            // Get using ENTERPRISE# format
+            // Get using ENTERPRISE# format only
             const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `ENTERPRISE#${id}`,
                 SK: `ENTERPRISE#${id}`,
@@ -267,10 +267,35 @@ export class EnterprisesDynamoDBService {
     async debugTableContents(): Promise<any> {
         try {
             const items = await DynamoDBOperations.scanItems(this.tableName);
+
+            // Find enterprise items specifically
+            const enterpriseItems = items.filter(
+                (item) =>
+                    item.entity_type === 'enterprise' ||
+                    (item.PK?.startsWith('ENTERPRISE#') &&
+                        item.SK?.startsWith('ENTERPRISE#')),
+            );
+
+            // Group all items by PK prefix for analysis
+            const pkPrefixes: Record<string, number> = {};
+            items.forEach((item) => {
+                const pk = item.PK || 'NO_PK';
+                const prefix = pk.includes('#') ? pk.split('#')[0] : pk;
+                pkPrefixes[prefix] = (pkPrefixes[prefix] || 0) + 1;
+            });
+
             return {
                 tableName: this.tableName,
                 totalItems: items.length,
-                items: items.slice(0, 10), // Return first 10 items for debugging
+                enterpriseItemsCount: enterpriseItems.length,
+                enterpriseItems: enterpriseItems.slice(0, 20).map((item) => ({
+                    PK: item.PK,
+                    SK: item.SK,
+                    id: item.id,
+                    name: item.enterprise_name || item.name,
+                    entity_type: item.entity_type,
+                })),
+                pkPrefixes: pkPrefixes,
                 itemStructure: items.length > 0 ? Object.keys(items[0]) : [],
             };
         } catch (error) {

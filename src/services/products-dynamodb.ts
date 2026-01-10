@@ -161,7 +161,7 @@ export class ProductsDynamoDBService {
 
     async get(id: string): Promise<Product | null> {
         try {
-            // Get using PRODUCT# format
+            // Get using PRODUCT# format only
             const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `PRODUCT#${id}`,
                 SK: `PRODUCT#${id}`,
