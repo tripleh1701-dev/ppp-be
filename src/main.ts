@@ -11336,9 +11336,9 @@ class GlobalSettingsController {
         );
     }
 
-    @Get(':entityName')
-    async getEntity(
-        @Param('entityName') entityName: string,
+    @Get(':workstreamName')
+    async getWorkstream(
+        @Param('workstreamName') workstreamName: string,
         @Query('accountId') accountId: string,
         @Query('accountName') accountName: string,
         @Query('enterpriseId') enterpriseId: string,
@@ -11355,19 +11355,19 @@ class GlobalSettingsController {
             };
         }
         console.log(
-            `🔍 getEntity API called for entity: ${entityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+            `🔍 getWorkstream API called for workstream: ${workstreamName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         return await globalSettings.getEntity(
             accountId,
             accountName,
             enterpriseId,
             enterpriseName,
-            entityName,
+            workstreamName,
         );
     }
 
     @Post()
-    async createEntity(@Body() body: any) {
+    async createWorkstream(@Body() body: any) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
@@ -11378,7 +11378,7 @@ class GlobalSettingsController {
             accountName,
             enterpriseId,
             enterpriseName,
-            entityName,
+            workstreamName,
             configuration,
         } = body || {};
         if (
@@ -11386,22 +11386,22 @@ class GlobalSettingsController {
             !accountName ||
             !enterpriseId ||
             !enterpriseName ||
-            !entityName ||
+            !workstreamName ||
             !configuration
         ) {
             return {
-                error: 'accountId, accountName, enterpriseId, enterpriseName, entityName, and configuration are required',
+                error: 'accountId, accountName, enterpriseId, enterpriseName, workstreamName, and configuration are required',
             };
         }
         console.log(
-            '🆕 createEntity API called with payload:',
+            '🆕 createWorkstream API called with payload:',
             JSON.stringify(
                 {
                     accountId,
                     accountName,
                     enterpriseId,
                     enterpriseName,
-                    entityName,
+                    workstreamName,
                 },
                 null,
                 2,
@@ -11412,13 +11412,13 @@ class GlobalSettingsController {
             accountName,
             enterpriseId,
             enterpriseName,
-            entityName,
+            workstreamName,
             configuration,
         });
     }
 
     @Put(':id')
-    async updateEntity(@Param('id') recordId: string, @Body() body: any) {
+    async updateWorkstream(@Param('id') recordId: string, @Body() body: any) {
         if (storageMode !== 'dynamodb') {
             return {
                 error: 'Global settings only available in DynamoDB mode',
@@ -11429,8 +11429,8 @@ class GlobalSettingsController {
             accountName,
             enterpriseId,
             enterpriseName,
-            entityName,
-            entities,
+            workstreamName,
+            workstreams,
             configuration,
         } = body || {};
 
@@ -11446,20 +11446,24 @@ class GlobalSettingsController {
             };
         }
 
-        // Extract entity name from entities array if provided, otherwise use entityName
-        let finalEntityName = entityName;
-        if (entities && Array.isArray(entities) && entities.length > 0) {
-            finalEntityName = entities[0]; // Use first element of entities array
+        // Extract workstream name from workstreams array if provided, otherwise use workstreamName
+        let finalWorkstreamName = workstreamName;
+        if (
+            workstreams &&
+            Array.isArray(workstreams) &&
+            workstreams.length > 0
+        ) {
+            finalWorkstreamName = workstreams[0]; // Use first element of workstreams array
         }
 
-        if (!finalEntityName) {
+        if (!finalWorkstreamName) {
             return {
-                error: 'entityName or entities array with entity name is required',
+                error: 'workstreamName or workstreams array with workstream name is required',
             };
         }
 
         console.log(
-            `🔄 updateEntity API called for record ID: ${recordId}, entity: ${finalEntityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+            `🔄 updateWorkstream API called for record ID: ${recordId}, workstream: ${finalWorkstreamName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         return await globalSettings.updateEntityById(
             recordId,
@@ -11467,14 +11471,14 @@ class GlobalSettingsController {
             accountName,
             enterpriseId,
             enterpriseName,
-            finalEntityName,
+            finalWorkstreamName,
             configuration,
         );
     }
 
-    @Delete(':entityName')
-    async deleteEntity(
-        @Param('entityName') entityName: string,
+    @Delete(':workstreamName')
+    async deleteWorkstream(
+        @Param('workstreamName') workstreamName: string,
         @Query('accountId') accountId: string,
         @Query('accountName') accountName: string,
         @Query('enterpriseId') enterpriseId: string,
@@ -11491,14 +11495,14 @@ class GlobalSettingsController {
             };
         }
         console.log(
-            `🗑️ deleteEntity API called for entity: ${entityName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+            `🗑️ deleteWorkstream API called for workstream: ${workstreamName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
         );
         await globalSettings.deleteEntity(
             accountId,
             accountName,
             enterpriseId,
             enterpriseName,
-            entityName,
+            workstreamName,
         );
         return {};
     }
