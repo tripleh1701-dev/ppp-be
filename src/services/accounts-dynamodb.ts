@@ -3,16 +3,19 @@ import {DynamoDBOperations} from '../dynamodb';
 
 export interface Account {
     id: string;
+    accountId?: string;
     accountName: string;
     masterAccount?: string;
     cloudType?: string;
+    subscriptionTier?: string;
     address?: string;
     firstName?: string;
     middleName?: string;
     lastName?: string;
     email?: string;
     phone?: string;
-    status?: 'Active' | 'Inactive' | '';
+    status?: 'Active' | 'Inactive' | '' | string;
+    provisioningState?: string;
     addressLine1?: string;
     addressLine2?: string;
     city?: string;
@@ -86,7 +89,7 @@ export class AccountsDynamoDBService {
         console.log('🚀 Raw env vars:', {
             ACCOUNT_REGISTRY_TABLE_NAME:
                 process.env.ACCOUNT_REGISTRY_TABLE_NAME,
-            DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+            DYNAMODB_TABLE: process.env.DYNAMODB_TABLE,
             WORKSPACE: process.env.WORKSPACE,
             NODE_ENV: process.env.NODE_ENV,
             STORAGE_MODE: process.env.STORAGE_MODE,
@@ -101,7 +104,7 @@ export class AccountsDynamoDBService {
 
         // Systiva table for other operations
         this.tableName =
-            process.env.DYNAMODB_SYSTIVA_TABLE || this.accountRegistryTable;
+            process.env.DYNAMODB_TABLE || this.accountRegistryTable;
 
         console.log('📋 AccountsDynamoDBService initialized with tables:', {
             accountRegistryTable: this.accountRegistryTable,
@@ -183,7 +186,7 @@ export class AccountsDynamoDBService {
             console.log('📋 Environment:', {
                 ACCOUNT_REGISTRY_TABLE_NAME:
                     process.env.ACCOUNT_REGISTRY_TABLE_NAME,
-                DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+                DYNAMODB_TABLE: process.env.DYNAMODB_TABLE,
                 WORKSPACE: process.env.WORKSPACE,
                 NODE_ENV: process.env.NODE_ENV,
                 STORAGE_MODE: process.env.STORAGE_MODE,
@@ -398,31 +401,15 @@ export class AccountsDynamoDBService {
         try {
             console.log('🔍 Getting account:', accountId);
 
-            // Try new format first: PK = ACCOUNT#${id}
+            // Get using ACCOUNT# format
             let item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `ACCOUNT#${accountId}`,
                 SK: `ACCOUNT#${accountId}`,
             });
 
-            // Fallback to legacy format: PK = SYSTIVA#ACCOUNTS
+            // Fallback: scan and find by accountId field (for records without standard PK/SK)
             if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#ACCOUNTS`,
-                    SK: `ACCOUNT#${accountId}`,
-                });
-            }
-
-            // Fallback to numeric ID format: PK = accountId, SK = accountId
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: accountId,
-                    SK: accountId,
-                });
-            }
-
-            // Final fallback: scan and find by accountId field (for legacy data)
-            if (!item) {
-                console.log('🔍 Trying scan fallback for legacy account...');
+                console.log('🔍 Trying scan fallback for account...');
                 const allItems = await DynamoDBOperations.scanItems(
                     this.tableName,
                 );
@@ -474,14 +461,30 @@ export class AccountsDynamoDBService {
             }
 
             return {
-                id: item.id || accountId,
+                id: item.id || item.accountId || accountId,
+                accountId: item.accountId || item.id || accountId,
                 accountName: item.account_name || item.accountName || '',
                 masterAccount: item.master_account || item.masterAccount || '',
                 cloudType: item.cloud_type || item.cloudType || '',
+                subscriptionTier:
+                    item.subscriptionTier || item.subscription_tier || '',
                 address: item.address || '',
                 country: item.country || '',
+                city: item.city || '',
+                state: item.state || '',
+                pincode: item.pincode || '',
                 addressLine1: item.address_line1 || item.addressLine1 || '',
+                addressLine2: item.address_line2 || item.addressLine2 || '',
                 addresses: item.addresses || [],
+                // Contact fields
+                email: item.email || '',
+                firstName: item.firstName || item.first_name || '',
+                lastName: item.lastName || item.last_name || '',
+                phone: item.phone || '',
+                status: item.status || 'Active',
+                provisioningState:
+                    item.provisioningState || item.provisioning_state || '',
+                // Technical user fields
                 technicalUsers: technicalUsers,
                 technicalUsername:
                     item.technical_username ||
@@ -563,6 +566,7 @@ export class AccountsDynamoDBService {
                 PK: `ACCOUNT#${accountId}`,
                 SK: `ACCOUNT#${accountId}`,
                 accountId: accountId,
+                id: accountId,
                 accountName: accountData.accountName,
                 masterAccount:
                     accountData.masterAccount || accountData.accountName,
@@ -574,7 +578,12 @@ export class AccountsDynamoDBService {
                 cloudType: (accountData as any).cloudType || '',
                 address: (accountData as any).address || '',
                 country: accountData.country || '',
+                city: (accountData as any).city || '',
+                state: (accountData as any).state || '',
+                pincode: (accountData as any).pincode || '',
+                phone: (accountData as any).phone || '',
                 addressLine1: accountData.addressLine1 || '',
+                addressLine2: accountData.addressLine2 || '',
                 // Store both single and array formats for compatibility
                 addressDetails: (accountData as any).addresses?.[0] || null,
                 technicalUser: (accountData as any).technicalUsers?.[0] || null,
@@ -727,6 +736,64 @@ export class AccountsDynamoDBService {
                 updateFields.push('addresses = :addresses');
                 expressionAttributeValues[':addresses'] = updates.addresses;
             }
+            // Handle subscriptionTier
+            if ((updates as any).subscriptionTier !== undefined) {
+                updateFields.push('subscriptionTier = :subscriptionTier');
+                updateFields.push('subscription_tier = :subscriptionTier');
+                expressionAttributeValues[':subscriptionTier'] = (
+                    updates as any
+                ).subscriptionTier;
+            }
+            // Handle email
+            if ((updates as any).email !== undefined) {
+                updateFields.push('email = :email');
+                expressionAttributeValues[':email'] = (updates as any).email;
+            }
+            // Handle firstName
+            if ((updates as any).firstName !== undefined) {
+                updateFields.push('firstName = :firstName');
+                updateFields.push('first_name = :firstName');
+                expressionAttributeValues[':firstName'] = (
+                    updates as any
+                ).firstName;
+            }
+            // Handle lastName
+            if ((updates as any).lastName !== undefined) {
+                updateFields.push('lastName = :lastName');
+                updateFields.push('last_name = :lastName');
+                expressionAttributeValues[':lastName'] = (
+                    updates as any
+                ).lastName;
+            }
+            // Handle city
+            if ((updates as any).city !== undefined) {
+                updateFields.push('city = :city');
+                expressionAttributeValues[':city'] = (updates as any).city;
+            }
+            // Handle state
+            if ((updates as any).state !== undefined) {
+                updateFields.push('#state = :state');
+                expressionAttributeNames['#state'] = 'state';
+                expressionAttributeValues[':state'] = (updates as any).state;
+            }
+            // Handle phone
+            if ((updates as any).phone !== undefined) {
+                updateFields.push('phone = :phone');
+                expressionAttributeValues[':phone'] = (updates as any).phone;
+            }
+            // Handle status
+            if ((updates as any).status !== undefined) {
+                updateFields.push('#status = :status');
+                expressionAttributeNames['#status'] = 'status';
+                expressionAttributeValues[':status'] = (updates as any).status;
+            }
+            // Handle pincode
+            if ((updates as any).pincode !== undefined) {
+                updateFields.push('pincode = :pincode');
+                expressionAttributeValues[':pincode'] = (
+                    updates as any
+                ).pincode;
+            }
 
             // Handle technicalUsers array
             if ((updates as any).technicalUsers !== undefined) {
@@ -867,24 +934,21 @@ export class AccountsDynamoDBService {
                 }
             }
 
-            // 5. Also try standard formats as fallback
-            const pkFormats = [
-                {PK: `ACCOUNT#${accountId}`, SK: `ACCOUNT#${accountId}`},
-                {PK: `SYSTIVA#ACCOUNTS`, SK: `ACCOUNT#${accountId}`},
-            ];
+            // 5. Also try standard ACCOUNT# format as fallback
+            const key = {
+                PK: `ACCOUNT#${accountId}`,
+                SK: `ACCOUNT#${accountId}`,
+            };
 
-            for (const key of pkFormats) {
-                await DynamoDBOperations.deleteItem(
-                    this.accountRegistryTable,
-                    key,
-                ).catch(() => {}); // Ignore errors
+            await DynamoDBOperations.deleteItem(
+                this.accountRegistryTable,
+                key,
+            ).catch(() => {}); // Ignore errors
 
-                if (this.tableName !== this.accountRegistryTable) {
-                    await DynamoDBOperations.deleteItem(
-                        this.tableName,
-                        key,
-                    ).catch(() => {}); // Ignore errors
-                }
+            if (this.tableName !== this.accountRegistryTable) {
+                await DynamoDBOperations.deleteItem(this.tableName, key).catch(
+                    () => {},
+                ); // Ignore errors
             }
 
             console.log('✅ Account deleted successfully from all tables');

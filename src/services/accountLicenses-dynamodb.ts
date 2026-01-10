@@ -186,18 +186,11 @@ export class AccountLicensesDynamoDBService {
         licenseId: string,
     ): Promise<AccountLicense | null> {
         try {
-            // Try new format first
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using ACCOUNT# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `ACCOUNT#${accountId}`,
                 SK: `LICENSE#${licenseId}`,
             });
-            // Fallback to old format
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#${accountId}#ACCOUNT`,
-                    SK: `LICENSE#${licenseId}`,
-                });
-            }
 
             if (!item) {
                 return null;
@@ -229,14 +222,9 @@ export class AccountLicensesDynamoDBService {
      */
     async remove(accountId: string, licenseId: string): Promise<void> {
         try {
-            // Delete with new format
+            // Delete using ACCOUNT# format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `ACCOUNT#${accountId}`,
-                SK: `LICENSE#${licenseId}`,
-            }).catch(() => {});
-            // Also try old format for backward compatibility
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${accountId}#ACCOUNT`,
                 SK: `LICENSE#${licenseId}`,
             });
         } catch (error) {

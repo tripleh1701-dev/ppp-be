@@ -14,8 +14,12 @@ export class EnterpriseProductsServicesDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default to 'systiva'
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Table name from environment or default
+        this.tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
     }
 
     async list(): Promise<EnterpriseProductService[]> {
@@ -134,18 +138,11 @@ export class EnterpriseProductsServicesDynamoDBService {
 
     async get(id: string): Promise<EnterpriseProductService | null> {
         try {
-            // Try new format first
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using LINKAGE# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `LINKAGE#${id}`,
                 SK: `LINKAGE#${id}`,
             });
-            // Fallback to old format
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#${id}`,
-                    SK: `LINKAGE#${id}`,
-                });
-            }
 
             if (!item) {
                 return null;
@@ -267,31 +264,19 @@ export class EnterpriseProductsServicesDynamoDBService {
             const detailed = [];
 
             for (const linkage of linkages) {
-                // Get enterprise, product, and service names
-                // Helper to get entity with fallback to old format
-                const getEntityWithFallback = async (
-                    entityType: string,
-                    id: string,
-                ) => {
-                    const newItem = await DynamoDBOperations.getItem(
-                        this.tableName,
-                        {
-                            PK: `${entityType}#${id}`,
-                            SK: `${entityType}#${id}`,
-                        },
-                    );
-                    if (newItem) return newItem;
+                // Get enterprise, product, and service names using new format
+                const getEntity = async (entityType: string, id: string) => {
                     return DynamoDBOperations.getItem(this.tableName, {
-                        PK: `SYSTIVA#${id}`,
+                        PK: `${entityType}#${id}`,
                         SK: `${entityType}#${id}`,
                     });
                 };
 
                 const [enterprise, product, ...services] = await Promise.all([
-                    getEntityWithFallback('ENTERPRISE', linkage.enterpriseId),
-                    getEntityWithFallback('PRODUCT', linkage.productId),
+                    getEntity('ENTERPRISE', linkage.enterpriseId),
+                    getEntity('PRODUCT', linkage.productId),
                     ...linkage.serviceIds.map((serviceId) =>
-                        getEntityWithFallback('SERVICE', serviceId),
+                        getEntity('SERVICE', serviceId),
                     ),
                 ]);
 
@@ -336,33 +321,21 @@ export class EnterpriseProductsServicesDynamoDBService {
                 return;
             }
 
-            // Delete all related records
+            // Delete all related records using new format
             const deletePromises = [
-                // Main linkage record - try both formats
+                // Main linkage record
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `LINKAGE#${id}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
-                DynamoDBOperations.deleteItem(this.tableName, {
-                    PK: `SYSTIVA#${id}`,
-                    SK: `LINKAGE#${id}`,
-                }).catch(() => {}),
-                // Enterprise lookup - try both formats
+                // Enterprise lookup
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `ENTERPRISE#${linkage.enterpriseId}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
-                DynamoDBOperations.deleteItem(this.tableName, {
-                    PK: `SYSTIVA#${linkage.enterpriseId}`,
-                    SK: `LINKAGE#${id}`,
-                }).catch(() => {}),
-                // Product lookup - try both formats
+                // Product lookup
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `PRODUCT#${linkage.productId}`,
-                    SK: `LINKAGE#${id}`,
-                }).catch(() => {}),
-                DynamoDBOperations.deleteItem(this.tableName, {
-                    PK: `SYSTIVA#${linkage.productId}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
             ];
@@ -372,10 +345,6 @@ export class EnterpriseProductsServicesDynamoDBService {
                 deletePromises.push(
                     DynamoDBOperations.deleteItem(this.tableName, {
                         PK: `SERVICE#${serviceId}`,
-                        SK: `LINKAGE#${id}`,
-                    }).catch(() => {}),
-                    DynamoDBOperations.deleteItem(this.tableName, {
-                        PK: `SYSTIVA#${serviceId}`,
                         SK: `LINKAGE#${id}`,
                     }).catch(() => {}),
                 );

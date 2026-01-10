@@ -17,8 +17,12 @@ export class ProductsDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default to 'systiva'
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Table name from environment or default
+        this.tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
     }
 
     async list(): Promise<Product[]> {
@@ -31,15 +35,10 @@ export class ProductsDynamoDBService {
                 },
             );
 
-            // Transform DynamoDB items to Product interface - support both old and new PK patterns
+            // Transform DynamoDB items to Product interface - use PRODUCT# pattern
             return items
                 .map((item) => ({
-                    id:
-                        item.id ||
-                        item.PK?.replace('PRODUCT#', '').replace(
-                            'SYSTIVA#',
-                            '',
-                        ),
+                    id: item.id || item.PK?.replace('PRODUCT#', ''),
                     name: item.product_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
@@ -149,14 +148,9 @@ export class ProductsDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
-            // Try new format first, then old format
+            // Delete using PRODUCT# format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `PRODUCT#${id}`,
-                SK: `PRODUCT#${id}`,
-            }).catch(() => {});
-            // Also try old SYSTIVA# format for backward compatibility
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${id}`,
                 SK: `PRODUCT#${id}`,
             });
         } catch (error) {
@@ -167,19 +161,11 @@ export class ProductsDynamoDBService {
 
     async get(id: string): Promise<Product | null> {
         try {
-            // Try new format first
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using PRODUCT# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `PRODUCT#${id}`,
                 SK: `PRODUCT#${id}`,
             });
-
-            // Fallback to old SYSTIVA# format
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#${id}`,
-                    SK: `PRODUCT#${id}`,
-                });
-            }
 
             if (!item) {
                 return null;

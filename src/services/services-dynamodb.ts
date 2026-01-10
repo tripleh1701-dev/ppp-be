@@ -17,8 +17,12 @@ export class ServicesDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default to 'systiva'
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Table name from environment or default
+        this.tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
     }
 
     async list(): Promise<Service[]> {
@@ -31,15 +35,10 @@ export class ServicesDynamoDBService {
                 },
             );
 
-            // Transform DynamoDB items to Service interface - support both old and new PK patterns
+            // Transform DynamoDB items to Service interface - use SERVICE# pattern
             return items
                 .map((item) => ({
-                    id:
-                        item.id ||
-                        item.PK?.replace('SERVICE#', '').replace(
-                            'SYSTIVA#',
-                            '',
-                        ),
+                    id: item.id || item.PK?.replace('SERVICE#', ''),
                     name: item.service_name || item.name,
                     createdAt: item.created_date || item.createdAt,
                     updatedAt: item.updated_date || item.updatedAt,
@@ -159,14 +158,9 @@ export class ServicesDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
-            // Try new format first, then old format
+            // Delete using SERVICE# format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `SERVICE#${id}`,
-                SK: `SERVICE#${id}`,
-            }).catch(() => {});
-            // Also try old SYSTIVA# format for backward compatibility
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${id}`,
                 SK: `SERVICE#${id}`,
             });
         } catch (error) {
@@ -177,19 +171,11 @@ export class ServicesDynamoDBService {
 
     async get(id: string): Promise<Service | null> {
         try {
-            // Try new format first
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using SERVICE# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `SERVICE#${id}`,
                 SK: `SERVICE#${id}`,
             });
-
-            // Fallback to old SYSTIVA# format
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#${id}`,
-                    SK: `SERVICE#${id}`,
-                });
-            }
 
             if (!item) {
                 return null;

@@ -124,7 +124,11 @@ export async function testDynamoDBConnection(): Promise<boolean> {
 
         // Try to perform a simple operation - list tables or scan a small table
         // For systiva table, we'll try to scan with a limit of 1
-        const tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        const tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
 
         await docClient.send(
             new ScanCommand({

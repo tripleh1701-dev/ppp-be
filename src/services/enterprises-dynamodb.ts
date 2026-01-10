@@ -17,32 +17,31 @@ export class EnterprisesDynamoDBService {
     private readonly tableName: string;
 
     constructor(dir?: string) {
-        // Table name from environment or default to 'systiva'
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Table name from environment or default
+        this.tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
     }
 
     async list(): Promise<Enterprise[]> {
         try {
             const items = await DynamoDBOperations.scanItems(this.tableName);
 
-            // Filter and transform enterprise items - support both old SYSTIVA# and new ENTERPRISE# patterns
+            // Filter and transform enterprise items - use ENTERPRISE# pattern only
             return items
                 .filter(
                     (item) =>
                         item.entity_type === 'enterprise' ||
                         (item.PK?.startsWith('ENTERPRISE#') &&
-                            item.SK?.startsWith('ENTERPRISE#')) ||
-                        (item.PK?.startsWith('SYSTIVA#') &&
                             item.SK?.startsWith('ENTERPRISE#')),
                 )
                 .map((item) => ({
-                    // Extract ID from new ENTERPRISE# format or old SYSTIVA# format
+                    // Extract ID from ENTERPRISE# format
                     id:
                         item.id ||
-                        item.PK?.replace('ENTERPRISE#', '').replace(
-                            'SYSTIVA#',
-                            '',
-                        ) ||
+                        item.PK?.replace('ENTERPRISE#', '') ||
                         item.SK?.replace('ENTERPRISE#', ''),
                     name: item.enterprise_name || item.name,
                     createdAt: item.created_date || item.createdAt,
@@ -153,14 +152,9 @@ export class EnterprisesDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
-            // Try new format first, then old format
+            // Delete using ENTERPRISE# format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `ENTERPRISE#${id}`,
-                SK: `ENTERPRISE#${id}`,
-            }).catch(() => {});
-            // Also try old SYSTIVA# format for backward compatibility
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `SYSTIVA#${id}`,
                 SK: `ENTERPRISE#${id}`,
             });
         } catch (error) {
@@ -171,19 +165,11 @@ export class EnterprisesDynamoDBService {
 
     async get(id: string): Promise<Enterprise | null> {
         try {
-            // Try new format first
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using ENTERPRISE# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `ENTERPRISE#${id}`,
                 SK: `ENTERPRISE#${id}`,
             });
-
-            // Fallback to old SYSTIVA# format
-            if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: `SYSTIVA#${id}`,
-                    SK: `ENTERPRISE#${id}`,
-                });
-            }
 
             if (!item) {
                 return null;
@@ -224,9 +210,7 @@ export class EnterprisesDynamoDBService {
 
             const item = items[0];
             return {
-                id:
-                    item.id ||
-                    item.PK?.replace('ENTERPRISE#', '').replace('SYSTIVA#', ''),
+                id: item.id || item.PK?.replace('ENTERPRISE#', ''),
                 name: item.enterprise_name || item.name,
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,

@@ -131,7 +131,7 @@ console.log('🔧 Environment variables at load time:', {
     NODE_ENV: process.env.NODE_ENV,
     WORKSPACE: process.env.WORKSPACE,
     ACCOUNT_REGISTRY_TABLE_NAME: process.env.ACCOUNT_REGISTRY_TABLE_NAME,
-    DYNAMODB_SYSTIVA_TABLE: process.env.DYNAMODB_SYSTIVA_TABLE,
+    DYNAMODB_TABLE: process.env.DYNAMODB_TABLE,
     INFRA_PROVISIONING_API_URL: INFRA_PROVISIONING_API_BASE_URL
         ? '***configured***'
         : 'NOT SET',
@@ -3118,6 +3118,17 @@ class AccountsController {
                 if (body.email) accountData.email = body.email;
                 if (body.firstName) accountData.firstName = body.firstName;
                 if (body.lastName) accountData.lastName = body.lastName;
+                if (body.phone) accountData.phone = body.phone;
+                if (body.cloudType) accountData.cloudType = body.cloudType;
+                if (body.address) accountData.address = body.address;
+                if (body.country) accountData.country = body.country;
+                if (body.city) accountData.city = body.city;
+                if (body.state) accountData.state = body.state;
+                if (body.pincode) accountData.pincode = body.pincode;
+                if (body.addressLine1)
+                    accountData.addressLine1 = body.addressLine1;
+                if (body.addressLine2)
+                    accountData.addressLine2 = body.addressLine2;
                 if (body.adminUsername)
                     accountData.adminUsername = body.adminUsername;
                 if (body.adminEmail) accountData.adminEmail = body.adminEmail;
@@ -3131,15 +3142,20 @@ class AccountsController {
                 accountData.technicalUsers = body.technicalUsers || [];
                 accountData.licenses = body.licenses || [];
 
-                // Flatten address details for easier querying
+                // Flatten address details for easier querying (fallback if top-level fields not provided)
                 if (body.addressDetails) {
-                    accountData.addressLine1 =
-                        body.addressDetails.addressLine1 || '';
-                    accountData.addressLine2 =
-                        body.addressDetails.addressLine2 || '';
-                    accountData.city = body.addressDetails.city || '';
-                    accountData.state = body.addressDetails.state || '';
-                    accountData.country = body.addressDetails.country || '';
+                    if (!accountData.addressLine1)
+                        accountData.addressLine1 =
+                            body.addressDetails.addressLine1 || '';
+                    if (!accountData.addressLine2)
+                        accountData.addressLine2 =
+                            body.addressDetails.addressLine2 || '';
+                    if (!accountData.city)
+                        accountData.city = body.addressDetails.city || '';
+                    if (!accountData.state)
+                        accountData.state = body.addressDetails.state || '';
+                    if (!accountData.country)
+                        accountData.country = body.addressDetails.country || '';
                 }
 
                 // Technical user info for display

@@ -83,10 +83,17 @@ export interface ScopeConfiguration {
 
 export class UserManagementDynamoDBService {
     private readonly tableName: string;
+    private readonly defaultAccountId: string;
 
     constructor() {
-        // Use systiva table with consistent ACCOUNT# prefix pattern
-        this.tableName = process.env.DYNAMODB_SYSTIVA_TABLE || 'systiva';
+        // Use the existing table with consistent ACCOUNT#<ACCOUNT_id> prefix pattern
+        this.tableName =
+            process.env.DYNAMODB_TABLE ||
+            `systiva-admin-${
+                process.env.WORKSPACE || process.env.NODE_ENV || 'dev'
+            }`;
+        // Default account ID for system-level entities - uses the first account or 'default'
+        this.defaultAccountId = process.env.DEFAULT_ACCOUNT_ID || 'default';
     }
 
     private async hashPassword(password: string): Promise<string> {
@@ -111,27 +118,24 @@ export class UserManagementDynamoDBService {
         try {
             console.log(`🔐 Authenticating user: ${email}`);
 
-            // Try new format first: ACCOUNT#SYSTIVA for global users
-            let systivaItems = await DynamoDBOperations.queryItems(
-                this.tableName,
-                'PK = :pk AND begins_with(SK, :sk)',
-                {
-                    ':pk': 'ACCOUNT#SYSTIVA',
-                    ':sk': 'USER#',
-                },
-            );
-
-            // Fallback to old format: SYSTIVA#systiva#USERS
-            if (!systivaItems || systivaItems.length === 0) {
-                systivaItems = await DynamoDBOperations.queryItems(
-                    this.tableName,
-                    'PK = :pk AND begins_with(SK, :sk)',
-                    {
-                        ':pk': 'SYSTIVA#systiva#USERS',
-                        ':sk': 'USER#',
-                    },
+            // Query for users using ACCOUNT#<ACCOUNT_id> format
+            // Search across all accounts for authentication
+            const allItems = await withDynamoDB(async (client) => {
+                const {ScanCommand} = await import('@aws-sdk/lib-dynamodb');
+                const response = await client.send(
+                    new ScanCommand({
+                        TableName: this.tableName,
+                        FilterExpression:
+                            'begins_with(SK, :sk) AND entity_type = :type',
+                        ExpressionAttributeValues: {
+                            ':sk': 'USER#',
+                            ':type': 'USER',
+                        },
+                    }),
                 );
-            }
+                return response.Items || [];
+            });
+            const systivaItems = allItems;
 
             console.log(`Found ${systivaItems.length} users in Systiva table`);
 
@@ -234,11 +238,9 @@ export class UserManagementDynamoDBService {
                         // Determine the PK and SK from the user item
                         const userPK =
                             userItem.PK ||
-                            (userItem.account_name && userItem.account_id
-                                ? `${userItem.account_name.toUpperCase()}#${
-                                      userItem.account_id
-                                  }#USERS`
-                                : `SYSTIVA#systiva#USERS`);
+                            `ACCOUNT#${
+                                userItem.account_id || this.defaultAccountId
+                            }`;
                         const userSK = userItem.SK || `USER#${userItem.id}`;
 
                         // Update the user's password to the new format
@@ -374,13 +376,13 @@ export class UserManagementDynamoDBService {
                 updatedAt: now,
             };
 
-            // New pattern: ACCOUNT#SYSTIVA for global users
+            // Pattern: ACCOUNT#<ACCOUNT_id> for all users
             const item = {
-                PK: 'ACCOUNT#SYSTIVA',
+                PK: `ACCOUNT#${this.defaultAccountId}`,
                 SK: `USER#${userId}`,
                 id: userId,
-                account_id: 'systiva',
-                account_name: 'SYSTIVA',
+                account_id: this.defaultAccountId,
+                account_name: '',
                 first_name: user.firstName,
                 middle_name: user.middleName,
                 last_name: user.lastName,
@@ -573,7 +575,7 @@ export class UserManagementDynamoDBService {
                     const matchesEnterprise =
                         item.enterprise_id === enterpriseId ||
                         !item.enterprise_id ||
-                        item.enterprise_id === 'systiva';
+                        item.enterprise_id === '';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out user ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
@@ -690,17 +692,16 @@ export class UserManagementDynamoDBService {
 
     async getUser(userId: string): Promise<User | null> {
         try {
-            // Try new pattern first: ACCOUNT#SYSTIVA
+            // Get using ACCOUNT#<ACCOUNT_id> pattern - try default account first
             let item = await DynamoDBOperations.getItem(this.tableName, {
-                PK: 'ACCOUNT#SYSTIVA',
+                PK: `ACCOUNT#${this.defaultAccountId}`,
                 SK: `USER#${userId}`,
             });
-            // Fallback to old pattern
+
+            // If not found, scan to find user in any account
             if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: 'SYSTIVA#systiva#USERS',
-                    SK: `USER#${userId}`,
-                });
+                const allUsers = await this.listAllUsers();
+                item = allUsers.find((u: any) => u.id === userId);
             }
 
             if (!item) {
@@ -793,21 +794,12 @@ export class UserManagementDynamoDBService {
         try {
             console.log('📋 Querying DynamoDB for Systiva users');
 
-            // Query for Systiva users using new pattern first, then fallback
-            const newSystivaPK = 'ACCOUNT#SYSTIVA';
-            let items = await DynamoDBOperations.queryItems(
+            // Query for users using ACCOUNT#<ACCOUNT_id> pattern
+            const items = await DynamoDBOperations.queryItems(
                 this.tableName,
                 'PK = :pk AND begins_with(SK, :sk)',
-                {':pk': newSystivaPK, ':sk': 'USER#'},
+                {':pk': `ACCOUNT#${this.defaultAccountId}`, ':sk': 'USER#'},
             );
-            // Fallback to old pattern
-            if (!items || items.length === 0) {
-                items = await DynamoDBOperations.queryItems(
-                    this.tableName,
-                    'PK = :pk AND begins_with(SK, :sk)',
-                    {':pk': 'SYSTIVA#systiva#USERS', ':sk': 'USER#'},
-                );
-            }
             console.log(`📋 Found ${items.length} Systiva users`);
             if (items.length > 0) {
                 console.log(
@@ -908,7 +900,7 @@ export class UserManagementDynamoDBService {
                     }
 
                     return {
-                        id: item.id || item.PK?.replace('SYSTIVA#', ''),
+                        id: item.id,
                         firstName: item.first_name,
                         middleName: item.middle_name,
                         lastName: item.last_name,
@@ -1065,7 +1057,7 @@ export class UserManagementDynamoDBService {
                     new UpdateCommand({
                         TableName: this.tableName,
                         Key: {
-                            PK: 'ACCOUNT#SYSTIVA',
+                            PK: `ACCOUNT#${this.defaultAccountId}`,
                             SK: `USER#${userId}`,
                         },
                         UpdateExpression: updateExpression,
@@ -1456,15 +1448,11 @@ export class UserManagementDynamoDBService {
                 }
             }
 
-            // Delete from both new and old patterns
+            // Delete using ACCOUNT#<ACCOUNT_id> pattern
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: 'ACCOUNT#SYSTIVA',
+                PK: `ACCOUNT#${this.defaultAccountId}`,
                 SK: `USER#${userId}`,
-            }).catch(() => {});
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: 'SYSTIVA#systiva#USERS',
-                SK: `USER#${userId}`,
-            }).catch(() => {});
+            });
 
             console.log(`✅ User ${userId} deleted successfully from DynamoDB`);
         } catch (error) {
@@ -1535,7 +1523,7 @@ export class UserManagementDynamoDBService {
             // Use PK pattern: ACCOUNT#<ACCOUNT_id>
             const accountPK = isAccountSpecific
                 ? `ACCOUNT#${groupData.selectedAccountId}`
-                : `ACCOUNT#SYSTIVA`;
+                : `ACCOUNT#${this.defaultAccountId}`;
 
             const group: Group = {
                 id: groupId,
@@ -1553,10 +1541,11 @@ export class UserManagementDynamoDBService {
                 PK: accountPK,
                 SK: `GROUP#${groupId}`,
                 id: groupId,
-                account_id: groupData.selectedAccountId || 'systiva',
-                account_name: groupData.selectedAccountName || 'SYSTIVA',
-                enterprise_id: groupData.selectedEnterpriseId || 'systiva',
-                enterprise_name: groupData.selectedEnterpriseName || 'SYSTIVA',
+                account_id:
+                    groupData.selectedAccountId || this.defaultAccountId,
+                account_name: groupData.selectedAccountName || '',
+                enterprise_id: groupData.selectedEnterpriseId || '',
+                enterprise_name: groupData.selectedEnterpriseName || '',
                 group_name: group.name,
                 description: group.description,
                 entity: group.entity || '',
@@ -1572,10 +1561,8 @@ export class UserManagementDynamoDBService {
             if (isAccountSpecific) {
                 item.account_id = groupData.selectedAccountId;
                 item.account_name = groupData.selectedAccountName;
-                item.enterprise_id =
-                    groupData.selectedEnterpriseId || 'systiva';
-                item.enterprise_name =
-                    groupData.selectedEnterpriseName || 'SYSTIVA';
+                item.enterprise_id = groupData.selectedEnterpriseId || '';
+                item.enterprise_name = groupData.selectedEnterpriseName || '';
             }
 
             console.log('🆕 Creating group in DynamoDB:', item);
@@ -1609,36 +1596,20 @@ export class UserManagementDynamoDBService {
             // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
                 ? `ACCOUNT#${accountId}`
-                : 'ACCOUNT#SYSTIVA';
-            // Legacy fallback patterns
-            const legacyPkPrefix = isAccountSpecific
-                ? `${
-                      accountName?.toUpperCase() || accountId
-                  }#${accountId}#GROUPS`
-                : 'SYSTIVA#systiva#GROUPS';
+                : `ACCOUNT#${this.defaultAccountId}`;
 
             console.log(
-                `🔍 Getting group ${groupId} from partition: ${pkPrefix} (fallback: ${legacyPkPrefix})`,
+                `🔍 Getting group ${groupId} from partition: ${pkPrefix}`,
             );
 
-            // Try new format first: ACCOUNT#<ACCOUNT_id>
-            let item = await DynamoDBOperations.getItem(this.tableName, {
+            // Get using ACCOUNT# format
+            const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
             });
 
-            // Fallback to legacy format
             if (!item) {
-                item = await DynamoDBOperations.getItem(this.tableName, {
-                    PK: legacyPkPrefix,
-                    SK: `GROUP#${groupId}`,
-                });
-            }
-
-            if (!item) {
-                console.log(
-                    `⚠️  Group ${groupId} not found in ${pkPrefix} or ${legacyPkPrefix}`,
-                );
+                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
                 return null;
             }
 
@@ -1876,22 +1847,16 @@ export class UserManagementDynamoDBService {
                     }
                 }
             } else {
-                // Query for Systiva groups using new pattern first
-                console.log('📋 Querying for Systiva groups');
-                const newSystivaPK = 'ACCOUNT#SYSTIVA';
+                // Query for groups using ACCOUNT#<ACCOUNT_id> pattern
+                console.log('📋 Querying for default account groups');
                 items = await DynamoDBOperations.queryItems(
                     this.tableName,
                     'PK = :pk AND begins_with(SK, :sk)',
-                    {':pk': newSystivaPK, ':sk': 'GROUP#'},
+                    {
+                        ':pk': `ACCOUNT#${this.defaultAccountId}`,
+                        ':sk': 'GROUP#',
+                    },
                 );
-                // Fallback to old pattern
-                if (!items || items.length === 0) {
-                    items = await DynamoDBOperations.queryItems(
-                        this.tableName,
-                        'PK = :pk AND begins_with(SK, :sk)',
-                        {':pk': 'SYSTIVA#systiva#GROUPS', ':sk': 'GROUP#'},
-                    );
-                }
             }
 
             console.log(`📋 Found ${items.length} groups before filtering`);
@@ -1910,7 +1875,7 @@ export class UserManagementDynamoDBService {
                     const matchesEnterprise =
                         item.enterprise_id === enterpriseId ||
                         !item.enterprise_id ||
-                        item.enterprise_id === 'systiva';
+                        item.enterprise_id === '';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out group ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
@@ -1964,7 +1929,7 @@ export class UserManagementDynamoDBService {
                 updates.selectedAccountId && updates.selectedAccountName;
             const pkPrefix = isAccountSpecific
                 ? `ACCOUNT#${updates.selectedAccountId}`
-                : 'ACCOUNT#SYSTIVA';
+                : `ACCOUNT#${this.defaultAccountId}`;
 
             console.log(
                 `🔄 updateGroup: Updating group ${groupId} in partition ${pkPrefix}`,
@@ -2113,16 +2078,9 @@ export class UserManagementDynamoDBService {
             // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
                 ? `ACCOUNT#${accountId}`
-                : 'ACCOUNT#SYSTIVA';
-            const legacyPkPrefix = isAccountSpecific
-                ? `${
-                      accountName?.toUpperCase() || accountId
-                  }#${accountId}#GROUPS`
-                : 'SYSTIVA#systiva#GROUPS';
+                : `ACCOUNT#${this.defaultAccountId}`;
 
-            console.log(
-                `🗑️  Deleting from partition: ${pkPrefix} (also trying: ${legacyPkPrefix})`,
-            );
+            console.log(`🗑️  Deleting from partition: ${pkPrefix}`);
 
             // Get group to find assigned roles for cleanup
             const group = await this.getGroup(
@@ -2133,9 +2091,7 @@ export class UserManagementDynamoDBService {
                 enterpriseName,
             );
             if (!group) {
-                console.log(
-                    `⚠️  Group ${groupId} not found in ${pkPrefix} or ${legacyPkPrefix}`,
-                );
+                console.log(`⚠️  Group ${groupId} not found in ${pkPrefix}`);
                 return; // Group doesn't exist, nothing to delete
             }
 
@@ -2149,18 +2105,14 @@ export class UserManagementDynamoDBService {
             // Delete all user-group lookups for this group
             await this.deleteAllUserGroupLookupsForGroup(groupId);
 
-            // Delete the group from both partitions (new and legacy)
+            // Delete the group using ACCOUNT# format
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: pkPrefix,
                 SK: `GROUP#${groupId}`,
-            }).catch(() => {});
-            await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: legacyPkPrefix,
-                SK: `GROUP#${groupId}`,
-            }).catch(() => {});
+            });
 
             console.log(
-                `✅ Successfully deleted group ${groupId} from ${pkPrefix} and ${legacyPkPrefix}`,
+                `✅ Successfully deleted group ${groupId} from ${pkPrefix}`,
             );
         } catch (error) {
             console.error('Error deleting group:', error);
@@ -2202,7 +2154,7 @@ export class UserManagementDynamoDBService {
             // Use PK pattern: ACCOUNT#<ACCOUNT_id>
             const accountPK = isAccountSpecific
                 ? `ACCOUNT#${roleData.selectedAccountId}`
-                : `ACCOUNT#SYSTIVA`;
+                : `ACCOUNT#${this.defaultAccountId}`;
 
             console.log('📋 Using PK:', accountPK);
 
@@ -2217,8 +2169,8 @@ export class UserManagementDynamoDBService {
                 PK: accountPK,
                 SK: `ROLE#${roleId}`,
                 id: roleId,
-                account_id: roleData.selectedAccountId || 'systiva',
-                account_name: roleData.selectedAccountName || 'SYSTIVA',
+                account_id: roleData.selectedAccountId || this.defaultAccountId,
+                account_name: roleData.selectedAccountName || '',
                 enterprise_id: roleData.selectedEnterpriseId || '',
                 enterprise_name: roleData.selectedEnterpriseName || '',
                 role_name: role.name,
@@ -2322,22 +2274,13 @@ export class UserManagementDynamoDBService {
                     `📋 ⚡ Query returned ${items.length} items from DynamoDB`,
                 );
             } else {
-                // Query for Systiva roles using new pattern first
-                console.log('📋 Querying for Systiva roles');
-                const newSystivaPK = 'ACCOUNT#SYSTIVA';
+                // Query for roles using ACCOUNT#<ACCOUNT_id> pattern
+                console.log('📋 Querying for default account roles');
                 items = await DynamoDBOperations.queryItems(
                     this.tableName,
                     'PK = :pk AND begins_with(SK, :sk)',
-                    {':pk': newSystivaPK, ':sk': 'ROLE#'},
+                    {':pk': `ACCOUNT#${this.defaultAccountId}`, ':sk': 'ROLE#'},
                 );
-                // Fallback to old pattern
-                if (!items || items.length === 0) {
-                    items = await DynamoDBOperations.queryItems(
-                        this.tableName,
-                        'PK = :pk AND begins_with(SK, :sk)',
-                        {':pk': 'SYSTIVA#systiva#ROLES', ':sk': 'ROLE#'},
-                    );
-                }
             }
 
             console.log(`📋 Found ${items.length} roles before filtering`);
@@ -2355,7 +2298,7 @@ export class UserManagementDynamoDBService {
                     const matchesEnterprise =
                         item.enterprise_id === enterpriseId ||
                         !item.enterprise_id ||
-                        item.enterprise_id === 'systiva';
+                        item.enterprise_id === '';
                     if (!matchesEnterprise) {
                         console.log(
                             `📋 ❌ Filtered out role ${item.id} (enterprise_id: ${item.enterprise_id} !== ${enterpriseId})`,
@@ -2472,7 +2415,7 @@ export class UserManagementDynamoDBService {
                 updates.selectedAccountId && updates.selectedAccountName;
             const pkPrefix = isAccountSpecific
                 ? `ACCOUNT#${updates.selectedAccountId}`
-                : 'ACCOUNT#SYSTIVA';
+                : `ACCOUNT#${this.defaultAccountId}`;
 
             console.log(`🔄 Using PK: ${pkPrefix}`);
 
@@ -2643,19 +2586,13 @@ export class UserManagementDynamoDBService {
             // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pkPrefix = isAccountSpecific
                 ? `ACCOUNT#${accountId}`
-                : 'ACCOUNT#SYSTIVA';
-            const legacyPkPrefix = isAccountSpecific
-                ? `${
-                      accountName?.toUpperCase() || accountId
-                  }#${accountId}#ROLES`
-                : 'SYSTIVA#systiva#ROLES';
+                : `ACCOUNT#${this.defaultAccountId}`;
 
-            // Find the correct PK for this role - try both patterns
+            // Find the role using ACCOUNT# pattern
             const allRolesRaw = await withDynamoDB(async (client) => {
                 const {QueryCommand} = await import('@aws-sdk/lib-dynamodb');
 
-                // Query with new pattern first: ACCOUNT#<ACCOUNT_id>
-                let response = await client.send(
+                const response = await client.send(
                     new QueryCommand({
                         TableName: this.tableName,
                         KeyConditionExpression:
@@ -2666,21 +2603,6 @@ export class UserManagementDynamoDBService {
                         },
                     }),
                 );
-
-                // If no results, try legacy pattern
-                if (!response.Items || response.Items.length === 0) {
-                    response = await client.send(
-                        new QueryCommand({
-                            TableName: this.tableName,
-                            KeyConditionExpression:
-                                'PK = :pk AND begins_with(SK, :skPrefix)',
-                            ExpressionAttributeValues: {
-                                ':pk': legacyPkPrefix,
-                                ':skPrefix': 'ROLE#',
-                            },
-                        }),
-                    );
-                }
 
                 return response.Items || [];
             });
@@ -2709,15 +2631,17 @@ export class UserManagementDynamoDBService {
     private async createUserGroupLookup(
         userId: string,
         groupId: string,
+        accountId?: string,
     ): Promise<void> {
         const now = new Date().toISOString();
-        // New pattern: USER#<accountId>#<userId>#GROUPS, GROUP#<groupId>
-        // For system users (no account), use USER#SYSTIVA#<userId>#GROUPS
+        const accId = accountId || this.defaultAccountId;
+        // Pattern: USER#<ACCOUNT_id>#<user_id>#GROUPS, GROUP#<groupId>
         const lookupItem = {
-            PK: `USER#SYSTIVA#${userId}#GROUPS`,
+            PK: `USER#${accId}#${userId}#GROUPS`,
             SK: `GROUP#${groupId}`,
             user_id: userId,
             group_id: groupId,
+            account_id: accId,
             assigned_at: now,
             entity_type: 'user_group_assignment',
         };
@@ -2763,16 +2687,13 @@ export class UserManagementDynamoDBService {
     private async deleteUserGroupLookup(
         userId: string,
         groupId: string,
+        accountId?: string,
     ): Promise<void> {
-        // Delete with new pattern
+        const accId = accountId || this.defaultAccountId;
+        // Delete using USER#<ACCOUNT_id>#<user_id>#GROUPS pattern
         await DynamoDBOperations.deleteItem(this.tableName, {
-            PK: `USER#SYSTIVA#${userId}#GROUPS`,
+            PK: `USER#${accId}#${userId}#GROUPS`,
             SK: `GROUP#${groupId}`,
-        }).catch(() => {});
-        // Also try old pattern for backward compatibility
-        await DynamoDBOperations.deleteItem(this.tableName, {
-            PK: `SYSTIVA#${userId}`,
-            SK: `GROUP_ASSIGNMENT#${groupId}`,
         }).catch(() => {});
     }
 
@@ -2838,15 +2759,17 @@ export class UserManagementDynamoDBService {
     private async createGroupRoleLookup(
         groupId: string,
         roleId: string,
+        accountId?: string,
     ): Promise<void> {
         const now = new Date().toISOString();
-        // New pattern: GROUP#<accountId>#<groupId>#ROLES, ROLE#<roleId>
-        // For system groups (no account), use GROUP#SYSTIVA#<groupId>#ROLES
+        const accId = accountId || this.defaultAccountId;
+        // Pattern: GROUP#<ACCOUNT_id>#<group_id>#ROLES, ROLE#<roleId>
         const lookupItem = {
-            PK: `GROUP#SYSTIVA#${groupId}#ROLES`,
+            PK: `GROUP#${accId}#${groupId}#ROLES`,
             SK: `ROLE#${roleId}`,
             group_id: groupId,
             role_id: roleId,
+            account_id: accId,
             assigned_at: now,
             entity_type: 'group_role_assignment',
         };
@@ -2892,16 +2815,13 @@ export class UserManagementDynamoDBService {
     private async deleteGroupRoleLookup(
         groupId: string,
         roleId: string,
+        accountId?: string,
     ): Promise<void> {
-        // Delete with new pattern
+        const accId = accountId || this.defaultAccountId;
+        // Delete using GROUP#<ACCOUNT_id>#<group_id>#ROLES pattern
         await DynamoDBOperations.deleteItem(this.tableName, {
-            PK: `GROUP#SYSTIVA#${groupId}#ROLES`,
+            PK: `GROUP#${accId}#${groupId}#ROLES`,
             SK: `ROLE#${roleId}`,
-        }).catch(() => {});
-        // Also try old pattern for backward compatibility
-        await DynamoDBOperations.deleteItem(this.tableName, {
-            PK: `SYSTIVA#${groupId}`,
-            SK: `ROLE_ASSIGNMENT#${roleId}`,
         }).catch(() => {});
     }
 
@@ -3226,7 +3146,7 @@ export class UserManagementDynamoDBService {
         isValid: boolean;
         group: Group | null;
         warning?: string;
-        scopeType?: 'account' | 'systiva' | 'not_found';
+        scopeType?: 'account' | 'systiva' | 'default' | 'not_found';
     }> {
         try {
             console.log(`🔍 Validating group scope for ${groupId}:`, {
@@ -3274,21 +3194,21 @@ export class UserManagementDynamoDBService {
                     };
                 }
 
-                // Group not found in account scope - check if it's a Systiva group
+                // Group not found in account scope - check if it's a default account group
                 console.log(
-                    `⚠️  Group not found in account scope, checking Systiva...`,
+                    `⚠️  Group not found in account scope, checking default account...`,
                 );
-                const systivaGroup = await this.getGroup(groupId);
+                const defaultGroup = await this.getGroup(groupId);
 
-                if (systivaGroup) {
+                if (defaultGroup) {
                     console.log(
-                        `❌ Group found in SYSTIVA scope: ${systivaGroup.name}`,
+                        `❌ Group found in default account scope: ${defaultGroup.name}`,
                     );
                     return {
                         isValid: false,
-                        group: systivaGroup,
-                        warning: `Attempting to assign Systiva-level group "${systivaGroup.name}" in account context. Use account-specific groups instead to maintain data isolation.`,
-                        scopeType: 'systiva',
+                        group: defaultGroup,
+                        warning: `Attempting to assign default account group "${defaultGroup.name}" in account context. Use account-specific groups instead to maintain data isolation.`,
+                        scopeType: 'default',
                     };
                 }
 
@@ -3300,24 +3220,24 @@ export class UserManagementDynamoDBService {
                     scopeType: 'not_found',
                 };
             } else {
-                // No account context - only Systiva groups are valid
+                // No account context - only default account groups are valid
                 console.log(
-                    `📋 No account context - validating as Systiva group`,
+                    `📋 No account context - validating as default account group`,
                 );
-                const systivaGroup = await this.getGroup(groupId);
+                const defaultAccountGroup = await this.getGroup(groupId);
 
-                if (systivaGroup) {
+                if (defaultAccountGroup) {
                     return {
                         isValid: true,
-                        group: systivaGroup,
-                        scopeType: 'systiva',
+                        group: defaultAccountGroup,
+                        scopeType: 'default',
                     };
                 }
 
                 return {
                     isValid: false,
                     group: null,
-                    warning: `Group ${groupId} not found in Systiva scope`,
+                    warning: `Group ${groupId} not found in default account scope`,
                     scopeType: 'not_found',
                 };
             }
