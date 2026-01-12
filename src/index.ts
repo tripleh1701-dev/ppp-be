@@ -91,9 +91,13 @@ export const handler = async (event: any, context: any): Promise<any> => {
             path = path.slice(stage.length + 1);
         }
 
-        // Remove /api/v1/app prefix
+        // Remove /api/v1/app prefix (e.g., /api/v1/app/api/accounts -> /api/accounts)
         if (path.startsWith('/api/v1/app')) {
             path = path.slice('/api/v1/app'.length);
+        }
+        // Remove /api/v1 prefix for routes like /api/v1/global-settings -> /api/global-settings
+        else if (path.startsWith('/api/v1/')) {
+            path = '/api/' + path.slice('/api/v1/'.length);
         }
 
         // Update the event with the rewritten path
