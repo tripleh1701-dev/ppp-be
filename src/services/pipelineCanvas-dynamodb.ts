@@ -205,12 +205,60 @@ export class PipelineCanvasDynamoDBService {
         }
     }
 
+    // Helper method to get raw item with PK/SK for update/delete operations
+    private async getRawItem(id: string): Promise<any | null> {
+        try {
+            const items = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'id = :id AND entity_type = :type',
+                {
+                    ':id': id,
+                    ':type': 'pipeline_canvas',
+                },
+            );
+
+            if (!items || items.length === 0) {
+                return null;
+            }
+
+            return items[0];
+        } catch (error) {
+            console.error(`Error getting raw item for pipeline ${id}:`, error);
+            throw error;
+        }
+    }
+
     async update(
         id: string,
         body: Partial<Omit<PipelineCanvas, 'id' | 'createdAt'>>,
     ): Promise<PipelineCanvas | null> {
         try {
             console.log(`Updating pipeline canvas with ID: ${id}`);
+
+            // First, get the existing item to retrieve accountId and accountName for PK/SK
+            const existingItem = await this.getRawItem(id);
+            if (!existingItem) {
+                console.warn(`⚠️ Pipeline not found for update: ${id}`);
+                return null;
+            }
+
+            const accountId = existingItem.account_id || existingItem.accountId;
+            const accountName =
+                existingItem.account_name || existingItem.accountName;
+
+            if (!accountId || !accountName) {
+                console.error(
+                    `❌ Missing accountId or accountName for pipeline ${id}`,
+                );
+                return null;
+            }
+
+            // PK pattern: <ACCOUNT_NAME>#<accountId>#PIPELINES
+            // SK pattern: PIPELINE#<pipelineId>
+            const pk = `${accountName.toUpperCase()}#${accountId}#PIPELINES`;
+            const sk = `PIPELINE#${id}`;
+
+            console.log(`📝 Updating with PK: ${pk}, SK: ${sk}`);
 
             const now = new Date().toISOString();
 
@@ -263,14 +311,15 @@ export class PipelineCanvasDynamoDBService {
             await DynamoDBOperations.updateItem(
                 this.tableName,
                 {
-                    PK: `PIPELINE_CANVAS#${id}`,
-                    SK: `PIPELINE_CANVAS#${id}`,
+                    PK: pk,
+                    SK: sk,
                 },
                 updateExpression,
                 expressionAttributeValues,
                 expressionAttributeNames,
             );
 
+            console.log(`✅ Pipeline ${id} updated successfully`);
             return await this.get(id);
         } catch (error) {
             console.error(`Error updating pipeline canvas ${id}:`, error);
@@ -282,12 +331,37 @@ export class PipelineCanvasDynamoDBService {
         try {
             console.log(`Deleting pipeline canvas with ID: ${id}`);
 
+            // First, get the existing item to retrieve accountId and accountName for PK/SK
+            const existingItem = await this.getRawItem(id);
+            if (!existingItem) {
+                console.warn(`⚠️ Pipeline not found for deletion: ${id}`);
+                return false;
+            }
+
+            const accountId = existingItem.account_id || existingItem.accountId;
+            const accountName =
+                existingItem.account_name || existingItem.accountName;
+
+            if (!accountId || !accountName) {
+                console.error(
+                    `❌ Missing accountId or accountName for pipeline ${id}`,
+                );
+                return false;
+            }
+
+            // PK pattern: <ACCOUNT_NAME>#<accountId>#PIPELINES
+            // SK pattern: PIPELINE#<pipelineId>
+            const pk = `${accountName.toUpperCase()}#${accountId}#PIPELINES`;
+            const sk = `PIPELINE#${id}`;
+
+            console.log(`🗑️ Deleting with PK: ${pk}, SK: ${sk}`);
+
             await DynamoDBOperations.deleteItem(this.tableName, {
-                PK: `PIPELINE_CANVAS#${id}`,
-                SK: `PIPELINE_CANVAS#${id}`,
+                PK: pk,
+                SK: sk,
             });
 
-            console.log(`Successfully deleted pipeline canvas ${id}`);
+            console.log(`✅ Successfully deleted pipeline canvas ${id}`);
             return true;
         } catch (error) {
             console.error(`Error deleting pipeline canvas ${id}:`, error);
