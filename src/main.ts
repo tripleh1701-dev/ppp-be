@@ -63,14 +63,25 @@ import {GitHubOAuthService} from './services/githubOAuth';
 import {CognitoAuthService} from './services/cognitoAuth';
 
 // Cognito auth service instance
-//const cognitoAuth = new CognitoAuthService();
-const cognitoAuth: any = {
-    isAvailable: () => false,
-    login: async () => ({error: 'CognitoAuthService not available'}),
-    completeNewPasswordChallenge: async () => ({
-        error: 'CognitoAuthService not available',
-    }),
-};
+// If IMS_API_URL is configured, use the real CognitoAuthService
+// Otherwise, use a disabled fallback (for local dev without Cognito)
+const cognitoAuth:
+    | CognitoAuthService
+    | {
+          isAvailable: () => boolean;
+          login: () => Promise<{error: string}>;
+          completeNewPasswordChallenge: () => Promise<{error: string}>;
+      } = process.env.IMS_API_URL
+    ? new CognitoAuthService()
+    : {
+          isAvailable: () => false,
+          login: async () => ({
+              error: 'CognitoAuthService not available - set IMS_API_URL to enable',
+          }),
+          completeNewPasswordChallenge: async () => ({
+              error: 'CognitoAuthService not available - set IMS_API_URL to enable',
+          }),
+      };
 
 // Note: dotenv.config() is called at the top of the file before imports
 import {
@@ -214,7 +225,7 @@ class HealthController {
     }
 }
 
-@Controller('api/auth')
+@Controller('api/v1/auth')
 class AuthController {
     @Post('login')
     async login(@Body() body: any, @Res() res: any) {
@@ -9767,7 +9778,9 @@ class EnterpriseProductsServicesController {
             console.log('🧹 API: Starting duplicate cleanup...');
             return await enterpriseProductsServices.cleanupDuplicates();
         } else {
-            return {message: 'Cleanup only supported for DynamoDB storage mode'};
+            return {
+                message: 'Cleanup only supported for DynamoDB storage mode',
+            };
         }
     }
 
@@ -10048,7 +10061,7 @@ class AccountLicensesController {
     }
 }
 
-@Controller('api/v1/user-management')
+@Controller('api/user-management')
 class UserManagementController {
     // ==========================================
     // USER ENDPOINTS
@@ -11484,23 +11497,53 @@ class GlobalSettingsController {
             };
         }
 
-        // If no query parameters provided, return all records
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+        // Look up missing names from IDs if needed
+        let resolvedAccountName = accountName;
+        let resolvedEnterpriseName = enterpriseName;
+
+        // Look up accountName from accountId if not provided
+        if (!resolvedAccountName && accountId && accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            resolvedAccountName = account?.accountName || '';
             console.log(
-                '📋 getEntities API called - fetching all global settings',
+                `🔍 Looked up accountName: ${resolvedAccountName} from accountId: ${accountId}`,
+            );
+        }
+
+        // Look up enterpriseName from enterpriseId if not provided
+        if (!resolvedEnterpriseName && enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            resolvedEnterpriseName = enterprise?.name || '';
+            console.log(
+                `🔍 Looked up enterpriseName: ${resolvedEnterpriseName} from enterpriseId: ${enterpriseId}`,
+            );
+        }
+
+        // If we don't have the required IDs, return all records
+        if (!accountId || !enterpriseId) {
+            console.log(
+                '📋 getEntities API called - fetching all global settings (missing accountId or enterpriseId)',
+            );
+            return await globalSettings.getAllEntities();
+        }
+
+        // If we still don't have the names after lookup, return all records
+        if (!resolvedAccountName || !resolvedEnterpriseName) {
+            console.log(
+                `📋 getEntities API called - fetching all global settings (could not resolve names: accountName=${resolvedAccountName}, enterpriseName=${resolvedEnterpriseName})`,
             );
             return await globalSettings.getAllEntities();
         }
 
         // Otherwise, filter by account and enterprise
         console.log(
-            `📋 getEntities API called for account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+            `📋 getEntities API called for account: ${accountId} (${resolvedAccountName}), enterprise: ${enterpriseId} (${resolvedEnterpriseName})`,
         );
         return await globalSettings.getEntitiesByAccountAndEnterprise(
             accountId,
-            accountName,
+            resolvedAccountName,
             enterpriseId,
-            enterpriseName,
+            resolvedEnterpriseName,
         );
     }
 
@@ -11517,19 +11560,39 @@ class GlobalSettingsController {
                 error: 'Global settings only available in DynamoDB mode',
             };
         }
-        if (!accountId || !accountName || !enterpriseId || !enterpriseName) {
+
+        // Look up missing names from IDs if needed
+        let resolvedAccountName = accountName;
+        let resolvedEnterpriseName = enterpriseName;
+
+        if (!resolvedAccountName && accountId && accountsDynamoDB) {
+            const account = await accountsDynamoDB.get(accountId);
+            resolvedAccountName = account?.accountName || '';
+        }
+
+        if (!resolvedEnterpriseName && enterpriseId && enterprises) {
+            const enterprise = await enterprises.get(enterpriseId);
+            resolvedEnterpriseName = enterprise?.name || '';
+        }
+
+        if (
+            !accountId ||
+            !enterpriseId ||
+            !resolvedAccountName ||
+            !resolvedEnterpriseName
+        ) {
             return {
-                error: 'accountId, accountName, enterpriseId, and enterpriseName are required',
+                error: 'accountId and enterpriseId are required (names can be auto-resolved)',
             };
         }
         console.log(
-            `🔍 getWorkstream API called for workstream: ${workstreamName}, account: ${accountId} (${accountName}), enterprise: ${enterpriseId} (${enterpriseName})`,
+            `🔍 getWorkstream API called for workstream: ${workstreamName}, account: ${accountId} (${resolvedAccountName}), enterprise: ${enterpriseId} (${resolvedEnterpriseName})`,
         );
         return await globalSettings.getEntity(
             accountId,
-            accountName,
+            resolvedAccountName,
             enterpriseId,
-            enterpriseName,
+            resolvedEnterpriseName,
             workstreamName,
         );
     }

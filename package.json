@@ -9,6 +9,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+  "@aws-sdk/client-sts": "^3.456.0",
     "@aws-sdk/client-dynamodb": "^3.456.0",
     "@aws-sdk/lib-dynamodb": "^3.456.0",
     "@nestjs/common": "^10.3.2",
