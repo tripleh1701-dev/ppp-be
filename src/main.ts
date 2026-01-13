@@ -2988,6 +2988,18 @@ class AccountsController {
                             subscriptionTier:
                                 infraProvisioningResult.data.subscriptionTier ||
                                 body.subscriptionTier,
+                            // AWS Account ID where this account's DynamoDB is provisioned
+                            // This comes from the infrastructure provisioning API
+                            awsAccountId:
+                                infraProvisioningResult.data.awsAccountId ||
+                                infraProvisioningResult.data.aws_account_id ||
+                                infraProvisioningResult.data.targetAwsAccountId,
+                            cloudType:
+                                infraProvisioningResult.data.cloudType ||
+                                (body.subscriptionTier?.toLowerCase() ===
+                                'private'
+                                    ? 'private'
+                                    : 'public'),
                             email: infraProvisioningResult.data.email,
                             firstName: infraProvisioningResult.data.firstName,
                             lastName: infraProvisioningResult.data.lastName,
@@ -3048,6 +3060,21 @@ class AccountsController {
                                     // Technical user info
                                     technicalUsername:
                                         body.technicalUser?.adminUsername || '',
+                                    // AWS Account ID from infrastructure provisioning
+                                    awsAccountId:
+                                        infraProvisioningResult.data
+                                            .awsAccountId ||
+                                        infraProvisioningResult.data
+                                            .aws_account_id ||
+                                        infraProvisioningResult.data
+                                            .targetAwsAccountId,
+                                    cloudType:
+                                        infraProvisioningResult.data
+                                            .cloudType ||
+                                        (body.subscriptionTier?.toLowerCase() ===
+                                        'private'
+                                            ? 'private'
+                                            : 'public'),
                                 } as any);
                                 console.log(
                                     '✅ Account updated with addresses, technicalUsers, licenses',
@@ -9730,6 +9757,17 @@ class EnterpriseProductsServicesController {
                 error: 'Internal server error',
                 message: error.message,
             });
+        }
+    }
+
+    // Clean up duplicate enterprise+product records (merge services, delete extras)
+    @Post('cleanup-duplicates')
+    async cleanupDuplicates() {
+        if (storageMode === 'dynamodb') {
+            console.log('🧹 API: Starting duplicate cleanup...');
+            return await enterpriseProductsServices.cleanupDuplicates();
+        } else {
+            return {message: 'Cleanup only supported for DynamoDB storage mode'};
         }
     }
 

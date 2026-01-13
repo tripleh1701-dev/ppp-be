@@ -33,7 +33,7 @@ export class EnterpriseProductsServicesDynamoDBService {
             );
 
             // Transform DynamoDB items to EnterpriseProductService interface
-            return items.map((item) => ({
+            const rawResults = items.map((item) => ({
                 id: item.id || item.PK?.replace('EPS#', ''),
                 enterpriseId: item.enterprise_id,
                 productId: item.product_id,
@@ -41,10 +41,46 @@ export class EnterpriseProductsServicesDynamoDBService {
                 createdAt: item.created_date || item.createdAt,
                 updatedAt: item.updated_date || item.updatedAt,
             }));
+
+            // Consolidate duplicates: merge records with same enterprise+product
+            const consolidated = this.consolidateRecords(rawResults);
+            return consolidated;
         } catch (error) {
             console.error('Error listing enterprise-product-services:', error);
             throw error;
         }
+    }
+
+    /**
+     * Consolidate duplicate records with same enterprise+product combination.
+     * Merges services from all duplicates into a single record.
+     */
+    private consolidateRecords(records: EnterpriseProductService[]): EnterpriseProductService[] {
+        const consolidationMap = new Map<string, EnterpriseProductService>();
+
+        for (const record of records) {
+            const key = `${record.enterpriseId}#${record.productId}`;
+
+            if (consolidationMap.has(key)) {
+                // Merge services into existing record
+                const existing = consolidationMap.get(key)!;
+                const mergedServices = [...new Set([...existing.serviceIds, ...record.serviceIds])];
+                existing.serviceIds = mergedServices;
+                // Keep the earliest createdAt
+                if (record.createdAt && existing.createdAt && record.createdAt < existing.createdAt) {
+                    existing.createdAt = record.createdAt;
+                }
+                // Keep the latest updatedAt
+                if (record.updatedAt && existing.updatedAt && record.updatedAt > existing.updatedAt) {
+                    existing.updatedAt = record.updatedAt;
+                }
+                console.log(`📦 Consolidated duplicate: ${key} - merged ${record.serviceIds.length} services`);
+            } else {
+                consolidationMap.set(key, {...record});
+            }
+        }
+
+        return Array.from(consolidationMap.values());
     }
 
     async create(body: {
@@ -573,6 +609,92 @@ export class EnterpriseProductsServicesDynamoDBService {
                 'Error updating enterprise-product-service linkage:',
                 error,
             );
+            throw error;
+        }
+    }
+
+    /**
+     * Clean up duplicate records in DynamoDB.
+     * Keeps one record per enterprise+product, merges services, deletes extras.
+     */
+    async cleanupDuplicates(): Promise<{
+        duplicatesFound: number;
+        recordsDeleted: number;
+        recordsKept: number;
+    }> {
+        try {
+            console.log('🧹 Starting duplicate cleanup...');
+
+            const items = await DynamoDBOperations.scanItems(
+                this.tableName,
+                'entity_type = :type',
+                {':type': 'enterprise_product_service'},
+            );
+
+            // Group by enterprise+product
+            const groupedRecords = new Map<string, any[]>();
+            for (const item of items) {
+                const key = `${item.enterprise_id}#${item.product_id}`;
+                if (!groupedRecords.has(key)) {
+                    groupedRecords.set(key, []);
+                }
+                groupedRecords.get(key)!.push(item);
+            }
+
+            let duplicatesFound = 0;
+            let recordsDeleted = 0;
+            let recordsKept = 0;
+
+            for (const [key, records] of groupedRecords) {
+                if (records.length > 1) {
+                    duplicatesFound += records.length - 1;
+                    console.log(`📋 Found ${records.length} duplicates for: ${key}`);
+
+                    // Sort by createdAt to keep the oldest
+                    records.sort((a, b) => {
+                        const dateA = new Date(a.created_date || a.createdAt || 0).getTime();
+                        const dateB = new Date(b.created_date || b.createdAt || 0).getTime();
+                        return dateA - dateB;
+                    });
+
+                    const recordToKeep = records[0];
+                    const recordsToDelete = records.slice(1);
+
+                    // Merge all services into the record to keep
+                    const allServices = new Set<string>(recordToKeep.service_ids || []);
+                    for (const rec of recordsToDelete) {
+                        for (const svc of (rec.service_ids || [])) {
+                            allServices.add(svc);
+                        }
+                    }
+
+                    // Update the kept record with merged services
+                    await this.update(recordToKeep.id, {
+                        serviceIds: Array.from(allServices),
+                    });
+
+                    // Delete the duplicate records
+                    for (const rec of recordsToDelete) {
+                        await this.remove(rec.id);
+                        recordsDeleted++;
+                        console.log(`🗑️ Deleted duplicate record: ${rec.id}`);
+                    }
+
+                    recordsKept++;
+                } else {
+                    recordsKept++;
+                }
+            }
+
+            console.log(`✅ Cleanup complete: ${duplicatesFound} duplicates found, ${recordsDeleted} deleted, ${recordsKept} kept`);
+
+            return {
+                duplicatesFound,
+                recordsDeleted,
+                recordsKept,
+            };
+        } catch (error) {
+            console.error('Error cleaning up duplicates:', error);
             throw error;
         }
     }

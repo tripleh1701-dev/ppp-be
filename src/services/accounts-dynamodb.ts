@@ -470,7 +470,10 @@ export class AccountsDynamoDBService {
                 subscriptionTier:
                     item.subscriptionTier || item.subscription_tier || '',
                 awsAccountId:
-                    item.aws_account_id || item.awsAccountId || item.accountAccountId || '',
+                    item.aws_account_id ||
+                    item.awsAccountId ||
+                    item.accountAccountId ||
+                    '',
                 address: item.address || '',
                 country: item.country || '',
                 city: item.city || '',
@@ -796,6 +799,14 @@ export class AccountsDynamoDBService {
                 expressionAttributeValues[':pincode'] = (
                     updates as any
                 ).pincode;
+            }
+            // Handle awsAccountId - AWS account ID where this account's DynamoDB is provisioned
+            if ((updates as any).awsAccountId !== undefined) {
+                updateFields.push('awsAccountId = :awsAccountId');
+                updateFields.push('aws_account_id = :awsAccountId');
+                expressionAttributeValues[':awsAccountId'] = (
+                    updates as any
+                ).awsAccountId;
             }
 
             // Handle technicalUsers array

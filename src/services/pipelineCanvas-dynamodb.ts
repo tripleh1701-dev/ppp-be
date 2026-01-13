@@ -38,14 +38,26 @@ export class PipelineCanvasDynamoDBService {
     }
 
     /**
-     * Get the correct DynamoDB table name based on cloud type
-     * - Public cloud: account-admin-public-dev
-     * - Private cloud: account-<account_id>-admin-private-dev
+     * Get the correct DynamoDB table name based on cloud type and awsAccountId
+     * - If awsAccountId is provided (cross-account): use account-specific tables
+     *   - Public cloud: account-admin-public-dev
+     *   - Private cloud: account-<account_id>-admin-private-dev
+     * - If awsAccountId is NOT provided: use default central table (systiva-admin-dev)
      */
     private getTableName(
         accountId: string,
         cloudType?: 'public' | 'private',
+        awsAccountId?: string,
     ): string {
+        // If no awsAccountId, use the default central table
+        if (!awsAccountId) {
+            console.log(
+                `📦 Using DEFAULT central table: ${this.defaultTableName} for account: ${accountId}`,
+            );
+            return this.defaultTableName;
+        }
+
+        // Cross-account scenario: use account-specific tables
         if (cloudType === 'private') {
             const tableName = `account-${accountId}-admin-private-dev`;
             console.log(
@@ -215,8 +227,12 @@ export class PipelineCanvasDynamoDBService {
             const pipelineId = uuidv4();
             const now = new Date().toISOString();
 
-            // Get the correct table based on cloud type
-            const tableName = this.getTableName(body.accountId, body.cloudType);
+            // Get the correct table based on cloud type and awsAccountId
+            const tableName = this.getTableName(
+                body.accountId,
+                body.cloudType,
+                body.awsAccountId,
+            );
 
             // PK pattern: ACCOUNT#<ACCOUNT_id> (matching the Core Entities convention)
             const pk = this.generatePK(body.accountId);
