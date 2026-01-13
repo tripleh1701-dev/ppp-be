@@ -5,9 +5,6 @@
  */
 import axios from 'axios';
 
-// IMS API Base URL - uses the API Gateway URL from environment
-const IMS_API_URL = process.env.IMS_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL || '';
-
 export interface CognitoAuthResult {
     success: boolean;
     requiresPasswordChange?: boolean;
@@ -36,9 +33,20 @@ export class CognitoAuthService {
     private imsApiUrl: string;
 
     constructor() {
-        this.imsApiUrl = IMS_API_URL;
+        // Read IMS_API_URL at runtime (after dotenv.config() has been called)
+        // This ensures the environment variable is available
+        this.imsApiUrl =
+            process.env.IMS_API_URL ||
+            process.env.NEXT_PUBLIC_API_BASE_URL ||
+            '';
         if (!this.imsApiUrl) {
-            console.warn('⚠️ IMS_API_URL not configured. Cognito authentication will not work.');
+            console.warn(
+                '⚠️ IMS_API_URL not configured. Cognito authentication will not work.',
+            );
+        } else {
+            console.log(
+                `✅ CognitoAuthService initialized with IMS_API_URL: ${this.imsApiUrl}`,
+            );
         }
     }
 
@@ -52,11 +60,14 @@ export class CognitoAuthService {
     /**
      * Authenticate user with Cognito via IMS Service
      */
-    async login(username: string, password: string): Promise<CognitoAuthResult> {
+    async login(
+        username: string,
+        password: string,
+    ): Promise<CognitoAuthResult> {
         if (!this.imsApiUrl) {
             return {
                 success: false,
-                error: 'IMS API URL not configured'
+                error: 'IMS API URL not configured',
             };
         }
 
@@ -64,26 +75,31 @@ export class CognitoAuthService {
             // Call the IMS auth/login endpoint
             const response = await axios.post(
                 `${this.imsApiUrl}/auth/login`,
-                { username, password },
+                {username, password},
                 {
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
                     },
-                    timeout: 30000
-                }
+                    timeout: 30000,
+                },
             );
 
             const data = response.data;
 
             // Handle NEW_PASSWORD_REQUIRED challenge
-            if (data.requiresPasswordChange || data.challengeName === 'NEW_PASSWORD_REQUIRED') {
+            if (
+                data.requiresPasswordChange ||
+                data.challengeName === 'NEW_PASSWORD_REQUIRED'
+            ) {
                 return {
                     success: false,
                     requiresPasswordChange: true,
                     challengeName: data.challengeName,
                     session: data.session,
                     user: data.user,
-                    message: data.message || 'Password change required on first login'
+                    message:
+                        data.message ||
+                        'Password change required on first login',
                 };
             }
 
@@ -92,28 +108,35 @@ export class CognitoAuthService {
                 return {
                     success: true,
                     tokens: data.tokens,
-                    user: data.user
+                    user: data.user,
                 };
             }
 
             return {
                 success: false,
-                error: data.message || 'Authentication failed'
+                error: data.message || 'Authentication failed',
             };
         } catch (error: any) {
-            console.error('Cognito auth error:', error.response?.data || error.message);
+            console.error(
+                'Cognito auth error:',
+                error.response?.data || error.message,
+            );
 
             // Handle specific error responses
             if (error.response?.status === 401) {
                 return {
                     success: false,
-                    error: error.response?.data?.message || 'Invalid username or password'
+                    error:
+                        error.response?.data?.message ||
+                        'Invalid username or password',
                 };
             }
 
             return {
                 success: false,
-                error: error.response?.data?.message || 'Authentication service unavailable'
+                error:
+                    error.response?.data?.message ||
+                    'Authentication service unavailable',
             };
         }
     }
@@ -124,25 +147,25 @@ export class CognitoAuthService {
     async completeNewPasswordChallenge(
         username: string,
         newPassword: string,
-        session: string
+        session: string,
     ): Promise<CognitoAuthResult> {
         if (!this.imsApiUrl) {
             return {
                 success: false,
-                error: 'IMS API URL not configured'
+                error: 'IMS API URL not configured',
             };
         }
 
         try {
             const response = await axios.post(
                 `${this.imsApiUrl}/auth/complete-new-password-challenge`,
-                { username, newPassword, session },
+                {username, newPassword, session},
                 {
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
                     },
-                    timeout: 30000
-                }
+                    timeout: 30000,
+                },
             );
 
             const data = response.data;
@@ -152,19 +175,24 @@ export class CognitoAuthService {
                     success: true,
                     tokens: data.tokens,
                     user: data.user,
-                    message: 'Password updated successfully'
+                    message: 'Password updated successfully',
                 };
             }
 
             return {
                 success: false,
-                error: data.message || 'Failed to update password'
+                error: data.message || 'Failed to update password',
             };
         } catch (error: any) {
-            console.error('Password change error:', error.response?.data || error.message);
+            console.error(
+                'Password change error:',
+                error.response?.data || error.message,
+            );
             return {
                 success: false,
-                error: error.response?.data?.message || 'Failed to update password'
+                error:
+                    error.response?.data?.message ||
+                    'Failed to update password',
             };
         }
     }
@@ -176,7 +204,7 @@ export class CognitoAuthService {
         if (!this.imsApiUrl) {
             return {
                 success: false,
-                error: 'IMS API URL not configured'
+                error: 'IMS API URL not configured',
             };
         }
 
@@ -187,10 +215,10 @@ export class CognitoAuthService {
                 {
                     headers: {
                         'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${token}`
+                        Authorization: `Bearer ${token}`,
                     },
-                    timeout: 10000
-                }
+                    timeout: 10000,
+                },
             );
 
             const data = response.data;
@@ -198,18 +226,18 @@ export class CognitoAuthService {
             if (data.success) {
                 return {
                     success: true,
-                    user: data.user
+                    user: data.user,
                 };
             }
 
             return {
                 success: false,
-                error: 'Invalid token'
+                error: 'Invalid token',
             };
         } catch (error: any) {
             return {
                 success: false,
-                error: 'Token validation failed'
+                error: 'Token validation failed',
             };
         }
     }
@@ -221,20 +249,20 @@ export class CognitoAuthService {
         if (!this.imsApiUrl) {
             return {
                 success: false,
-                error: 'IMS API URL not configured'
+                error: 'IMS API URL not configured',
             };
         }
 
         try {
             const response = await axios.post(
                 `${this.imsApiUrl}/auth/refresh`,
-                { refreshToken },
+                {refreshToken},
                 {
                     headers: {
-                        'Content-Type': 'application/json'
+                        'Content-Type': 'application/json',
                     },
-                    timeout: 10000
-                }
+                    timeout: 10000,
+                },
             );
 
             const data = response.data;
@@ -242,18 +270,18 @@ export class CognitoAuthService {
             if (data.success && data.tokens) {
                 return {
                     success: true,
-                    tokens: data.tokens
+                    tokens: data.tokens,
                 };
             }
 
             return {
                 success: false,
-                error: 'Token refresh failed'
+                error: 'Token refresh failed',
             };
         } catch (error: any) {
             return {
                 success: false,
-                error: 'Token refresh failed'
+                error: 'Token refresh failed',
             };
         }
     }
