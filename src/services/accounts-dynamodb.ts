@@ -6,8 +6,9 @@ export interface Account {
     accountId?: string;
     accountName: string;
     masterAccount?: string;
-    cloudType?: string;
+    cloudType?: 'public' | 'private' | string;
     subscriptionTier?: string;
+    awsAccountId?: string; // AWS account ID where this account's DynamoDB is provisioned
     address?: string;
     firstName?: string;
     middleName?: string;
@@ -468,6 +469,8 @@ export class AccountsDynamoDBService {
                 cloudType: item.cloud_type || item.cloudType || '',
                 subscriptionTier:
                     item.subscriptionTier || item.subscription_tier || '',
+                awsAccountId:
+                    item.aws_account_id || item.awsAccountId || item.accountAccountId || '',
                 address: item.address || '',
                 country: item.country || '',
                 city: item.city || '',

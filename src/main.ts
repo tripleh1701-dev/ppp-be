@@ -55,6 +55,7 @@ import * as pipelineCanvas from './services/pipelineCanvas';
 import {PipelineCanvasDynamoDBService} from './services/pipelineCanvas-dynamodb';
 import {BuildExecutionsDynamoDBService} from './services/buildExecutions-dynamodb';
 import {BuildsDynamoDBService} from './services/builds-dynamodb';
+import {UserPreferencesDynamoDBService} from './services/userPreferences-dynamodb';
 import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
@@ -162,6 +163,7 @@ let globalSettings: GlobalSettingsDynamoDBService;
 let pipelineCanvasDynamoDB: PipelineCanvasDynamoDBService;
 let buildExecutionsDynamoDB: BuildExecutionsDynamoDBService;
 let buildsDynamoDB: BuildsDynamoDBService;
+let userPreferencesDynamoDB: UserPreferencesDynamoDBService;
 
 // Initialize services based on storage mode at module load time
 if (storageMode === 'dynamodb') {
@@ -181,6 +183,7 @@ if (storageMode === 'dynamodb') {
         pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
         buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
         buildsDynamoDB = new BuildsDynamoDBService();
+        userPreferencesDynamoDB = new UserPreferencesDynamoDBService();
         console.log('✅ DynamoDB services initialized successfully');
     } catch (error) {
         console.error('❌ Failed to initialize DynamoDB services:', error);
@@ -4099,6 +4102,148 @@ class PipelineServicesController {
     }
 }
 
+/**
+ * User Preferences Controller
+ * Stores user preferences like current account/enterprise context in DynamoDB (not localStorage)
+ */
+@Controller('api/user-preferences')
+class UserPreferencesController {
+    @Get('current-context')
+    async getCurrentContext(@Req() req: any) {
+        try {
+            if (storageMode !== 'dynamodb' || !userPreferencesDynamoDB) {
+                return {
+                    error: 'User preferences only available in DynamoDB mode',
+                };
+            }
+
+            // Extract user ID from JWT token
+            let userId = 'anonymous';
+            const authHeader = req.headers?.authorization || '';
+            if (authHeader.startsWith('Bearer ')) {
+                try {
+                    const jwt = require('jsonwebtoken');
+                    const token = authHeader.substring(7);
+                    const decoded: any = jwt.decode(token);
+                    if (decoded) {
+                        userId =
+                            decoded.sub ||
+                            decoded.userId ||
+                            decoded.user_id ||
+                            decoded.email ||
+                            'anonymous';
+                    }
+                } catch (e) {
+                    console.log('Failed to decode token for user preferences');
+                }
+            }
+
+            const context = await userPreferencesDynamoDB.getCurrentContext(
+                userId,
+            );
+            if (!context) {
+                return {
+                    accountId: null,
+                    accountName: null,
+                    enterpriseId: null,
+                };
+            }
+            return context;
+        } catch (error: any) {
+            console.error('Error getting user context:', error);
+            return {
+                accountId: null,
+                accountName: null,
+                enterpriseId: null,
+            };
+        }
+    }
+
+    @Post('current-context')
+    async saveCurrentContext(@Req() req: any, @Body() body: any) {
+        try {
+            if (storageMode !== 'dynamodb' || !userPreferencesDynamoDB) {
+                return {
+                    error: 'User preferences only available in DynamoDB mode',
+                };
+            }
+
+            // Extract user ID from JWT token
+            let userId = 'anonymous';
+            const authHeader = req.headers?.authorization || '';
+            if (authHeader.startsWith('Bearer ')) {
+                try {
+                    const jwt = require('jsonwebtoken');
+                    const token = authHeader.substring(7);
+                    const decoded: any = jwt.decode(token);
+                    if (decoded) {
+                        userId =
+                            decoded.sub ||
+                            decoded.userId ||
+                            decoded.user_id ||
+                            decoded.email ||
+                            'anonymous';
+                    }
+                } catch (e) {
+                    console.log('Failed to decode token for user preferences');
+                }
+            }
+
+            const context = await userPreferencesDynamoDB.saveCurrentContext({
+                userId,
+                accountId: body.accountId,
+                accountName: body.accountName,
+                enterpriseId: body.enterpriseId,
+                enterpriseName: body.enterpriseName,
+                updatedAt: new Date().toISOString(),
+            });
+
+            return {success: true, context};
+        } catch (error: any) {
+            console.error('Error saving user context:', error);
+            return {success: false, error: error.message};
+        }
+    }
+
+    @Delete('current-context')
+    async deleteCurrentContext(@Req() req: any) {
+        try {
+            if (storageMode !== 'dynamodb' || !userPreferencesDynamoDB) {
+                return {
+                    error: 'User preferences only available in DynamoDB mode',
+                };
+            }
+
+            // Extract user ID from JWT token
+            let userId = 'anonymous';
+            const authHeader = req.headers?.authorization || '';
+            if (authHeader.startsWith('Bearer ')) {
+                try {
+                    const jwt = require('jsonwebtoken');
+                    const token = authHeader.substring(7);
+                    const decoded: any = jwt.decode(token);
+                    if (decoded) {
+                        userId =
+                            decoded.sub ||
+                            decoded.userId ||
+                            decoded.user_id ||
+                            decoded.email ||
+                            'anonymous';
+                    }
+                } catch (e) {
+                    console.log('Failed to decode token for user preferences');
+                }
+            }
+
+            await userPreferencesDynamoDB.deleteCurrentContext(userId);
+            return {success: true};
+        } catch (error: any) {
+            console.error('Error deleting user context:', error);
+            return {success: false, error: error.message};
+        }
+    }
+}
+
 @Controller('api/pipeline-canvas')
 class PipelineCanvasController {
     @Get()
@@ -4106,6 +4251,7 @@ class PipelineCanvasController {
         @Query('accountId') accountId?: string,
         @Query('accountName') accountName?: string,
         @Query('enterpriseId') enterpriseId?: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
     ) {
         try {
             // Return pipeline canvas data (separate from enterprise configuration)
@@ -4116,6 +4262,7 @@ class PipelineCanvasController {
                         accountId,
                         accountName,
                         enterpriseId,
+                        cloudType,
                     );
                 }
                 return await pipelineCanvasDynamoDB.list();
@@ -4129,9 +4276,13 @@ class PipelineCanvasController {
     }
 
     @Get(':id')
-    async get(@Param('id') id: string) {
+    async get(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
+    ) {
         if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
-            return await pipelineCanvasDynamoDB.get(id);
+            return await pipelineCanvasDynamoDB.get(id, accountId, cloudType);
         }
         return await pipelineCanvas.get(id);
     }
@@ -4154,7 +4305,25 @@ class PipelineCanvasController {
                 enterpriseName: body.enterpriseName,
                 yamlContent: body.yamlContent,
                 createdBy: body.createdBy,
+                cloudType: body.cloudType || 'public', // Cloud type for table selection
+                awsAccountId: body.awsAccountId, // AWS account ID for cross-account access
             };
+
+            console.log(
+                `📦 Creating pipeline in ${data.cloudType} cloud table`,
+            );
+            console.log(
+                `   Table: ${
+                    data.cloudType === 'private'
+                        ? `account-${body.accountId}-admin-private-dev`
+                        : 'account-admin-public-dev'
+                }`,
+            );
+            if (body.awsAccountId) {
+                console.log(
+                    `   AWS Account: ${body.awsAccountId} (cross-account access)`,
+                );
+            }
 
             if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
                 return await pipelineCanvasDynamoDB.create(data);
@@ -4178,6 +4347,8 @@ class PipelineCanvasController {
             if (body.status !== undefined) data.status = body.status;
             if (body.yamlContent !== undefined)
                 data.yamlContent = body.yamlContent;
+            if (body.accountId !== undefined) data.accountId = body.accountId;
+            if (body.cloudType !== undefined) data.cloudType = body.cloudType;
             data.lastUpdated = new Date().toISOString();
 
             let result;
@@ -4202,9 +4373,13 @@ class PipelineCanvasController {
     }
 
     @Delete(':id')
-    async remove(@Param('id') id: string) {
+    async remove(
+        @Param('id') id: string,
+        @Query('accountId') accountId?: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
+    ) {
         if (storageMode === 'dynamodb' && pipelineCanvasDynamoDB) {
-            await pipelineCanvasDynamoDB.remove(id);
+            await pipelineCanvasDynamoDB.remove(id, accountId, cloudType);
         } else {
             await pipelineCanvas.remove(id);
         }
@@ -11490,6 +11665,7 @@ class GlobalSettingsController {
         PipelineDetailsController,
         PipelineServicesController,
         PipelineCanvasController,
+        UserPreferencesController,
         BuildsController,
         BuildExecutionsController,
         GroupsController,
@@ -11631,6 +11807,7 @@ async function bootstrap() {
             pipelineCanvasDynamoDB = new PipelineCanvasDynamoDBService();
             buildExecutionsDynamoDB = new BuildExecutionsDynamoDBService();
             buildsDynamoDB = new BuildsDynamoDBService();
+            userPreferencesDynamoDB = new UserPreferencesDynamoDBService();
             // Initialize AccessControl DynamoDB service
             AccessControl_Service = new AccessControl_DynamoDBService();
         } else if (currentStorageMode !== 'dynamodb' && !enterprises) {
