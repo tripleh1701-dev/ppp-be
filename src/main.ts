@@ -243,7 +243,7 @@ class AuthController {
             // Try Cognito authentication first (if IMS_API_URL is configured)
             if (cognitoAuth.isAvailable()) {
                 console.log('Attempting Cognito authentication via IMS...');
-                const cognitoResult = await cognitoAuth.login(
+                const cognitoResult: any = await cognitoAuth.login(
                     loginId,
                     password,
                 );
@@ -397,7 +397,7 @@ class AuthController {
                 });
             }
 
-            const result = await cognitoAuth.completeNewPasswordChallenge(
+            const result: any = await cognitoAuth.completeNewPasswordChallenge(
                 loginId,
                 newPassword,
                 session,
