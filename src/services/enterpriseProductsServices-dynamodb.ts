@@ -174,11 +174,19 @@ export class EnterpriseProductsServicesDynamoDBService {
 
     async get(id: string): Promise<EnterpriseProductService | null> {
         try {
-            // Get using LINKAGE# format
-            const item = await DynamoDBOperations.getItem(this.tableName, {
+            // Try new LINKAGE# format first
+            let item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `LINKAGE#${id}`,
                 SK: `LINKAGE#${id}`,
             });
+
+            // Fallback to legacy SYSTIVA# format for cleanup
+            if (!item) {
+                item = await DynamoDBOperations.getItem(this.tableName, {
+                    PK: `SYSTIVA#${id}`,
+                    SK: `LINKAGE#${id}`,
+                });
+            }
 
             if (!item) {
                 return null;
@@ -357,30 +365,49 @@ export class EnterpriseProductsServicesDynamoDBService {
                 return;
             }
 
-            // Delete all related records using new format
+            // Delete all related records using both new and legacy formats
             const deletePromises = [
-                // Main linkage record
+                // Main linkage record - new format
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `LINKAGE#${id}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
-                // Enterprise lookup
+                // Main linkage record - legacy format
+                DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: `SYSTIVA#${id}`,
+                    SK: `LINKAGE#${id}`,
+                }).catch(() => {}),
+                // Enterprise lookup - new format
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `ENTERPRISE#${linkage.enterpriseId}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
-                // Product lookup
+                // Enterprise lookup - legacy format
+                DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: `SYSTIVA#${linkage.enterpriseId}`,
+                    SK: `LINKAGE#${id}`,
+                }).catch(() => {}),
+                // Product lookup - new format
                 DynamoDBOperations.deleteItem(this.tableName, {
                     PK: `PRODUCT#${linkage.productId}`,
                     SK: `LINKAGE#${id}`,
                 }).catch(() => {}),
+                // Product lookup - legacy format
+                DynamoDBOperations.deleteItem(this.tableName, {
+                    PK: `SYSTIVA#${linkage.productId}`,
+                    SK: `LINKAGE#${id}`,
+                }).catch(() => {}),
             ];
 
-            // Service lookups
+            // Service lookups - both formats
             for (const serviceId of linkage.serviceIds) {
                 deletePromises.push(
                     DynamoDBOperations.deleteItem(this.tableName, {
                         PK: `SERVICE#${serviceId}`,
+                        SK: `LINKAGE#${id}`,
+                    }).catch(() => {}),
+                    DynamoDBOperations.deleteItem(this.tableName, {
+                        PK: `SYSTIVA#${serviceId}`,
                         SK: `LINKAGE#${id}`,
                     }).catch(() => {}),
                 );

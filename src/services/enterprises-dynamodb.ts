@@ -152,9 +152,14 @@ export class EnterprisesDynamoDBService {
 
     async remove(id: string): Promise<void> {
         try {
-            // Delete using ENTERPRISE# format
+            // Delete using ENTERPRISE# format (new format)
             await DynamoDBOperations.deleteItem(this.tableName, {
                 PK: `ENTERPRISE#${id}`,
+                SK: `ENTERPRISE#${id}`,
+            });
+            // Also try legacy SYSTIVA# format for cleanup
+            await DynamoDBOperations.deleteItem(this.tableName, {
+                PK: `SYSTIVA#${id}`,
                 SK: `ENTERPRISE#${id}`,
             });
         } catch (error) {
@@ -165,7 +170,7 @@ export class EnterprisesDynamoDBService {
 
     async get(id: string): Promise<Enterprise | null> {
         try {
-            // Get using ENTERPRISE# format only
+            // Get using ENTERPRISE#<id> / ENTERPRISE#<id> format
             const item = await DynamoDBOperations.getItem(this.tableName, {
                 PK: `ENTERPRISE#${id}`,
                 SK: `ENTERPRISE#${id}`,
