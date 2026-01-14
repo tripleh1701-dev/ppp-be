@@ -95,6 +95,11 @@ export const handler = async (event: any, context: any): Promise<any> => {
         if (path.startsWith('/api/v1/app')) {
             path = path.slice('/api/v1/app'.length);
         }
+        // Keep /api/v1/auth paths as-is (controller is defined with api/v1/auth prefix)
+        else if (path.startsWith('/api/v1/auth')) {
+            // Don't rewrite auth paths - they match the controller path directly
+            console.log('Auth path - no rewriting needed');
+        }
         // Remove /api/v1 prefix for routes like /api/v1/global-settings -> /api/global-settings
         else if (path.startsWith('/api/v1/')) {
             path = '/api/' + path.slice('/api/v1/'.length);

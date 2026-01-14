@@ -4,6 +4,7 @@ import {
     CrossAccountDynamoDBService,
     AccountAwsConfig,
 } from './crossAccountDynamoDB';
+import {AccountsDynamoDBService} from './accounts-dynamodb';
 
 export interface PipelineCanvas {
     id: string;
@@ -30,11 +31,81 @@ export class PipelineCanvasDynamoDBService {
     private readonly defaultTableName: string;
     // Cross-account DynamoDB service for account-specific tables
     private readonly crossAccountService: CrossAccountDynamoDBService;
+    // Accounts service to look up account details (including awsAccountId)
+    private readonly accountsService: AccountsDynamoDBService;
 
     constructor() {
         this.defaultTableName =
             process.env.DYNAMODB_SYS_ACCOUNTS_TABLE || 'sys_accounts';
         this.crossAccountService = new CrossAccountDynamoDBService();
+        this.accountsService = new AccountsDynamoDBService();
+    }
+
+    /**
+     * Look up account data to get awsAccountId and cloudType if not provided
+     * This ensures pipelines are saved to the correct account-specific DynamoDB table
+     */
+    private async getAccountAwsDetails(
+        accountId: string,
+        providedAwsAccountId?: string,
+        providedCloudType?: 'public' | 'private',
+    ): Promise<{
+        awsAccountId: string | undefined;
+        cloudType: 'public' | 'private';
+    }> {
+        // If awsAccountId is already provided, use it
+        if (providedAwsAccountId) {
+            console.log(
+                `✅ Using provided awsAccountId: ${providedAwsAccountId}`,
+            );
+            return {
+                awsAccountId: providedAwsAccountId,
+                cloudType: providedCloudType || 'public',
+            };
+        }
+
+        // Look up the account to get its awsAccountId
+        try {
+            console.log(
+                `🔍 Looking up account ${accountId} to get awsAccountId...`,
+            );
+            const account = await this.accountsService.get(accountId);
+
+            if (account && account.awsAccountId) {
+                // Normalize cloudType - handle "Private Cloud", "private", "Public Cloud", "public", etc.
+                const rawCloudType =
+                    account.cloudType || account.subscriptionTier || '';
+                const normalizedCloudType = rawCloudType
+                    .toLowerCase()
+                    .includes('private')
+                    ? 'private'
+                    : 'public';
+                console.log(
+                    `✅ Found account ${accountId} with awsAccountId: ${account.awsAccountId}, cloudType: ${normalizedCloudType} (raw: ${rawCloudType})`,
+                );
+                return {
+                    awsAccountId: account.awsAccountId,
+                    cloudType: providedCloudType || normalizedCloudType,
+                };
+            } else {
+                console.log(
+                    `⚠️ Account ${accountId} found but no awsAccountId set`,
+                );
+                return {
+                    awsAccountId: undefined,
+                    cloudType: providedCloudType || 'public',
+                };
+            }
+        } catch (error: any) {
+            console.error(
+                `❌ Error looking up account ${accountId}:`,
+                error.message,
+            );
+            return {
+                awsAccountId: undefined,
+                cloudType: providedCloudType || 'public',
+            };
+        }
     }
 
     /**
@@ -140,19 +211,55 @@ export class PipelineCanvasDynamoDBService {
 
             // If accountId is provided, use direct query with PK/SK
             if (accountId) {
-                const tableName = this.getTableName(accountId, cloudType);
+                // Look up account's awsAccountId to query the correct table
+                const {awsAccountId, cloudType: resolvedCloudType} =
+                    await this.getAccountAwsDetails(
+                        accountId,
+                        undefined,
+                        cloudType,
+                    );
+
+                const tableName = this.getTableName(
+                    accountId,
+                    resolvedCloudType,
+                    awsAccountId,
+                );
                 const pk = this.generatePK(accountId);
                 const sk = this.generateSK(id);
 
                 console.log(
                     `📊 Querying table: ${tableName}, PK: ${pk}, SK: ${sk}`,
                 );
+                console.log(
+                    `   AWS Account ID: ${awsAccountId || 'admin account'}`,
+                );
 
                 try {
-                    const item = await DynamoDBOperations.getItem(tableName, {
-                        PK: pk,
-                        SK: sk,
-                    });
+                    let item: Record<string, any> | null = null;
+
+                    // Use cross-account access if awsAccountId is available
+                    if (awsAccountId) {
+                        const awsConfig: AccountAwsConfig = {
+                            awsAccountId: awsAccountId,
+                            cloudType: resolvedCloudType,
+                            accountId: accountId,
+                        };
+                        console.log(
+                            `🔑 Using cross-account access to AWS account: ${awsAccountId}`,
+                        );
+                        item = await this.crossAccountService.getItem(
+                            awsConfig,
+                            {
+                                PK: pk,
+                                SK: sk,
+                            },
+                        );
+                    } else {
+                        item = await DynamoDBOperations.getItem(tableName, {
+                            PK: pk,
+                            SK: sk,
+                        });
+                    }
 
                     if (item) {
                         return this.mapItemToPipeline(item);
@@ -227,11 +334,19 @@ export class PipelineCanvasDynamoDBService {
             const pipelineId = uuidv4();
             const now = new Date().toISOString();
 
+            // Look up account's awsAccountId if not provided
+            // This ensures pipelines are ALWAYS saved to the account's specific DynamoDB table
+            const {awsAccountId, cloudType} = await this.getAccountAwsDetails(
+                body.accountId,
+                body.awsAccountId,
+                body.cloudType,
+            );
+
             // Get the correct table based on cloud type and awsAccountId
             const tableName = this.getTableName(
                 body.accountId,
-                body.cloudType,
-                body.awsAccountId,
+                cloudType,
+                awsAccountId,
             );
 
             // PK pattern: ACCOUNT#<ACCOUNT_id> (matching the Core Entities convention)
@@ -267,34 +382,44 @@ export class PipelineCanvasDynamoDBService {
                 yamlContent: body.yamlContent,
                 created_by: body.createdBy,
                 createdBy: body.createdBy,
-                cloud_type: body.cloudType || 'public',
-                cloudType: body.cloudType || 'public',
-                aws_account_id: body.awsAccountId,
-                awsAccountId: body.awsAccountId,
+                cloud_type: cloudType,
+                cloudType: cloudType,
+                aws_account_id: awsAccountId,
+                awsAccountId: awsAccountId,
                 entity_type: 'pipeline_canvas',
             };
 
             console.log(`📦 Saving pipeline to table: ${tableName}`);
             console.log(`   PK: ${pk}`);
             console.log(`   SK: ${sk}`);
-            console.log(`   Cloud Type: ${body.cloudType || 'public'}`);
+            console.log(`   Cloud Type: ${cloudType}`);
             console.log(
-                `   AWS Account ID: ${body.awsAccountId || 'default (local)'}`,
+                `   AWS Account ID: ${
+                    awsAccountId || 'not available - using admin table'
+                }`,
             );
 
-            // Use cross-account DynamoDB if awsAccountId is provided
-            if (body.awsAccountId) {
+            // Use cross-account DynamoDB if awsAccountId is available
+            // This ensures pipelines are saved to the account's AWS account, not the admin account
+            if (awsAccountId) {
                 const awsConfig: AccountAwsConfig = {
-                    awsAccountId: body.awsAccountId,
-                    cloudType: body.cloudType || 'public',
+                    awsAccountId: awsAccountId,
+                    cloudType: cloudType,
                     accountId: body.accountId,
                 };
                 console.log(
-                    `🔑 Using cross-account access to AWS account: ${body.awsAccountId}`,
+                    `🔑 Using cross-account access to AWS account: ${awsAccountId}`,
+                );
+                console.log(
+                    `📦 Saving to account-specific table: ${tableName} in AWS account ${awsAccountId}`,
                 );
                 await this.crossAccountService.putItem(awsConfig, item);
             } else {
-                // Use default DynamoDB (same AWS account)
+                // Fallback: Use default DynamoDB (admin AWS account)
+                // This should only happen if the account doesn't have awsAccountId set
+                console.warn(
+                    `⚠️ No awsAccountId found for account ${body.accountId} - saving to admin table: ${tableName}`,
+                );
                 await DynamoDBOperations.putItem(tableName, item);
             }
 
@@ -314,8 +439,8 @@ export class PipelineCanvasDynamoDBService {
                 enterpriseName: body.enterpriseName,
                 yamlContent: body.yamlContent,
                 createdBy: body.createdBy,
-                cloudType: body.cloudType || 'public',
-                awsAccountId: body.awsAccountId,
+                cloudType: cloudType,
+                awsAccountId: awsAccountId,
             };
 
             console.log('✅ Created pipeline canvas:', created);
@@ -331,22 +456,62 @@ export class PipelineCanvasDynamoDBService {
         id: string,
         accountId?: string,
         cloudType?: 'public' | 'private',
-    ): Promise<{item: any; tableName: string} | null> {
+    ): Promise<{
+        item: any;
+        tableName: string;
+        awsAccountId?: string;
+        resolvedCloudType: 'public' | 'private';
+    } | null> {
         try {
             // If accountId is provided, try direct get first
             if (accountId) {
-                const tableName = this.getTableName(accountId, cloudType);
+                // Look up account's awsAccountId
+                const {awsAccountId, cloudType: resolvedCloudType} =
+                    await this.getAccountAwsDetails(
+                        accountId,
+                        undefined,
+                        cloudType,
+                    );
+
+                const tableName = this.getTableName(
+                    accountId,
+                    resolvedCloudType,
+                    awsAccountId,
+                );
                 const pk = this.generatePK(accountId);
                 const sk = this.generateSK(id);
 
                 try {
-                    const item = await DynamoDBOperations.getItem(tableName, {
-                        PK: pk,
-                        SK: sk,
-                    });
+                    let item: Record<string, any> | null = null;
+
+                    // Use cross-account access if awsAccountId is available
+                    if (awsAccountId) {
+                        const awsConfig: AccountAwsConfig = {
+                            awsAccountId: awsAccountId,
+                            cloudType: resolvedCloudType,
+                            accountId: accountId,
+                        };
+                        item = await this.crossAccountService.getItem(
+                            awsConfig,
+                            {
+                                PK: pk,
+                                SK: sk,
+                            },
+                        );
+                    } else {
+                        item = await DynamoDBOperations.getItem(tableName, {
+                            PK: pk,
+                            SK: sk,
+                        });
+                    }
 
                     if (item) {
-                        return {item, tableName};
+                        return {
+                            item,
+                            tableName,
+                            awsAccountId,
+                            resolvedCloudType,
+                        };
                     }
                 } catch (err) {
                     console.log(`⚠️ Direct get failed, trying scan`);
@@ -367,7 +532,12 @@ export class PipelineCanvasDynamoDBService {
                 return null;
             }
 
-            return {item: items[0], tableName: this.defaultTableName};
+            return {
+                item: items[0],
+                tableName: this.defaultTableName,
+                awsAccountId: undefined,
+                resolvedCloudType: 'public',
+            };
         } catch (error) {
             console.error(`Error getting raw item for pipeline ${id}:`, error);
             throw error;
@@ -392,13 +562,14 @@ export class PipelineCanvasDynamoDBService {
                 return null;
             }
 
-            const {item: existingItem, tableName} = result;
+            const {
+                item: existingItem,
+                tableName,
+                awsAccountId,
+                resolvedCloudType,
+            } = result;
             const accountId = existingItem.account_id || existingItem.accountId;
-            const cloudType =
-                body.cloudType ||
-                existingItem.cloud_type ||
-                existingItem.cloudType ||
-                'public';
+            const cloudType = resolvedCloudType;
 
             if (!accountId) {
                 console.error(`❌ Missing accountId for pipeline ${id}`);
@@ -409,10 +580,12 @@ export class PipelineCanvasDynamoDBService {
             // SK pattern: PIPELINE#<pipelineId>
             const pk = this.generatePK(accountId);
             const sk = this.generateSK(id);
-            const targetTable = this.getTableName(accountId, cloudType);
 
-            console.log(`📝 Updating in table: ${targetTable}`);
+            console.log(`📝 Updating in table: ${tableName}`);
             console.log(`   PK: ${pk}, SK: ${sk}`);
+            console.log(
+                `   AWS Account ID: ${awsAccountId || 'admin account'}`,
+            );
 
             const now = new Date().toISOString();
 
@@ -462,16 +635,37 @@ export class PipelineCanvasDynamoDBService {
 
             const updateExpression = 'SET ' + updateParts.join(', ');
 
-            await DynamoDBOperations.updateItem(
-                targetTable,
-                {
-                    PK: pk,
-                    SK: sk,
-                },
-                updateExpression,
-                expressionAttributeValues,
-                expressionAttributeNames,
-            );
+            // Use cross-account access if awsAccountId is available
+            if (awsAccountId) {
+                const awsConfig: AccountAwsConfig = {
+                    awsAccountId: awsAccountId,
+                    cloudType: cloudType,
+                    accountId: accountId,
+                };
+                console.log(
+                    `🔑 Using cross-account access to AWS account: ${awsAccountId}`,
+                );
+                await this.crossAccountService.updateItem(
+                    awsConfig,
+                    {PK: pk, SK: sk},
+                    updateExpression,
+                    expressionAttributeValues,
+                    Object.keys(expressionAttributeNames).length > 0
+                        ? expressionAttributeNames
+                        : undefined,
+                );
+            } else {
+                await DynamoDBOperations.updateItem(
+                    tableName,
+                    {
+                        PK: pk,
+                        SK: sk,
+                    },
+                    updateExpression,
+                    expressionAttributeValues,
+                    expressionAttributeNames,
+                );
+            }
 
             console.log(`✅ Pipeline ${id} updated successfully`);
             return await this.get(id, accountId, cloudType);
@@ -496,14 +690,14 @@ export class PipelineCanvasDynamoDBService {
                 return false;
             }
 
-            const {item: existingItem} = result;
+            const {
+                item: existingItem,
+                tableName,
+                awsAccountId,
+                resolvedCloudType,
+            } = result;
             const existingAccountId =
                 accountId || existingItem.account_id || existingItem.accountId;
-            const existingCloudType =
-                cloudType ||
-                existingItem.cloud_type ||
-                existingItem.cloudType ||
-                'public';
 
             if (!existingAccountId) {
                 console.error(`❌ Missing accountId for pipeline ${id}`);
@@ -514,18 +708,33 @@ export class PipelineCanvasDynamoDBService {
             // SK pattern: PIPELINE#<pipelineId>
             const pk = this.generatePK(existingAccountId);
             const sk = this.generateSK(id);
-            const targetTable = this.getTableName(
-                existingAccountId,
-                existingCloudType,
+
+            console.log(`🗑️ Deleting from table: ${tableName}`);
+            console.log(`   PK: ${pk}, SK: ${sk}`);
+            console.log(
+                `   AWS Account ID: ${awsAccountId || 'admin account'}`,
             );
 
-            console.log(`🗑️ Deleting from table: ${targetTable}`);
-            console.log(`   PK: ${pk}, SK: ${sk}`);
-
-            await DynamoDBOperations.deleteItem(targetTable, {
-                PK: pk,
-                SK: sk,
-            });
+            // Use cross-account access if awsAccountId is available
+            if (awsAccountId) {
+                const awsConfig: AccountAwsConfig = {
+                    awsAccountId: awsAccountId,
+                    cloudType: resolvedCloudType,
+                    accountId: existingAccountId,
+                };
+                console.log(
+                    `🔑 Using cross-account access to AWS account: ${awsAccountId}`,
+                );
+                await this.crossAccountService.deleteItem(awsConfig, {
+                    PK: pk,
+                    SK: sk,
+                });
+            } else {
+                await DynamoDBOperations.deleteItem(tableName, {
+                    PK: pk,
+                    SK: sk,
+                });
+            }
 
             console.log(`✅ Successfully deleted pipeline canvas ${id}`);
             return true;
@@ -543,8 +752,20 @@ export class PipelineCanvasDynamoDBService {
         cloudType?: 'public' | 'private',
     ): Promise<PipelineCanvas[]> {
         try {
+            // Look up account's awsAccountId to query the correct table
+            const {awsAccountId, cloudType: resolvedCloudType} =
+                await this.getAccountAwsDetails(
+                    accountId,
+                    undefined, // No awsAccountId provided, will be looked up
+                    cloudType,
+                );
+
             // Get the correct table based on cloud type
-            const tableName = this.getTableName(accountId, cloudType);
+            const tableName = this.getTableName(
+                accountId,
+                resolvedCloudType,
+                awsAccountId,
+            );
 
             // PK pattern: ACCOUNT#<ACCOUNT_id>
             const pk = this.generatePK(accountId);
@@ -552,16 +773,44 @@ export class PipelineCanvasDynamoDBService {
             console.log(
                 `🔍 Querying pipelines from table: ${tableName}, PK: ${pk}`,
             );
-
-            // Query by PK to get all pipelines for this account
-            const items = await DynamoDBOperations.queryItems(
-                tableName,
-                'PK = :pk AND begins_with(SK, :skPrefix)',
-                {
-                    ':pk': pk,
-                    ':skPrefix': 'PIPELINE#',
-                },
+            console.log(
+                `   AWS Account ID: ${awsAccountId || 'admin account'}`,
             );
+
+            let items: Record<string, any>[];
+
+            // Use cross-account access if awsAccountId is available
+            if (awsAccountId) {
+                const awsConfig: AccountAwsConfig = {
+                    awsAccountId: awsAccountId,
+                    cloudType: resolvedCloudType,
+                    accountId: accountId,
+                };
+                console.log(
+                    `🔑 Using cross-account access to AWS account: ${awsAccountId}`,
+                );
+                items = await this.crossAccountService.queryItems(
+                    awsConfig,
+                    'PK = :pk AND begins_with(SK, :skPrefix)',
+                    {
+                        ':pk': pk,
+                        ':skPrefix': 'PIPELINE#',
+                    },
+                );
+            } else {
+                // Fallback to admin account DynamoDB
+                console.warn(
+                    `⚠️ No awsAccountId found for account ${accountId} - querying admin table`,
+                );
+                items = await DynamoDBOperations.queryItems(
+                    tableName,
+                    'PK = :pk AND begins_with(SK, :skPrefix)',
+                    {
+                        ':pk': pk,
+                        ':skPrefix': 'PIPELINE#',
+                    },
+                );
+            }
 
             console.log(
                 `📊 Found ${items.length} pipelines for account ${accountName}`,
