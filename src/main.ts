@@ -60,7 +60,7 @@ import {JWTService} from './services/jwt';
 import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
-import {CognitoAuthService} from './services/cognitoAuth';
+import {CognitoAuthService, CognitoAuthResult} from './services/cognitoAuth';
 
 // Cognito auth service instance
 // If IMS_API_URL is configured, use the real CognitoAuthService
@@ -69,18 +69,21 @@ const cognitoAuth:
     | CognitoAuthService
     | {
           isAvailable: () => boolean;
-          login: () => Promise<{error: string}>;
-          completeNewPasswordChallenge: () => Promise<{error: string}>;
+          login: () => Promise<CognitoAuthResult>;
+          completeNewPasswordChallenge: () => Promise<CognitoAuthResult>;
       } = process.env.IMS_API_URL
     ? new CognitoAuthService()
     : {
           isAvailable: () => false,
-          login: async () => ({
+          login: async (): Promise<CognitoAuthResult> => ({
+              success: false,
               error: 'CognitoAuthService not available - set IMS_API_URL to enable',
           }),
-          completeNewPasswordChallenge: async () => ({
-              error: 'CognitoAuthService not available - set IMS_API_URL to enable',
-          }),
+          completeNewPasswordChallenge:
+              async (): Promise<CognitoAuthResult> => ({
+                  success: false,
+                  error: 'CognitoAuthService not available - set IMS_API_URL to enable',
+              }),
       };
 
 // Note: dotenv.config() is called at the top of the file before imports
@@ -243,7 +246,7 @@ class AuthController {
             // Try Cognito authentication first (if IMS_API_URL is configured)
             if (cognitoAuth.isAvailable()) {
                 console.log('Attempting Cognito authentication via IMS...');
-                const cognitoResult: any = await cognitoAuth.login(
+                const cognitoResult = await cognitoAuth.login(
                     loginId,
                     password,
                 );
@@ -397,7 +400,7 @@ class AuthController {
                 });
             }
 
-            const result: any = await cognitoAuth.completeNewPasswordChallenge(
+            const result = await cognitoAuth.completeNewPasswordChallenge(
                 loginId,
                 newPassword,
                 session,

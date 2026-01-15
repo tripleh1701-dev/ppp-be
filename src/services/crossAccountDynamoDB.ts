@@ -47,11 +47,15 @@ const credentialsCache: Map<
     {credentials: CrossAccountCredentials; client: DynamoDBClient}
 > = new Map();
 
+// Track accounts that are in local dev mode (can't assume role)
+const localDevModeAccounts: Set<string> = new Set();
+
 export class CrossAccountDynamoDBService {
     private stsClient: STSClient;
     private readonly crossAccountRoleName: string;
     private readonly region: string;
     private readonly assumeRoleDuration: number;
+    private readonly adminTableName: string;
 
     constructor() {
         this.region = process.env.AWS_REGION || 'us-east-1';
@@ -62,6 +66,10 @@ export class CrossAccountDynamoDBService {
             process.env.ASSUME_ROLE_DURATION || '3600',
             10,
         );
+        this.adminTableName =
+            process.env.DYNAMODB_TABLE ||
+            process.env.ACCOUNT_REGISTRY_TABLE_NAME ||
+            'systiva-admin-dev';
 
         // Initialize STS client with base credentials (from env or IAM role)
         this.stsClient = new STSClient({
@@ -71,16 +79,35 @@ export class CrossAccountDynamoDBService {
         console.log('🔧 CrossAccountDynamoDBService initialized');
         console.log(`   Cross-account role name: ${this.crossAccountRoleName}`);
         console.log(`   Region: ${this.region}`);
+        console.log(
+            `   Admin table (for local dev fallback): ${this.adminTableName}`,
+        );
     }
 
     /**
      * Get the DynamoDB table name based on cloud type
+     * In local dev mode (when AssumeRole fails), uses the central admin table
      */
     getTableName(accountId: string, cloudType: 'public' | 'private'): string {
+        // In local dev mode, use central admin table
+        if (localDevModeAccounts.has(accountId)) {
+            console.log(
+                `📦 Local dev mode: Using central admin table ${this.adminTableName} for account ${accountId}`,
+            );
+            return this.adminTableName;
+        }
+
         if (cloudType === 'private') {
             return `account-${accountId}-admin-private-dev`;
         }
         return 'account-admin-public-dev';
+    }
+
+    /**
+     * Check if an account is in local dev mode
+     */
+    isLocalDevMode(accountId: string): boolean {
+        return localDevModeAccounts.has(accountId);
     }
 
     /**
@@ -155,25 +182,45 @@ export class CrossAccountDynamoDBService {
             return cached.client;
         }
 
-        // Assume role and create new client
-        const credentials = await this.assumeAccountRole(
-            config.awsAccountId,
-            config.accountId,
-        );
+        try {
+            // Assume role and create new client
+            const credentials = await this.assumeAccountRole(
+                config.awsAccountId,
+                config.accountId,
+            );
 
-        const client = new DynamoDBClient({
-            region: config.region || this.region,
-            credentials: {
-                accessKeyId: credentials.accessKeyId,
-                secretAccessKey: credentials.secretAccessKey,
-                sessionToken: credentials.sessionToken,
-            },
-        });
+            const client = new DynamoDBClient({
+                region: config.region || this.region,
+                credentials: {
+                    accessKeyId: credentials.accessKeyId,
+                    secretAccessKey: credentials.secretAccessKey,
+                    sessionToken: credentials.sessionToken,
+                },
+            });
 
-        // Cache the credentials and client
-        credentialsCache.set(cacheKey, {credentials, client});
+            // Cache the credentials and client
+            credentialsCache.set(cacheKey, {credentials, client});
 
-        return client;
+            return client;
+        } catch (error: any) {
+            // Fallback for local development with root credentials
+            // Root accounts cannot assume roles, so use direct credentials
+            if (
+                error.message?.includes('root accounts') ||
+                error.Code === 'AccessDenied'
+            ) {
+                console.warn(
+                    `⚠️ AssumeRole failed for account ${config.accountId}, using direct credentials and central table (local dev mode)`,
+                );
+                // Mark this account as local dev mode so getTableName uses central table
+                localDevModeAccounts.add(config.accountId);
+                const directClient = new DynamoDBClient({
+                    region: config.region || this.region,
+                });
+                return directClient;
+            }
+            throw error;
+        }
     }
 
     /**

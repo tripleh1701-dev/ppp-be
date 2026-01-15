@@ -1,14 +1,30 @@
 PORT=4000
 NODE_ENV=development
 STORAGE_DIR=./data
-STORAGE_MODE=filesystem # options: filesystem | postgres | dynamodb
+STORAGE_MODE=dynamodb # options: filesystem | postgres | dynamodb
+LOG_LEVEL=dev
+ALLOW_ORIGIN=http://localhost:3000
+
+# AWS Configuration
+AWS_REGION=us-east-1
+
+# DynamoDB Tables
+DYNAMODB_TABLE=systiva-admin-dev
+ACCOUNT_REGISTRY_TABLE_NAME=systiva-admin-dev
+DYNAMODB_ENTERPRISE_TABLE=systiva-admin-dev
+
+# Cross-Account Access Configuration (for pipeline canvas in account DynamoDB)
+# Role name format: {workspace}-CrossAccountAccountRole
+# This is auto-configured in AWS environment via IaC
+CROSS_ACCOUNT_ROLE_NAME=dev-CrossAccountAccountRole
+WORKSPACE=dev
+
+# PostgreSQL (if using postgres storage mode)
 PGHOST=127.0.0.1
 PGPORT=5432
 PGUSER=postgres
 PGPASSWORD=postgres
 PGDATABASE=postgres
-LOG_LEVEL=dev
-ALLOW_ORIGIN=http://localhost:3000
 
 # Copy the above into a local .env file for development.
 
