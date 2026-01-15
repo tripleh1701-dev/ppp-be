@@ -224,6 +224,46 @@ export class CrossAccountDynamoDBService {
     }
 
     /**
+     * Convert item keys from uppercase (PK/SK) to lowercase (pk/sk) for private tables
+     * Private tables use lowercase pk/sk, public tables use uppercase PK/SK
+     */
+    private normalizeItemKeys(
+        item: Record<string, any>,
+        cloudType: 'public' | 'private',
+    ): Record<string, any> {
+        if (cloudType === 'public') {
+            // Public tables use uppercase PK/SK - no conversion needed
+            return item;
+        }
+
+        // Private tables use lowercase pk/sk
+        const normalizedItem: Record<string, any> = {};
+        for (const [key, value] of Object.entries(item)) {
+            if (key === 'PK') {
+                normalizedItem['pk'] = value;
+            } else if (key === 'SK') {
+                normalizedItem['sk'] = value;
+            } else {
+                normalizedItem[key] = value;
+            }
+        }
+        return normalizedItem;
+    }
+
+    /**
+     * Convert key object from uppercase to lowercase for private tables
+     */
+    private normalizeKeyNames(
+        key: {PK: string; SK: string},
+        cloudType: 'public' | 'private',
+    ): Record<string, string> {
+        if (cloudType === 'public') {
+            return {PK: key.PK, SK: key.SK};
+        }
+        return {pk: key.PK, sk: key.SK};
+    }
+
+    /**
      * Put item in account-specific DynamoDB table
      */
     async putItem(
@@ -233,13 +273,23 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
+        // Normalize key names based on table type (private uses lowercase pk/sk)
+        const normalizedItem = this.normalizeItemKeys(item, config.cloudType);
+
         console.log(
             `📦 PutItem to ${tableName} in AWS account ${config.awsAccountId}`,
+        );
+        console.log(
+            `   Key format: ${
+                config.cloudType === 'private'
+                    ? 'lowercase (pk/sk)'
+                    : 'uppercase (PK/SK)'
+            }`,
         );
 
         const command = new PutItemCommand({
             TableName: tableName,
-            Item: marshall(item, {removeUndefinedValues: true}),
+            Item: marshall(normalizedItem, {removeUndefinedValues: true}),
         });
 
         await client.send(command);
@@ -255,13 +305,16 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
+        // Normalize key names based on table type
+        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+
         console.log(
             `🔍 GetItem from ${tableName} in AWS account ${config.awsAccountId}`,
         );
 
         const command = new GetItemCommand({
             TableName: tableName,
-            Key: marshall(key),
+            Key: marshall(normalizedKey),
         });
 
         const response = await client.send(command);
@@ -284,13 +337,22 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
+        // Normalize key condition expression for private tables (PK -> pk, SK -> sk)
+        let normalizedExpression = keyConditionExpression;
+        if (config.cloudType === 'private') {
+            normalizedExpression = keyConditionExpression
+                .replace(/\bPK\b/g, 'pk')
+                .replace(/\bSK\b/g, 'sk');
+        }
+
         console.log(
             `🔍 Query ${tableName} in AWS account ${config.awsAccountId}`,
         );
+        console.log(`   Key condition: ${normalizedExpression}`);
 
         const command = new QueryCommand({
             TableName: tableName,
-            KeyConditionExpression: keyConditionExpression,
+            KeyConditionExpression: normalizedExpression,
             ExpressionAttributeValues: marshall(expressionAttributeValues),
         });
 
@@ -312,13 +374,16 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
+        // Normalize key names based on table type
+        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+
         console.log(
             `📝 UpdateItem in ${tableName} in AWS account ${config.awsAccountId}`,
         );
 
         const command = new UpdateItemCommand({
             TableName: tableName,
-            Key: marshall(key),
+            Key: marshall(normalizedKey),
             UpdateExpression: updateExpression,
             ExpressionAttributeValues: marshall(expressionAttributeValues),
             ExpressionAttributeNames: expressionAttributeNames,
@@ -337,13 +402,16 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
+        // Normalize key names based on table type
+        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+
         console.log(
             `🗑️ DeleteItem from ${tableName} in AWS account ${config.awsAccountId}`,
         );
 
         const command = new DeleteItemCommand({
             TableName: tableName,
-            Key: marshall(key),
+            Key: marshall(normalizedKey),
         });
 
         await client.send(command);
