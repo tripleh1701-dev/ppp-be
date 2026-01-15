@@ -227,16 +227,17 @@ export class CrossAccountDynamoDBService {
      * Convert item keys from uppercase (PK/SK) to lowercase (pk/sk) for private tables
      * Private tables use lowercase pk/sk, public tables use uppercase PK/SK
      */
+    /**
+     * Normalize item keys from uppercase (PK/SK) to lowercase (pk/sk)
+     * ALL account-specific tables (both public and private) use lowercase pk/sk
+     * @param cloudType - kept for API compatibility, but not used (all tables use lowercase)
+     */
     private normalizeItemKeys(
         item: Record<string, any>,
-        cloudType: 'public' | 'private',
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        _cloudType: 'public' | 'private',
     ): Record<string, any> {
-        if (cloudType === 'public') {
-            // Public tables use uppercase PK/SK - no conversion needed
-            return item;
-        }
-
-        // Private tables use lowercase pk/sk
+        // All account-specific tables use lowercase pk/sk
         const normalizedItem: Record<string, any> = {};
         for (const [key, value] of Object.entries(item)) {
             if (key === 'PK') {
@@ -251,15 +252,16 @@ export class CrossAccountDynamoDBService {
     }
 
     /**
-     * Convert key object from uppercase to lowercase for private tables
+     * Convert key object from uppercase to lowercase
+     * ALL account-specific tables (both public and private) use lowercase pk/sk
+     * @param cloudType - kept for API compatibility, but not used (all tables use lowercase)
      */
     private normalizeKeyNames(
         key: {PK: string; SK: string},
-        cloudType: 'public' | 'private',
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        _cloudType: 'public' | 'private',
     ): Record<string, string> {
-        if (cloudType === 'public') {
-            return {PK: key.PK, SK: key.SK};
-        }
+        // All account-specific tables use lowercase pk/sk
         return {pk: key.PK, sk: key.SK};
     }
 
@@ -273,17 +275,22 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
-        // Normalize key names based on table type (private uses lowercase pk/sk)
-        const normalizedItem = this.normalizeItemKeys(item, config.cloudType);
+        // Check if we're in local dev mode (using admin table)
+        const isLocalDev = this.isLocalDevMode(config.accountId);
+
+        // Normalize key names only for account-specific tables (not admin table)
+        const normalizedItem = isLocalDev
+            ? item // Admin table uses uppercase PK/SK
+            : this.normalizeItemKeys(item, config.cloudType);
 
         console.log(
             `📦 PutItem to ${tableName} in AWS account ${config.awsAccountId}`,
         );
         console.log(
             `   Key format: ${
-                config.cloudType === 'private'
-                    ? 'lowercase (pk/sk)'
-                    : 'uppercase (PK/SK)'
+                isLocalDev
+                    ? 'uppercase (PK/SK) - admin table'
+                    : 'lowercase (pk/sk) - account table'
             }`,
         );
 
@@ -305,8 +312,13 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
-        // Normalize key names based on table type
-        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+        // Check if we're in local dev mode (using admin table)
+        const isLocalDev = this.isLocalDevMode(config.accountId);
+
+        // Normalize key names only for account-specific tables (not admin table)
+        const normalizedKey = isLocalDev
+            ? key // Admin table uses uppercase PK/SK
+            : this.normalizeKeyNames(key, config.cloudType);
 
         console.log(
             `🔍 GetItem from ${tableName} in AWS account ${config.awsAccountId}`,
@@ -337,13 +349,18 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
-        // Normalize key condition expression for private tables (PK -> pk, SK -> sk)
+        // Check if we're in local dev mode (using admin table)
+        // Admin table uses uppercase PK/SK, account tables use lowercase pk/sk
+        const isLocalDev = this.isLocalDevMode(config.accountId);
+
         let normalizedExpression = keyConditionExpression;
-        if (config.cloudType === 'private') {
+        if (!isLocalDev) {
+            // Account-specific tables use lowercase pk/sk
             normalizedExpression = keyConditionExpression
                 .replace(/\bPK\b/g, 'pk')
                 .replace(/\bSK\b/g, 'sk');
         }
+        // If local dev mode, use the original expression with uppercase PK/SK
 
         console.log(
             `🔍 Query ${tableName} in AWS account ${config.awsAccountId}`,
@@ -374,8 +391,13 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
-        // Normalize key names based on table type
-        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+        // Check if we're in local dev mode (using admin table)
+        const isLocalDev = this.isLocalDevMode(config.accountId);
+
+        // Normalize key names only for account-specific tables (not admin table)
+        const normalizedKey = isLocalDev
+            ? key // Admin table uses uppercase PK/SK
+            : this.normalizeKeyNames(key, config.cloudType);
 
         console.log(
             `📝 UpdateItem in ${tableName} in AWS account ${config.awsAccountId}`,
@@ -402,8 +424,13 @@ export class CrossAccountDynamoDBService {
         const client = await this.getAccountDynamoDBClient(config);
         const tableName = this.getTableName(config.accountId, config.cloudType);
 
-        // Normalize key names based on table type
-        const normalizedKey = this.normalizeKeyNames(key, config.cloudType);
+        // Check if we're in local dev mode (using admin table)
+        const isLocalDev = this.isLocalDevMode(config.accountId);
+
+        // Normalize key names only for account-specific tables (not admin table)
+        const normalizedKey = isLocalDev
+            ? key // Admin table uses uppercase PK/SK
+            : this.normalizeKeyNames(key, config.cloudType);
 
         console.log(
             `🗑️ DeleteItem from ${tableName} in AWS account ${config.awsAccountId}`,

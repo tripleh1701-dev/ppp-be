@@ -61,6 +61,7 @@ import {safeConsoleError} from './utils/sanitizeError';
 import axios from 'axios';
 import {GitHubOAuthService} from './services/githubOAuth';
 import {CognitoAuthService, CognitoAuthResult} from './services/cognitoAuth';
+import {CredentialsDynamoDBService} from './services/credentials-dynamodb';
 
 // Cognito auth service instance
 // If IMS_API_URL is configured, use the real CognitoAuthService
@@ -3842,6 +3843,40 @@ class BusinessUnitsController {
     async remove(@Param('id') id: string) {
         await businessUnits.remove(Number(id));
         return {};
+    }
+}
+
+// Entities Controller - Provides /api/entities endpoint for workstream dropdowns
+@Controller('api/entities')
+class EntitiesController {
+    @Get()
+    async list(
+        @Query('accountId') accountId?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+    ) {
+        // Delegate to business units entities endpoint
+        const entities = await businessUnits.listEntities(
+            accountId,
+            enterpriseId,
+        );
+        // Transform to match expected format
+        return entities.map((entity: string) => ({
+            id: entity,
+            name: entity,
+            description: `${entity} entity`,
+        }));
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        // For now, just return the entity - actual creation happens through account licenses
+        // Entities are derived from account licenses, so we just return the provided data
+        return {
+            id: body.name,
+            name: body.name,
+            description: `${body.name} entity`,
+        };
     }
 }
 
@@ -11742,6 +11777,342 @@ class GlobalSettingsController {
     }
 }
 
+// Credentials service instance
+const credentialsService = new CredentialsDynamoDBService();
+
+/**
+ * Credentials Controller
+ * CRUD operations for credentials management
+ * PK/SK Pattern: ACCOUNT#<accountId> / CREDENTIAL#<credentialId>
+ */
+@Controller('api/credentials')
+class CredentialsController {
+    @Get()
+    async list(
+        @Query('accountId') accountId?: string,
+        @Query('accountName') accountName?: string,
+        @Query('enterpriseId') enterpriseId?: string,
+        @Query('enterpriseName') enterpriseName?: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
+        @Query('awsAccountId') awsAccountId?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        console.log(
+            `📋 GET /api/credentials - accountId: ${accountId}, enterpriseId: ${enterpriseId}, cloudType: ${cloudType}`,
+        );
+
+        try {
+            const credentials = await credentialsService.list({
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                cloudType,
+                awsAccountId,
+            });
+
+            console.log(`✅ Found ${credentials.length} credentials`);
+            return credentials;
+        } catch (error: any) {
+            console.error('❌ Error listing credentials:', error);
+            return {error: error.message || 'Failed to list credentials'};
+        }
+    }
+
+    @Get(':id')
+    async get(
+        @Param('id') id: string,
+        @Query('accountId') accountId: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
+        @Query('awsAccountId') awsAccountId?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        console.log(
+            `🔍 GET /api/credentials/${id} - accountId: ${accountId}, cloudType: ${cloudType}`,
+        );
+
+        try {
+            const credential = await credentialsService.get(
+                id,
+                accountId,
+                cloudType,
+                awsAccountId,
+            );
+
+            if (!credential) {
+                return {error: 'Credential not found'};
+            }
+
+            return credential;
+        } catch (error: any) {
+            console.error('❌ Error getting credential:', error);
+            return {error: error.message || 'Failed to get credential'};
+        }
+    }
+
+    @Post()
+    async create(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        const {
+            credentialName,
+            description,
+            entity,
+            product,
+            service,
+            connector,
+            connectorIconName,
+            connectors,
+            authenticationType,
+            scope,
+            expiry,
+            status,
+            accountId,
+            accountName,
+            enterpriseId,
+            enterpriseName,
+            createdBy,
+            cloudType,
+            awsAccountId,
+        } = body;
+
+        if (!credentialName) {
+            return {error: 'credentialName is required'};
+        }
+
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        console.log(
+            `📦 POST /api/credentials - credentialName: ${credentialName}, accountId: ${accountId}, product: ${product}, service: ${service}, cloudType: ${cloudType}`,
+        );
+
+        try {
+            // Check for duplicate credential name (in account-specific table)
+            const existing = await credentialsService.getByName(
+                credentialName,
+                accountId,
+                enterpriseId,
+                cloudType,
+                awsAccountId,
+            );
+
+            if (existing) {
+                return {
+                    error: `Credential with name "${credentialName}" already exists`,
+                };
+            }
+
+            const credential = await credentialsService.create({
+                credentialName,
+                description,
+                entity,
+                product,
+                service,
+                connector,
+                connectorIconName,
+                connectors,
+                authenticationType,
+                scope,
+                expiry,
+                status,
+                accountId,
+                accountName,
+                enterpriseId,
+                enterpriseName,
+                createdBy,
+                cloudType,
+                awsAccountId,
+            });
+
+            console.log(
+                `✅ Credential created in account DynamoDB: ${credential.id}`,
+            );
+            return credential;
+        } catch (error: any) {
+            console.error('❌ Error creating credential:', error);
+            return {error: error.message || 'Failed to create credential'};
+        }
+    }
+
+    @Put(':id')
+    async update(@Param('id') id: string, @Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        const {
+            credentialName,
+            description,
+            entity,
+            product,
+            service,
+            connector,
+            connectorIconName,
+            connectors,
+            authenticationType,
+            scope,
+            expiry,
+            status,
+            accountId,
+            enterpriseId,
+            updatedBy,
+            cloudType,
+            awsAccountId,
+        } = body;
+
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        console.log(
+            `📝 PUT /api/credentials/${id} - accountId: ${accountId}, product: ${product}, service: ${service}, cloudType: ${cloudType}`,
+        );
+
+        try {
+            const credential = await credentialsService.update(id, accountId, {
+                credentialName,
+                description,
+                entity,
+                product,
+                service,
+                connector,
+                connectorIconName,
+                connectors,
+                authenticationType,
+                scope,
+                expiry,
+                status,
+                updatedBy,
+                accountId,
+                enterpriseId,
+                cloudType,
+                awsAccountId,
+            });
+
+            if (!credential) {
+                return {error: 'Credential not found'};
+            }
+
+            console.log(`✅ Credential updated in account DynamoDB: ${id}`);
+            return credential;
+        } catch (error: any) {
+            console.error('❌ Error updating credential:', error);
+            return {error: error.message || 'Failed to update credential'};
+        }
+    }
+
+    @Delete(':id')
+    async delete(
+        @Param('id') id: string,
+        @Query('accountId') accountId: string,
+        @Query('cloudType') cloudType?: 'public' | 'private',
+        @Query('awsAccountId') awsAccountId?: string,
+    ) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        if (!accountId) {
+            return {error: 'accountId is required'};
+        }
+
+        console.log(
+            `🗑️ DELETE /api/credentials/${id} - accountId: ${accountId}, cloudType: ${cloudType}`,
+        );
+
+        try {
+            const success = await credentialsService.delete(
+                id,
+                accountId,
+                cloudType,
+                awsAccountId,
+            );
+
+            if (!success) {
+                return {error: 'Failed to delete credential'};
+            }
+
+            console.log(`✅ Credential deleted from account DynamoDB: ${id}`);
+            return {success: true, message: 'Credential deleted successfully'};
+        } catch (error: any) {
+            console.error('❌ Error deleting credential:', error);
+            return {error: error.message || 'Failed to delete credential'};
+        }
+    }
+
+    @Post('bulk')
+    async bulkCreate(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        const {credentials} = body;
+
+        if (!credentials || !Array.isArray(credentials)) {
+            return {error: 'credentials array is required'};
+        }
+
+        console.log(
+            `📦 POST /api/credentials/bulk - ${credentials.length} items`,
+        );
+
+        try {
+            const created = await credentialsService.bulkCreate(credentials);
+            console.log(`✅ Bulk created ${created.length} credentials`);
+            return {created: created.length, credentials: created};
+        } catch (error: any) {
+            console.error('❌ Error bulk creating credentials:', error);
+            return {
+                error: error.message || 'Failed to bulk create credentials',
+            };
+        }
+    }
+
+    @Delete('bulk')
+    async bulkDelete(@Body() body: any) {
+        if (storageMode !== 'dynamodb') {
+            return {error: 'Credentials only available in DynamoDB mode'};
+        }
+
+        const {items} = body;
+
+        if (!items || !Array.isArray(items)) {
+            return {
+                error: 'items array is required (each with id and accountId)',
+            };
+        }
+
+        console.log(`🗑️ DELETE /api/credentials/bulk - ${items.length} items`);
+
+        try {
+            const result = await credentialsService.bulkDelete(items);
+            console.log(
+                `✅ Bulk delete: ${result.deleted} deleted, ${result.failed} failed`,
+            );
+            return result;
+        } catch (error: any) {
+            console.error('❌ Error bulk deleting credentials:', error);
+            return {
+                error: error.message || 'Failed to bulk delete credentials',
+            };
+        }
+    }
+}
+
 @Module({
     controllers: [
         HealthController,
@@ -11752,6 +12123,7 @@ class GlobalSettingsController {
         AccountsController,
         EnterprisesController,
         BusinessUnitsController,
+        EntitiesController,
         UsersController,
         UserGroupsController,
         RolesController,
@@ -11778,6 +12150,7 @@ class GlobalSettingsController {
         UserManagementController,
         GlobalSettingsController,
         ConnectorsController,
+        CredentialsController,
     ],
 })
 export class AppModule {}
