@@ -85,10 +85,14 @@ export const handler = async (event: any, context: any): Promise<any> => {
         // NestJS expects:    /api/accounts
         let path = event.path || event.rawPath || '';
 
+        console.log('Original Path:', path);
+
         // Remove stage prefix if present (e.g., /prod)
         const stage = event.requestContext?.stage;
         if (stage && path.startsWith(`/${stage}`)) {
+            console.log(`Removing stage prefix: /${stage}`);
             path = path.slice(stage.length + 1);
+            console.log('Path after removing stage:', path);
         }
 
         // Remove /api/v1/app prefix (e.g., /api/v1/app/api/accounts -> /api/accounts)

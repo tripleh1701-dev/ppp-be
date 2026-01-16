@@ -421,7 +421,9 @@ export class CredentialsDynamoDBService {
         cloudType?: 'public' | 'private';
         awsAccountId?: string;
     }): Promise<Credential[]> {
-        console.log(`📋 Listing credentials with params:`, params);
+        console.log(`📋 Listing credentials with params:`, JSON.stringify(params));
+        console.log(`📋 accountId provided: ${!!params.accountId}, value: "${params.accountId}"`);
+        console.log(`📋 enterpriseId provided: ${!!params.enterpriseId}, value: "${params.enterpriseId}"`);
 
         let items: any[] = [];
 
@@ -490,25 +492,29 @@ export class CredentialsDynamoDBService {
         // Filter by enterpriseId if provided
         let filteredItems = items || [];
         if (params.enterpriseId) {
+            console.log(`📋 Filtering by enterpriseId: "${params.enterpriseId}"`);
+            const beforeFilter = filteredItems.length;
             filteredItems = filteredItems.filter(
                 (item: any) =>
                     item.enterprise_id === params.enterpriseId ||
                     item.enterpriseId === params.enterpriseId,
             );
             console.log(
-                `📋 Filtered to ${filteredItems.length} credentials by enterpriseId`,
+                `📋 Filtered from ${beforeFilter} to ${filteredItems.length} credentials by enterpriseId`,
             );
         }
 
         // Filter by enterpriseName if provided
         if (params.enterpriseName) {
+            console.log(`📋 Filtering by enterpriseName: "${params.enterpriseName}"`);
+            const beforeFilter = filteredItems.length;
             filteredItems = filteredItems.filter(
                 (item: any) =>
                     item.enterprise_name === params.enterpriseName ||
                     item.enterpriseName === params.enterpriseName,
             );
             console.log(
-                `📋 Filtered to ${filteredItems.length} credentials by enterpriseName`,
+                `📋 Filtered from ${beforeFilter} to ${filteredItems.length} credentials by enterpriseName`,
             );
         }
 
